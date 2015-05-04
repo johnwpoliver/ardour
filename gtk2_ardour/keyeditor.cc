@@ -33,12 +33,12 @@
 
 #include "pbd/strsplit.h"
 
+#include "ardour/filesystem_paths.h"
 #include "ardour/profile.h"
 
 #include "actions.h"
 #include "keyboard.h"
 #include "keyeditor.h"
-#include "utils.h"
 
 #include "i18n.h"
 
@@ -55,8 +55,7 @@ KeyEditor::KeyEditor ()
 	, unbind_box (BUTTONBOX_END)
 
 {
-	can_bind = false;
-	last_state = 0;
+	last_keyval = 0;
 
 	model = TreeStore::create(columns);
 
@@ -76,9 +75,8 @@ KeyEditor::KeyEditor ()
 	scroller.add (view);
 	scroller.set_policy (Gtk::POLICY_NEVER, Gtk::POLICY_AUTOMATIC);
 
-	add (vpacker);
-
 	vpacker.set_spacing (6);
+	vpacker.set_border_width (12);
 	vpacker.pack_start (scroller);
 
 	if (!ARDOUR::Profile->get_sae()) {
@@ -95,8 +93,18 @@ KeyEditor::KeyEditor ()
 		unbind_button.show ();
 
 	}
+	
+	reset_button.add (reset_label);
+	reset_label.set_markup (string_compose ("<span size=\"large\" weight=\"bold\">%1</span>", _("Reset Bindings to Defaults")));
+				
+	reset_box.pack_start (reset_button, true, false);
+	reset_box.show ();
+	reset_button.show ();
+	reset_label.show ();
+	reset_button.signal_clicked().connect (sigc::mem_fun (*this, &KeyEditor::reset));
+	vpacker.pack_start (reset_box, false, false);
 
-	vpacker.set_border_width (12);
+	add (vpacker);
 
 	view.show ();
 	scroller.show ();
@@ -173,15 +181,16 @@ KeyEditor::action_selected ()
 bool
 KeyEditor::on_key_press_event (GdkEventKey* ev)
 {
-	can_bind = true;
-	last_state = ev->state;
-	return false;
+	if (!ev->is_modifier) {
+		last_keyval = ev->keyval;
+	}
+	return ArdourWindow::on_key_press_event (ev);
 }
 
 bool
 KeyEditor::on_key_release_event (GdkEventKey* ev)
 {
-	if (ARDOUR::Profile->get_sae() || !can_bind || ev->state != last_state) {
+	if (ARDOUR::Profile->get_sae() || last_keyval == 0) {
 		return false;
 	}
 
@@ -194,22 +203,25 @@ KeyEditor::on_key_release_event (GdkEventKey* ev)
 			goto out;
 		}
 
-                Gtkmm2ext::possibly_translate_keyval_to_make_legal_accelerator (ev->keyval);
+		GdkModifierType mod = (GdkModifierType)(Keyboard::RelevantModifierKeyMask & ev->state);
 
+		Gtkmm2ext::possibly_translate_keyval_to_make_legal_accelerator (ev->keyval);
+		Gtkmm2ext::possibly_translate_mod_to_make_legal_accelerator (mod);
 
 		bool result = AccelMap::change_entry (path,
-						      ev->keyval,
-						      ModifierType (Keyboard::RelevantModifierKeyMask & ev->state),
+						      last_keyval,
+						      Gdk::ModifierType(mod),
 						      true);
 
 		if (result) {
 			AccelKey key;
 			(*i)[columns.binding] = ActionManager::get_key_representation (path, key);
+			unbind_button.set_sensitive (true);
 		}
 	}
 
   out:
-	can_bind = false;
+    last_keyval = 0;
 	return true;
 }
 
@@ -249,8 +261,6 @@ KeyEditor::populate ()
 
 		//kinda kludgy way to avoid displaying menu items as mappable
 		if ( parts[1] == _("Main_menu") )
-			continue;
-		if ( parts[1] == _("JACK") )
 			continue;
 		if ( parts[1] == _("redirectmenu") )
 			continue;
@@ -297,4 +307,13 @@ KeyEditor::populate ()
 			row[columns.binding] = (*k);
 		}
 	}
+}
+
+void
+KeyEditor::reset ()
+{
+	Keyboard::the_keyboard().reset_bindings ();
+	populate ();
+	view.get_selection()->unselect_all ();
+	populate ();
 }

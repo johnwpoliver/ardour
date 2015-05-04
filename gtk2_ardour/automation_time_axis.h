@@ -30,10 +30,11 @@
 #include "ardour/automatable.h"
 #include "ardour/automation_list.h"
 
-#include "canvas.h"
+#include "canvas/rectangle.h"
+
 #include "time_axis_view.h"
-#include "simplerect.h"
 #include "automation_controller.h"
+#include "ardour_button.h"
 
 namespace ARDOUR {
 	class Session;
@@ -50,7 +51,7 @@ class Selection;
 class Selectable;
 class AutomationStreamView;
 class AutomationController;
-
+class ItemCounts;
 
 class AutomationTimeAxisView : public TimeAxisView {
   public:
@@ -68,11 +69,11 @@ class AutomationTimeAxisView : public TimeAxisView {
 
 	~AutomationTimeAxisView();
 
-	virtual void set_height (uint32_t);
-	void set_samples_per_unit (double);
+	virtual void set_height (uint32_t, TrackHeightMode m = OnlySelf);
+	void set_samples_per_pixel (double);
 	std::string name() const { return _name; }
 
-	void add_automation_event (GdkEvent *, framepos_t, double);
+        void add_automation_event (GdkEvent *, framepos_t, double, bool with_guard_points);
 
 	void clear_lines ();
 
@@ -83,7 +84,7 @@ class AutomationTimeAxisView : public TimeAxisView {
 	std::list<boost::shared_ptr<AutomationLine> > lines () const;
 
 	void set_selected_points (PointSelection&);
-	void get_selectables (ARDOUR::framepos_t start, ARDOUR::framepos_t end, double top, double bot, std::list<Selectable *>&);
+	void get_selectables (ARDOUR::framepos_t start, ARDOUR::framepos_t end, double top, double bot, std::list<Selectable *>&, bool within = false);
 	void get_inverted_selectables (Selection&, std::list<Selectable*>& results);
 
 	void show_timestretch (framepos_t /*start*/, framepos_t /*end*/, int /*layers*/, int /*layer*/) {}
@@ -92,7 +93,7 @@ class AutomationTimeAxisView : public TimeAxisView {
 	/* editing operations */
 
 	void cut_copy_clear (Selection&, Editing::CutCopyOp);
-	bool paste (ARDOUR::framepos_t, float times, Selection&, size_t nth);
+	bool paste (ARDOUR::framepos_t, const Selection&, PasteContext&);
 
 	int  set_state (const XMLNode&, int version);
 
@@ -122,29 +123,33 @@ class AutomationTimeAxisView : public TimeAxisView {
 	static void what_has_visible_automation (const boost::shared_ptr<ARDOUR::Automatable>& automatable, std::set<Evoral::Parameter>& visible);
 
   protected:
+	/* Note that for MIDI controller "automation" (in regions), all of these
+	   may be set.  In this case, _automatable is likely _route so the
+	   controller will send immediate events out the route's MIDI port. */
+
 	/** parent route */
 	boost::shared_ptr<ARDOUR::Route> _route;
-	/** control; 0 if we are editing region-based automation */
+	/** control */
 	boost::shared_ptr<ARDOUR::AutomationControl> _control;
-	/** control owner; may be _route, or 0 if we are editing region-based automation */
+	/** control owner; may be _route, something else (e.g. a pan control), or NULL */
 	boost::shared_ptr<ARDOUR::Automatable> _automatable;
-	/** controller owner; 0 if we are editing region-based automation */
+	/** controller owner */
 	boost::shared_ptr<AutomationController> _controller;
 	Evoral::Parameter _parameter;
 
-	ArdourCanvas::SimpleRect* _base_rect;
+	ArdourCanvas::Rectangle* _base_rect;
 	boost::shared_ptr<AutomationLine> _line;
+
+	std::string _name;
 
 	/** AutomationStreamView if we are editing region-based automation (for MIDI), otherwise 0 */
 	AutomationStreamView* _view;
 
-	std::string _name;
 	bool    ignore_toggle;
-
 	bool    first_call_to_set_height;
 
-	Gtk::Button        hide_button;
-	Gtk::Button        auto_button;
+	ArdourButton       hide_button;
+	ArdourButton       auto_button;
 	Gtk::Menu*         automation_menu;
 	Gtk::Label*        plugname;
 	bool               plugname_packed;
@@ -165,10 +170,12 @@ class AutomationTimeAxisView : public TimeAxisView {
 	void hide_clicked ();
 	void auto_clicked ();
 
+	virtual bool can_edit_name() const {return false;}
+
 	void build_display_menu ();
 
 	void cut_copy_clear_one (AutomationLine&, Selection&, Editing::CutCopyOp);
-	bool paste_one (AutomationLine&, ARDOUR::framepos_t, float times, Selection&, size_t nth);
+	bool paste_one (ARDOUR::framepos_t, unsigned, float times, const Selection&, ItemCounts& counts, bool greedy=false);
 	void route_going_away ();
 
 	void set_automation_state (ARDOUR::AutoState);

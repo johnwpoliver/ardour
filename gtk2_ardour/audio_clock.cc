@@ -31,6 +31,7 @@
 #include "gtkmm2ext/rgb_macros.h"
 
 #include "ardour/profile.h"
+#include "ardour/lmath.h"
 #include "ardour/session.h"
 #include "ardour/slave.h"
 #include "ardour/tempo.h"
@@ -45,6 +46,7 @@
 #include "i18n.h"
 
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace std;
@@ -53,7 +55,7 @@ using Gtkmm2ext::Keyboard;
 
 sigc::signal<void> AudioClock::ModeChanged;
 vector<AudioClock*> AudioClock::clocks;
-const double AudioClock::info_font_scale_factor = 0.50;
+const double AudioClock::info_font_scale_factor = 0.60;
 const double AudioClock::separator_height = 0.0;
 const double AudioClock::x_leading_padding = 6.0;
 
@@ -94,6 +96,8 @@ AudioClock::AudioClock (const string& clock_name, bool transient, const string& 
 	, last_sdelta (0)
 	, dragging (false)
 	, drag_field (Field (0))
+	, xscale (1.0)
+	, yscale (1.0)
 {
 	set_flags (CAN_FOCUS);
 
@@ -152,25 +156,18 @@ AudioClock::on_realize ()
 	first_width = req.width;
 	first_height = req.height;
 
-	set_font ();
+	// XXX FIX ME: define font based on ... ???
+	// set_font ();
 	set_colors ();
 }
 
 void
-AudioClock::set_font ()
+AudioClock::set_font (Pango::FontDescription font)
 {
 	Glib::RefPtr<Gtk::Style> style = get_style ();
-	Pango::FontDescription font;
 	Pango::AttrFontDesc* font_attr;
 
-	if (!is_realized()) {
-		font = get_font_for_style (get_name());
-	} else {
-		font = style->get_font();
-	}
-
 	font_size = font.get_size();
-
 	font_attr = new Pango::AttrFontDesc (Pango::Attribute::create_attr_font_desc (font));
 
 	normal_attributes.change (*font_attr);
@@ -222,15 +219,15 @@ AudioClock::set_colors ()
 	uint32_t cursor_color;
 
 	if (active_state()) {
-		bg_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1 active: background", get_name()));
-		text_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1 active: text", get_name()));
-		editing_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1 active: edited text", get_name()));
-		cursor_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1 active: cursor", get_name()));
+		bg_color = ARDOUR_UI::config()->color (string_compose ("%1 active: background", get_name()));
+		text_color = ARDOUR_UI::config()->color (string_compose ("%1 active: text", get_name()));
+		editing_color = ARDOUR_UI::config()->color (string_compose ("%1 active: edited text", get_name()));
+		cursor_color = ARDOUR_UI::config()->color (string_compose ("%1 active: cursor", get_name()));
 	} else {
-		bg_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1: background", get_name()));
-		text_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1: text", get_name()));
-		editing_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1: edited text", get_name()));
-		cursor_color = ARDOUR_UI::config()->color_by_name (string_compose ("%1: cursor", get_name()));
+		bg_color = ARDOUR_UI::config()->color (string_compose ("%1: background", get_name()));
+		text_color = ARDOUR_UI::config()->color (string_compose ("%1: text", get_name()));
+		editing_color = ARDOUR_UI::config()->color (string_compose ("%1: edited text", get_name()));
+		cursor_color = ARDOUR_UI::config()->color (string_compose ("%1: cursor", get_name()));
 	}
 
 	/* store for bg and cursor in render() */
@@ -259,12 +256,14 @@ AudioClock::set_colors ()
 	r = lrint ((r/255.0) * 65535.0);
 	g = lrint ((g/255.0) * 65535.0);
 	b = lrint ((b/255.0) * 65535.0);
+	delete foreground_attr;
 	foreground_attr = new Pango::AttrColor (Pango::Attribute::create_attr_foreground (r, g, b));
 
 	UINT_TO_RGBA (editing_color, &r, &g, &b, &a);
 	r = lrint ((r/255.0) * 65535.0);
 	g = lrint ((g/255.0) * 65535.0);
 	b = lrint ((b/255.0) * 65535.0);
+	delete editing_attr;
 	editing_attr = new Pango::AttrColor (Pango::Attribute::create_attr_foreground (r, g, b));
 
 	normal_attributes.change (*foreground_attr);
@@ -282,7 +281,16 @@ AudioClock::set_colors ()
 }
 
 void
-AudioClock::render (cairo_t* cr)
+AudioClock::set_scale (double x, double y)
+{
+	xscale = x;
+	yscale = y;
+
+	queue_draw ();
+}
+
+void
+AudioClock::render (cairo_t* cr, cairo_rectangle_t*)
 {
 	/* main layout: rounded rect, plus the text */
 
@@ -300,9 +308,21 @@ AudioClock::render (cairo_t* cr)
 		cairo_fill (cr);
 	}
 
-	cairo_move_to (cr, (get_width() - layout_width) / 2.0, (upper_height - layout_height) / 2.0);
+	double lw = layout_width * xscale;
+	double lh = layout_height * yscale;
 
+	cairo_move_to (cr, (get_width() - lw) / 2.0, (upper_height - lh) / 2.0);
+
+	if (xscale != 1.0 || yscale != 1.0) {
+		cairo_save (cr);
+		cairo_scale (cr, xscale, yscale);
+	}
+	
 	pango_cairo_show_layout (cr, _layout->gobj());
+
+	if (xscale != 1.0 || yscale != 1.0) {
+		cairo_restore (cr);
+	}
 
 	if (_left_layout) {
 
@@ -314,7 +334,7 @@ AudioClock::render (cairo_t* cr)
 
 		if (mode_based_info_ratio != 1.0) {
 
-			double left_rect_width = round (((get_width() - separator_height) * mode_based_info_ratio) + 0.5);
+			double left_rect_width = get_left_rect_width();
 
 			if (_need_bg) {
 				if (corner_radius) {
@@ -620,6 +640,9 @@ AudioClock::end_edit (bool modify)
 			break;
 
 		case Frames:
+			if (edit_string.length() < 1) {
+				edit_string = pre_edit_string;
+			}
 			break;
 		}
 
@@ -772,31 +795,31 @@ AudioClock::parse_as_timecode_distance (const std::string& str)
 	case 1:
 	case 2:
 		sscanf (str.c_str(), "%" PRId32, &frames);
-		return lrint ((frames/(float)fps) * sr);
+		return llrint ((frames/(float)fps) * sr);
 
 	case 3:
 		sscanf (str.c_str(), "%1" PRId32 "%" PRId32, &secs, &frames);
-		return (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	case 4:
 		sscanf (str.c_str(), "%2" PRId32 "%" PRId32, &secs, &frames);
-		return (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	case 5:
 		sscanf (str.c_str(), "%1" PRId32 "%2" PRId32 "%" PRId32, &mins, &secs, &frames);
-		return (mins * 60 * sr) + (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (mins * 60 * sr) + (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	case 6:
 		sscanf (str.c_str(), "%2" PRId32 "%2" PRId32 "%" PRId32, &mins, &secs, &frames);
-		return (mins * 60 * sr) + (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (mins * 60 * sr) + (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	case 7:
 		sscanf (str.c_str(), "%1" PRId32 "%2" PRId32 "%2" PRId32 "%" PRId32, &hrs, &mins, &secs, &frames);
-		return (hrs * 3600 * sr) + (mins * 60 * sr) + (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (hrs * 3600 * sr) + (mins * 60 * sr) + (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	case 8:
 		sscanf (str.c_str(), "%2" PRId32 "%2" PRId32 "%2" PRId32 "%" PRId32, &hrs, &mins, &secs, &frames);
-		return (hrs * 3600 * sr) + (mins * 60 * sr) + (secs * sr) + lrint ((frames/(float)fps) * sr);
+		return (hrs * 3600 * sr) + (mins * 60 * sr) + (secs * sr) + llrint ((frames/(float)fps) * sr);
 
 	default:
 		break;
@@ -941,12 +964,24 @@ AudioClock::set (framepos_t when, bool force, framecnt_t offset)
 	}
 
 	if (when == last_when && !force) {
+#if 0 // XXX return if no change and no change forced. verify Aug/2014
 		if (_mode != Timecode && _mode != MinSec) {
 			/* may need to force display of TC source
 			 * time, so don't return early.
 			 */
+			/* ^^ Why was that?,  delta times?
+			 * Timecode FPS, pull-up/down, etc changes
+			 * trigger a 'session_property_changed' which
+			 * eventually calls set(last_when, true)
+			 *
+			 * re-rendering the clock every 40ms or so just
+			 * because we can is not ideal.
+			 */
 			return;
 		}
+#else
+		return;
+#endif
 	}
 
 	if (!editing) {
@@ -996,19 +1031,19 @@ AudioClock::set_slave_info ()
 		Slave* slave = _session->slave();
 
 		switch (sync_src) {
-		case JACK:
-			_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+		case Engine:
+			_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 						INFO_FONT_SIZE, sync_source_to_string(sync_src, true)));
 			_right_layout->set_text ("");
 			break;
 		case MIDIClock:
 			if (slave) {
-				_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+				_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 							INFO_FONT_SIZE, sync_source_to_string(sync_src, true)));
-				_right_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+				_right_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 							INFO_FONT_SIZE, slave->approximate_current_delta()));
 			} else {
-				_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+				_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 							INFO_FONT_SIZE, _("--pending--")));
 				_right_layout->set_text ("");
 			}
@@ -1020,21 +1055,21 @@ AudioClock::set_slave_info ()
 				TimecodeSlave* tcslave;
 				if ((tcslave = dynamic_cast<TimecodeSlave*>(_session->slave())) != 0) {
 					matching = (tcslave->apparent_timecode_format() == _session->config.get_timecode_format());
-					_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span><span foreground=\"%3\">%4</span></span>",
+					_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span><span foreground=\"%3\">%4</span></span>",
 										  INFO_FONT_SIZE, sync_source_to_string(sync_src, true)[0], (matching?"green":"red"),
 										  dynamic_cast<TimecodeSlave*>(slave)->approximate_current_position()));
-					_right_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+					_right_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 										   INFO_FONT_SIZE, slave->approximate_current_delta()));
 				}
 			} else {
-				_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2</span></span>",
+				_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2</span></span>",
 							INFO_FONT_SIZE, _("--pending--")));
 				_right_layout->set_text ("");
 			}
 			break;
 		}
 	} else {
-		_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"INT/%2</span></span>",
+		_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "INT/%2</span></span>",
 					INFO_FONT_SIZE, sync_source_to_string(sync_src, true)));
 		_right_layout->set_text ("");
 	}
@@ -1079,32 +1114,60 @@ AudioClock::set_frames (framepos_t when, bool /*force*/)
 			sprintf (buf, "%" PRId64 "Hz", rate);
 		}
 
-		_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2 </span><span foreground=\"green\">%3</span></span>",
+		_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2 </span><span foreground=\"green\">%3</span></span>",
 				INFO_FONT_SIZE, _("SR"), buf));
 
 		float vid_pullup = _session->config.get_video_pullup();
 
 		if (vid_pullup == 0.0) {
-			_right_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2 </span><span foreground=\"green\">off</span></span>",
+			_right_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2 </span><span foreground=\"green\">off</span></span>",
 					INFO_FONT_SIZE, _("Pull")));
 		} else {
 			sprintf (buf, _("%+.4f%%"), vid_pullup);
-			_right_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%2 </span><span foreground=\"green\">%3</span></span>",
+			_right_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%2 </span><span foreground=\"green\">%3</span></span>",
 					INFO_FONT_SIZE, _("Pull"), buf));
 		}
 	}
 }
 
 void
-AudioClock::set_minsec (framepos_t when, bool /*force*/)
+AudioClock::print_minsec (framepos_t when, char* buf, size_t bufsize, float frame_rate)
 {
-	char buf[32];
 	framecnt_t left;
 	int hrs;
 	int mins;
 	int secs;
 	int millisecs;
-	bool negative = false;
+	bool negative;
+
+	if (when < 0) {
+		when = -when;
+		negative = true;
+	} else {
+		negative = false;
+	}
+
+	left = when;
+	hrs = (int) floor (left / (frame_rate * 60.0f * 60.0f));
+	left -= (framecnt_t) floor (hrs * frame_rate * 60.0f * 60.0f);
+	mins = (int) floor (left / (frame_rate * 60.0f));
+	left -= (framecnt_t) floor (mins * frame_rate * 60.0f);
+	secs = (int) floor (left / (float) frame_rate);
+	left -= (framecnt_t) floor ((double)(secs * frame_rate));
+	millisecs = floor (left * 1000.0 / (float) frame_rate);
+
+	if (negative) {
+		snprintf (buf, bufsize, "-%02" PRId32 ":%02" PRId32 ":%02" PRId32 ".%03" PRId32, hrs, mins, secs, millisecs);
+	} else {
+		snprintf (buf, bufsize, " %02" PRId32 ":%02" PRId32 ":%02" PRId32 ".%03" PRId32, hrs, mins, secs, millisecs);
+	}
+
+}
+
+void
+AudioClock::set_minsec (framepos_t when, bool /*force*/)
+{
+	char buf[32];
 
 	if (_off) {
 		_layout->set_text (" --:--:--.---");
@@ -1117,25 +1180,7 @@ AudioClock::set_minsec (framepos_t when, bool /*force*/)
 		return;
 	}
 
-	if (when < 0) {
-		when = -when;
-		negative = true;
-	}
-
-	left = when;
-	hrs = (int) floor (left / (_session->frame_rate() * 60.0f * 60.0f));
-	left -= (framecnt_t) floor (hrs * _session->frame_rate() * 60.0f * 60.0f);
-	mins = (int) floor (left / (_session->frame_rate() * 60.0f));
-	left -= (framecnt_t) floor (mins * _session->frame_rate() * 60.0f);
-	secs = (int) floor (left / (float) _session->frame_rate());
-	left -= (framecnt_t) floor (secs * _session->frame_rate());
-	millisecs = floor (left * 1000.0 / (float) _session->frame_rate());
-
-	if (negative) {
-		snprintf (buf, sizeof (buf), "-%02" PRId32 ":%02" PRId32 ":%02" PRId32 ".%03" PRId32, hrs, mins, secs, millisecs);
-	} else {
-		snprintf (buf, sizeof (buf), " %02" PRId32 ":%02" PRId32 ":%02" PRId32 ".%03" PRId32, hrs, mins, secs, millisecs);
-	}
+	print_minsec (when, buf, sizeof (buf), _session->frame_rate());
 
 	_layout->set_text (buf);
 	set_slave_info();
@@ -1233,11 +1278,11 @@ AudioClock::set_bbt (framepos_t when, bool /*force*/)
 		TempoMetric m (_session->tempo_map().metric_at (pos));
 
 		sprintf (buf, "%-5.1f", m.tempo().beats_per_minute());
-		_left_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%3</span> <span foreground=\"green\">%2</span></span>",
+		_left_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%3</span> <span foreground=\"green\">%2</span></span>",
 							  INFO_FONT_SIZE, buf, _("Tempo")));
 
 		sprintf (buf, "%g/%g", m.meter().divisions_per_bar(), m.meter().note_divisor());
-		_right_layout->set_markup (string_compose ("<span size=\"%1\">"TXTSPAN"%3</span> <span foreground=\"green\">%2</span></span>",
+		_right_layout->set_markup (string_compose ("<span size=\"%1\">" TXTSPAN "%3</span> <span foreground=\"green\">%2</span></span>",
 							   INFO_FONT_SIZE, buf, _("Meter")));
 	}
 }
@@ -1739,7 +1784,7 @@ AudioClock::on_motion_notify_event (GdkEventMotion *ev)
 
 	drag_y = ev->y;
 
-	if (trunc (drag_accum) != 0) {
+	if (floor (drag_accum) != 0) {
 
 		framepos_t frames;
 		framepos_t pos;
@@ -2013,7 +2058,7 @@ framepos_t
 AudioClock::frame_duration_from_bbt_string (framepos_t pos, const string& str) const
 {
 	if (_session == 0) {
-		error << "AudioClock::current_time() called with BBT mode but without session!" << endmsg;
+		error << "AudioClock::frame_duration_from_bbt_string() called with BBT mode but without session!" << endmsg;
 		return 0;
 	}
 
@@ -2032,6 +2077,24 @@ AudioClock::frames_from_audioframes_string (const string& str) const
 	framepos_t f;
 	sscanf (str.c_str(), "%" PRId64, &f);
 	return f;
+}
+
+void
+AudioClock::copy_text_to_clipboard () const
+{
+	string val;
+	if (editing) {
+		val = pre_edit_string;
+	} else {
+		val = _layout->get_text ();
+	}
+	const size_t trim = val.find_first_not_of(" ");
+	if (trim == string::npos) {
+		assert(0); // empty clock, can't be right.
+		return;
+	}
+	Glib::RefPtr<Clipboard> cl = Gtk::Clipboard::get();
+	cl->set_text (val.substr(trim));
 }
 
 void
@@ -2054,6 +2117,8 @@ AudioClock::build_ops_menu ()
 		ops_items.push_back (MenuElem (_("Set From Playhead"), sigc::mem_fun(*this, &AudioClock::set_from_playhead)));
 		ops_items.push_back (MenuElem (_("Locate to This Time"), sigc::mem_fun(*this, &AudioClock::locate)));
 	}
+	ops_items.push_back (SeparatorElem());
+	ops_items.push_back (MenuElem (_("Copy to clipboard"), sigc::mem_fun(*this, &AudioClock::copy_text_to_clipboard)));
 }
 
 void
@@ -2170,7 +2235,8 @@ AudioClock::on_style_changed (const Glib::RefPtr<Gtk::Style>& old_style)
 	Gtk::Requisition req;
 	set_clock_dimensions (req);
 
-	set_font ();
+	/* XXXX fix me ... we shouldn't be using GTK styles anyway */
+	// set_font ();
 	set_colors ();
 }
 

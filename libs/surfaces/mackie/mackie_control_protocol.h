@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <boost/smart_ptr.hpp>
 
+#define ABSTRACT_UI_EXPORTS
 #include "pbd/abstract_ui.h"
 #include "midi++/types.h"
 #include "ardour/types.h"
@@ -49,12 +50,16 @@ namespace MIDI {
 	class Port;
 }
 
+namespace ArdourSurface {
+
 namespace Mackie {
 	class Surface;
 	class Control;
 	class SurfacePort;
 	class Button;
 }
+
+gboolean ipmidi_input_handler (GIOChannel*, GIOCondition condition, void *data);
 
 /**
 	This handles the plugin duties, and the midi encoding and decoding,
@@ -119,17 +124,19 @@ class MackieControlProtocol
 	const Mackie::DeviceInfo& device_info() const { return _device_info; }
 	Mackie::DeviceProfile& device_profile() { return _device_profile; }
 
-	int set_active (bool yn);
-	void set_device (const std::string&, bool allow_activation = true);
-	void set_profile (const std::string&);
+        void device_ready ();
 
-	bool     flip_mode () const { return _flip_mode; }
+	int set_active (bool yn);
+	int  set_device (const std::string&);
+        void set_profile (const std::string&);
+
+	FlipMode flip_mode () const { return _flip_mode; }
 	ViewMode view_mode () const { return _view_mode; }
 	bool zoom_mode () const { return _zoom_mode; }
 	bool     metering_active () const { return _metering_active; }
 
 	void set_view_mode (ViewMode);
-	void set_flip_mode (bool);
+	void set_flip_mode (FlipMode);
 
 	XMLNode& get_state ();
 	int set_state (const XMLNode&, int version);
@@ -252,7 +259,6 @@ class MackieControlProtocol
 	};
 
 	typedef std::map<Mackie::Button::ID,ButtonHandlers> ButtonMap;
-	typedef std::list<GSource*> PortSources;
 
 	static MackieControlProtocol* _instance;
 	
@@ -262,7 +268,6 @@ class MackieControlProtocol
 	uint32_t                 _current_initial_bank;
 	PBD::ScopedConnectionList audio_engine_connections;
 	PBD::ScopedConnectionList session_connections;
-	PBD::ScopedConnectionList port_connections;
 	PBD::ScopedConnectionList route_connections;
 	PBD::ScopedConnectionList gui_connections;
 	// timer for two quick marker left presses
@@ -278,20 +283,27 @@ class MackieControlProtocol
 	void*                    _gui;
 	bool                     _zoom_mode;
 	bool                     _scrub_mode;
-	bool                     _flip_mode;
+	FlipMode                 _flip_mode;
 	ViewMode                 _view_mode;
 	int                      _current_selected_track;
 	int                      _modifier_state;
-	PortSources               port_sources;
 	ButtonMap                 button_map;
 	int16_t                  _ipmidi_base;
 	bool                      needs_ipmidi_restart;
 	bool                     _metering_active;
 	bool                     _initialized;
-
 	ARDOUR::RouteNotificationList _last_selected_routes;
+        XMLNode*                 _surfaces_state;
+        int                      _surfaces_version;
 
-	void create_surfaces ();
+        struct ipMIDIHandler {
+                MackieControlProtocol* mcp;
+                MIDI::Port* port;
+        };
+        friend struct ipMIDIHandler; /* is this necessary */
+	friend gboolean ArdourSurface::ipmidi_input_handler (GIOChannel*, GIOCondition condition, void *data);
+
+	int create_surfaces ();
 	bool periodic();
 	void build_gui ();
 	bool midi_input_handler (Glib::IOCondition ioc, MIDI::Port* port);
@@ -301,9 +313,10 @@ class MackieControlProtocol
 	void build_button_map ();
 	void gui_track_selection_changed (ARDOUR::RouteNotificationListPtr, bool save_list);
 	void _gui_track_selection_changed (ARDOUR::RouteNotificationList*, bool save_list);
-	void ipmidi_restart ();
-	void initialize ();
-	
+	int ipmidi_restart ();
+        void initialize ();
+        int set_device_info (const std::string& device_name);
+
 	/* BUTTON HANDLING */
 
 	typedef std::set<uint32_t> DownButtonList;
@@ -499,5 +512,7 @@ class MackieControlProtocol
 	Mackie::LedState view_press (Mackie::Button&);
 	Mackie::LedState view_release (Mackie::Button&);
 };
+
+} // namespace 
 
 #endif // ardour_mackie_control_protocol_h

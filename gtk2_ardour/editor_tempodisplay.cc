@@ -27,8 +27,6 @@
 #include <string>
 #include <climits>
 
-#include <libgnomecanvasmm.h>
-
 #include "pbd/error.h"
 #include "pbd/memento_command.h"
 
@@ -40,16 +38,18 @@
 #include <gtkmm2ext/doi.h>
 #include <gtkmm2ext/utils.h>
 
+#include "canvas/canvas.h"
+#include "canvas/item.h"
+#include "canvas/line_set.h"
+
 #include "editor.h"
 #include "marker.h"
-#include "simpleline.h"
 #include "tempo_dialog.h"
 #include "rgb_macros.h"
 #include "gui_thread.h"
 #include "time_axis_view.h"
 #include "ardour_ui.h"
 #include "tempo_lines.h"
-#include "utils.h"
 
 #include "i18n.h"
 
@@ -85,15 +85,15 @@ Editor::draw_metric_marks (const Metrics& metrics)
 
 		if ((ms = dynamic_cast<const MeterSection*>(*i)) != 0) {
 			snprintf (buf, sizeof(buf), "%g/%g", ms->divisions_per_bar(), ms->note_divisor ());
-			metric_marks.push_back (new MeterMarker (*this, *meter_group, ARDOUR_UI::config()->canvasvar_MeterMarker.get(), buf,
+			metric_marks.push_back (new MeterMarker (*this, *meter_group, ARDOUR_UI::config()->color ("meter marker"), buf,
 								 *(const_cast<MeterSection*>(ms))));
 		} else if ((ts = dynamic_cast<const TempoSection*>(*i)) != 0) {
-			if (Config->get_allow_non_quarter_pulse()) {
+			if (ARDOUR_UI::config()->get_allow_non_quarter_pulse()) {
 				snprintf (buf, sizeof (buf), "%.2f/%.0f", ts->beats_per_minute(), ts->note_type());
 			} else {
 				snprintf (buf, sizeof (buf), "%.2f", ts->beats_per_minute());
 			}
-			metric_marks.push_back (new TempoMarker (*this, *tempo_group, ARDOUR_UI::config()->canvasvar_TempoMarker.get(), buf,
+			metric_marks.push_back (new TempoMarker (*this, *tempo_group, ARDOUR_UI::config()->color ("tempo marker"), buf,
 								 *(const_cast<TempoSection*>(ts))));
 		}
 
@@ -117,9 +117,9 @@ Editor::tempo_map_changed (const PropertyChange& /*ignored*/)
 	ARDOUR::TempoMap::BBTPointList::const_iterator begin;
 	ARDOUR::TempoMap::BBTPointList::const_iterator end;
 
-	compute_current_bbt_points (leftmost_frame, leftmost_frame + current_page_frames(), begin, end);
+	compute_current_bbt_points (leftmost_frame, leftmost_frame + current_page_samples(), begin, end);
 	_session->tempo_map().apply_with_metrics (*this, &Editor::draw_metric_marks); // redraw metric markers
-	redraw_measures ();
+	draw_measures (begin, end);
 	update_tempo_based_rulers (begin, end);
 }
 
@@ -130,22 +130,18 @@ Editor::redisplay_tempo (bool immediate_redraw)
 		return;
 	}
 
-	ARDOUR::TempoMap::BBTPointList::const_iterator current_bbt_points_begin;
-	ARDOUR::TempoMap::BBTPointList::const_iterator current_bbt_points_end;
-
-	compute_current_bbt_points (leftmost_frame, leftmost_frame + current_page_frames(),
-				    current_bbt_points_begin, current_bbt_points_end);
-
 	if (immediate_redraw) {
-		redraw_measures ();
+		ARDOUR::TempoMap::BBTPointList::const_iterator current_bbt_points_begin;
+		ARDOUR::TempoMap::BBTPointList::const_iterator current_bbt_points_end;
+		
+		compute_current_bbt_points (leftmost_frame, leftmost_frame + current_page_samples(),
+					    current_bbt_points_begin, current_bbt_points_end);
+		draw_measures (current_bbt_points_begin, current_bbt_points_end);
+		update_tempo_based_rulers (current_bbt_points_begin, current_bbt_points_end); // redraw rulers and measures
+	
 	} else {
-#ifdef GTKOSX
-		redraw_measures ();
-#else
-		Glib::signal_idle().connect (sigc::mem_fun (*this, &Editor::redraw_measures));
-#endif
+		Glib::signal_idle().connect (sigc::bind_return (sigc::bind (sigc::mem_fun (*this, &Editor::redisplay_tempo), true), false));
 	}
-	update_tempo_based_rulers (current_bbt_points_begin, current_bbt_points_end); // redraw rulers and measures
 }
 
 void
@@ -166,20 +162,9 @@ Editor::compute_current_bbt_points (framepos_t leftmost, framepos_t rightmost,
 void
 Editor::hide_measures ()
 {
-	if (tempo_lines)
+	if (tempo_lines) {
 		tempo_lines->hide();
-}
-
-bool
-Editor::redraw_measures ()
-{
-	ARDOUR::TempoMap::BBTPointList::const_iterator begin;
-	ARDOUR::TempoMap::BBTPointList::const_iterator end;
-
-	compute_current_bbt_points (leftmost_frame, leftmost_frame + current_page_frames(), begin, end);
-        draw_measures (begin, end);
-
-	return false;
+	}
 }
 
 void
@@ -191,10 +176,11 @@ Editor::draw_measures (ARDOUR::TempoMap::BBTPointList::const_iterator& begin,
 	}
 
 	if (tempo_lines == 0) {
-		tempo_lines = new TempoLines(*track_canvas, time_line_group, physical_screen_height(get_window()));
+		tempo_lines = new TempoLines (time_line_group, ArdourCanvas::LineSet::Vertical);
 	}
 
-	tempo_lines->draw (begin, end, frames_per_unit);
+	const unsigned divisions = get_grid_beat_divisions(leftmost_frame);
+	tempo_lines->draw (begin, end, divisions, leftmost_frame, _session->frame_rate());
 }
 
 void
@@ -209,8 +195,6 @@ Editor::mouse_add_new_tempo_event (framepos_t frame)
 
 	//this causes compiz to display no border.
 	//tempo_dialog.signal_realize().connect (sigc::bind (sigc::ptr_fun (set_decoration), &tempo_dialog, Gdk::WMDecoration (Gdk::DECOR_BORDER|Gdk::DECOR_RESIZEH)));
-
-	ensure_float (tempo_dialog);
 
 	switch (tempo_dialog.run()) {
 	case RESPONSE_ACCEPT:
@@ -252,8 +236,6 @@ Editor::mouse_add_new_meter_event (framepos_t frame)
 	//this causes compiz to display no border..
 	//meter_dialog.signal_realize().connect (sigc::bind (sigc::ptr_fun (set_decoration), &meter_dialog, Gdk::WMDecoration (Gdk::DECOR_BORDER|Gdk::DECOR_RESIZEH)));
 
-	ensure_float (meter_dialog);
-
 	switch (meter_dialog.run ()) {
 	case RESPONSE_ACCEPT:
 		break;
@@ -286,12 +268,12 @@ Editor::remove_tempo_marker (ArdourCanvas::Item* item)
 
 	if ((marker = reinterpret_cast<Marker *> (item->get_data ("marker"))) == 0) {
 		fatal << _("programming error: tempo marker canvas item has no marker object pointer!") << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if ((tempo_marker = dynamic_cast<TempoMarker*> (marker)) == 0) {
 		fatal << _("programming error: marker for tempo is not a tempo marker!") << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if (tempo_marker->tempo().movable()) {
@@ -303,8 +285,6 @@ void
 Editor::edit_meter_section (MeterSection* section)
 {
 	MeterDialog meter_dialog (*section, _("done"));
-
-	ensure_float (meter_dialog);
 
 	switch (meter_dialog.run()) {
 	case RESPONSE_ACCEPT:
@@ -334,8 +314,6 @@ Editor::edit_tempo_section (TempoSection* section)
 {
 	TempoDialog tempo_dialog (*section, _("done"));
 
-	ensure_float (tempo_dialog);
-
 	switch (tempo_dialog.run ()) {
 	case RESPONSE_ACCEPT:
 		break;
@@ -358,41 +336,15 @@ Editor::edit_tempo_section (TempoSection* section)
 }
 
 void
-Editor::edit_tempo_marker (ArdourCanvas::Item *item)
+Editor::edit_tempo_marker (TempoMarker& tm)
 {
-	Marker* marker;
-	TempoMarker* tempo_marker;
-
-	if ((marker = reinterpret_cast<Marker *> (item->get_data ("marker"))) == 0) {
-		fatal << _("programming error: tempo marker canvas item has no marker object pointer!") << endmsg;
-		/*NOTREACHED*/
-	}
-
-	if ((tempo_marker = dynamic_cast<TempoMarker*> (marker)) == 0) {
-		fatal << _("programming error: marker for tempo is not a tempo marker!") << endmsg;
-		/*NOTREACHED*/
-	}
-
-	edit_tempo_section (&tempo_marker->tempo());
+	edit_tempo_section (&tm.tempo());
 }
 
 void
-Editor::edit_meter_marker (ArdourCanvas::Item *item)
+Editor::edit_meter_marker (MeterMarker& mm)
 {
-	Marker* marker;
-	MeterMarker* meter_marker;
-
-	if ((marker = reinterpret_cast<Marker *> (item->get_data ("marker"))) == 0) {
-		fatal << _("programming error: tempo marker canvas item has no marker object pointer!") << endmsg;
-		/*NOTREACHED*/
-	}
-
-	if ((meter_marker = dynamic_cast<MeterMarker*> (marker)) == 0) {
-		fatal << _("programming error: marker for meter is not a meter marker!") << endmsg;
-		/*NOTREACHED*/
-	}
-
-	edit_meter_section (&meter_marker->meter());
+	edit_meter_section (&mm.meter());
 }
 
 gint
@@ -416,12 +368,12 @@ Editor::remove_meter_marker (ArdourCanvas::Item* item)
 
 	if ((marker = reinterpret_cast<Marker *> (item->get_data ("marker"))) == 0) {
 		fatal << _("programming error: meter marker canvas item has no marker object pointer!") << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if ((meter_marker = dynamic_cast<MeterMarker*> (marker)) == 0) {
 		fatal << _("programming error: marker for meter is not a meter marker!") << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if (meter_marker->meter().movable()) {

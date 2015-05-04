@@ -36,6 +36,7 @@
 #include <gtkmm/filechooserwidget.h>
 #include <gtkmm/frame.h>
 #include <gtkmm/label.h>
+#include <gtkmm/scale.h>
 #include <gtkmm/textview.h>
 #include <gtkmm/table.h>
 #include <gtkmm/liststore.h>
@@ -49,6 +50,7 @@
 #include "ardour_window.h"
 #include "editing.h"
 #include "audio_clock.h"
+#include "instrument_selector.h"
 
 namespace ARDOUR {
 	class Session;
@@ -57,7 +59,7 @@ namespace ARDOUR {
 class GainMeter;
 class Mootcher;
 
-class SoundFileBox : public Gtk::VBox, public ARDOUR::SessionHandlePtr
+class SoundFileBox : public Gtk::VBox, public ARDOUR::SessionHandlePtr, public PBD::ScopedConnectionList
 {
   public:
 	SoundFileBox (bool persistent);
@@ -69,6 +71,8 @@ class SoundFileBox : public Gtk::VBox, public ARDOUR::SessionHandlePtr
 	void audition();
 	bool audition_oneshot();
 	bool autoplay () const;
+	void set_src_quality(ARDOUR::SrcQuality q) { _src_quality = q; }
+	void set_import_position(Editing::ImportPosition p) { _import_position = p; }
 
   protected:
 	std::string path;
@@ -103,11 +107,21 @@ class SoundFileBox : public Gtk::VBox, public ARDOUR::SessionHandlePtr
 	Gtk::Button stop_btn;
 	Gtk::CheckButton autoplay_btn;
 	Gtk::Button apply_btn;
+	Gtk::HScale seek_slider;
+
+	PBD::ScopedConnectionList auditioner_connections;
+	void audition_active(bool);
+	void audition_progress(ARDOUR::framecnt_t, ARDOUR::framecnt_t);
 
 	bool tags_entry_left (GdkEventFocus* event);
 	void tags_changed ();
 	void save_tags (const std::vector<std::string>&);
 	void stop_audition ();
+	bool seek_button_press(GdkEventButton*);
+	bool seek_button_release(GdkEventButton*);
+	bool _seeking;
+	ARDOUR::SrcQuality _src_quality;
+	Editing::ImportPosition _import_position;
 };
 
 class SoundFileBrowser : public ArdourWindow
@@ -131,6 +145,7 @@ class SoundFileBrowser : public ArdourWindow
 		Gtk::TreeModelColumn<std::string> filesize;
 		Gtk::TreeModelColumn<std::string> smplrate;
 		Gtk::TreeModelColumn<std::string> license;
+		Gtk::TreeModelColumn<bool>        started;
 
 		FreesoundColumns() {
 			add(id); 
@@ -140,6 +155,7 @@ class SoundFileBrowser : public ArdourWindow
 			add(filesize);
 			add(smplrate);
 			add(license);
+			add(started);
 		}
 	};
 
@@ -150,8 +166,9 @@ class SoundFileBrowser : public ArdourWindow
 	Glib::RefPtr<Gtk::ListStore> freesound_list;
 
 	Gtk::Button freesound_more_btn;
-	Gtk::Button freesound_stop_btn;
+	Gtk::Button freesound_similar_btn;
 
+	void handle_freesound_results(std::string theString);
   public:
 	SoundFileBrowser (std::string title, ARDOUR::Session* _s, bool persistent);
 	virtual ~SoundFileBrowser ();
@@ -177,11 +194,10 @@ class SoundFileBrowser : public ArdourWindow
 
 	Gtk::Button freesound_search_btn;
 	Gtk::TreeView freesound_list_view;
-	Gtk::ProgressBar freesound_progress_bar;
-
-	bool freesound_download_cancel;
+	Gtk::Notebook notebook;
 
 	void freesound_search();
+	void refresh_display(std::string ID, std::string file);
 	
   protected:
 	bool resetting_ourselves;
@@ -203,7 +219,6 @@ class SoundFileBrowser : public ArdourWindow
 
 	static std::string persistent_folder;
 
-	Gtk::Notebook notebook;
 
 	GainMeter* gm;
 	Gtk::VBox meter_packer;
@@ -224,10 +239,11 @@ class SoundFileBrowser : public ArdourWindow
 	void freesound_list_view_activated (const Gtk::TreeModel::Path& path, Gtk::TreeViewColumn*);
 	void freesound_search_clicked ();
 	void freesound_more_clicked ();
-	void freesound_stop_clicked ();
+	void freesound_similar_clicked ();
 	int freesound_page;
 	
 	void chooser_file_activated ();
+	std::string freesound_get_audio_file(Gtk::TreeIter iter);
 
 	bool on_audio_filter (const Gtk::FileFilter::Info& filter_info);
 	bool on_midi_filter (const Gtk::FileFilter::Info& filter_info);
@@ -269,6 +285,7 @@ class SoundFileOmega : public SoundFileBrowser
 	Gtk::ComboBoxText where_combo;
 	Gtk::ComboBoxText channel_combo;
 	Gtk::ComboBoxText src_combo;
+	InstrumentSelector instrument_combo;
 
 	Gtk::CheckButton copy_files_btn;
 
@@ -302,6 +319,8 @@ class SoundFileOmega : public SoundFileBrowser
 	bool reset_options ();
 	void reset_options_noret ();
 	bool bad_file_message ();
+	void src_combo_changed ();
+	void where_combo_changed ();
 
         void do_something (int action);
 };

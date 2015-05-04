@@ -39,7 +39,11 @@
 #include <assert.h>
 #include <math.h>
 #include <errno.h>
+#ifdef PLATFORM_WINDOWS
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
+#endif
 #include "smf.h"
 #include "smf_private.h"
 
@@ -54,7 +58,7 @@ static void *
 smf_extend(smf_t *smf, const int length)
 {
 	int i, previous_file_buffer_length = smf->file_buffer_length;
-	char *previous_file_buffer = smf->file_buffer;
+	char *previous_file_buffer = (char*)smf->file_buffer;
 
 	/* XXX: Not terribly efficient. */
 	smf->file_buffer_length += length;
@@ -201,7 +205,7 @@ smf_event_new_textual(int type, const char *text)
 
 	/* "2 +" is for leading 0xFF 0xtype. */
 	event->midi_buffer_length = 2 + text_length + MAX_VLQ_LENGTH;
-	event->midi_buffer = malloc(event->midi_buffer_length);
+	event->midi_buffer = (uint8_t*)malloc(event->midi_buffer_length);
 	if (event->midi_buffer == NULL) {
 		g_critical("Cannot allocate MIDI buffer structure: %s", strerror(errno));
 		smf_event_delete(event);
@@ -215,7 +219,11 @@ smf_event_new_textual(int type, const char *text)
 	vlq_length = smf_format_vlq(event->midi_buffer + 2, MAX_VLQ_LENGTH - 2, text_length);
 	copied_length = snprintf((char *)event->midi_buffer + vlq_length + 2, event->midi_buffer_length - vlq_length - 2, "%s", text);
 
+#ifndef NDEBUG
+	(void) copied_length; /* stop gcc warning about unusued vars for non-debug build */
+#else
 	assert(copied_length == text_length);
+#endif
 
 	event->midi_buffer_length = 2 + vlq_length + text_length;
 
@@ -433,6 +441,9 @@ pointers_are_clear(smf_t *smf)
 	int i;
 
 	smf_track_t *track;
+	if (smf->file_buffer != NULL) {
+		fprintf (stderr, "SFB != null but == %p\n", smf->file_buffer);
+	}
 	assert(smf->file_buffer == NULL);
 	assert(smf->file_buffer_length == 0);
 
@@ -536,58 +547,68 @@ smf_validate(smf_t *smf)
 
 #ifndef NDEBUG
 
-static void
-assert_smf_event_is_identical(const smf_event_t *a, const smf_event_t *b)
+#define CHECK(cond) if (!(cond)) { return -1; }
+
+static int
+check_smf_event_is_identical(const smf_event_t *a, const smf_event_t *b)
 {
-	assert(a->event_number == b->event_number);
-	assert(a->delta_time_pulses == b->delta_time_pulses);
-	assert(abs(a->time_pulses - b->time_pulses) <= 2);
-	assert(fabs(a->time_seconds - b->time_seconds) <= 0.01);
-	assert(a->track_number == b->track_number);
-	assert(a->midi_buffer_length == b->midi_buffer_length);
-	assert(memcmp(a->midi_buffer, b->midi_buffer, a->midi_buffer_length) == 0);
+	CHECK(a->event_number == b->event_number);
+	CHECK(a->delta_time_pulses == b->delta_time_pulses);
+	CHECK(abs((long)(a->time_pulses - b->time_pulses)) <= 2);
+	CHECK(fabs(a->time_seconds - b->time_seconds) <= 0.01);
+	CHECK(a->track_number == b->track_number);
+	CHECK(a->midi_buffer_length == b->midi_buffer_length);
+	CHECK(memcmp(a->midi_buffer, b->midi_buffer, a->midi_buffer_length) == 0);
+	return 0;
 }
 
-static void
-assert_smf_track_is_identical(const smf_track_t *a, const smf_track_t *b)
+static int
+check_smf_track_is_identical(const smf_track_t *a, const smf_track_t *b)
 {
 	size_t i;
 
-	assert(a->track_number == b->track_number);
-	assert(a->number_of_events == b->number_of_events);
+	CHECK(a->track_number == b->track_number);
+	CHECK(a->number_of_events == b->number_of_events);
 
 	for (i = 1; i <= a->number_of_events; i++)
-		assert_smf_event_is_identical(smf_track_get_event_by_number(a, i), smf_track_get_event_by_number(b, i));
+		check_smf_event_is_identical(smf_track_get_event_by_number(a, i), smf_track_get_event_by_number(b, i));
+
+	return 0;
 }
 
-static void
-assert_smf_is_identical(const smf_t *a, const smf_t *b)
+static int
+check_smf_is_identical(const smf_t *a, const smf_t *b)
 {
 	int i;
 
-	assert(a->format == b->format);
-	assert(a->ppqn == b->ppqn);
-	assert(a->frames_per_second == b->frames_per_second);
-	assert(a->resolution == b->resolution);
-	assert(a->number_of_tracks == b->number_of_tracks);
+	CHECK(a->format == b->format);
+	CHECK(a->ppqn == b->ppqn);
+	CHECK(a->frames_per_second == b->frames_per_second);
+	CHECK(a->resolution == b->resolution);
+	CHECK(a->number_of_tracks == b->number_of_tracks);
 
 	for (i = 1; i <= a->number_of_tracks; i++)
-		assert_smf_track_is_identical(smf_get_track_by_number(a, i), smf_get_track_by_number(b, i));
+		check_smf_track_is_identical(smf_get_track_by_number(a, i), smf_get_track_by_number(b, i));
 
 	/* We do not need to compare tempos explicitly, as tempo is always computed from track contents. */
+	return 0;
 }
 
-static void
-assert_smf_saved_correctly(const smf_t *smf, FILE* file)
+static int
+check_smf_saved_correctly(const smf_t *smf, FILE* file)
 {
 	smf_t *saved;
+	int ret;
 
 	saved = smf_load (file);
-	assert(saved != NULL);
-
-	assert_smf_is_identical(smf, saved);
+	if (!saved) {
+		ret = -1;
+	} else {
+		ret = check_smf_is_identical(smf, saved);
+	}
 
 	smf_delete(saved);
+	return (ret);
 }
 
 #endif /* !NDEBUG */
@@ -634,7 +655,9 @@ smf_save(smf_t *smf, FILE* file)
 		return (error);
 
 #ifndef NDEBUG
-	assert_smf_saved_correctly(smf, file);
+	if (check_smf_saved_correctly(smf, file)) {
+		g_warning("SMF warning: Did not save correctly, possible data loss.");
+	}
 #endif
 
 	return (0);

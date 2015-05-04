@@ -19,6 +19,8 @@
 #ifndef __ardour_midi_time_axis_h__
 #define __ardour_midi_time_axis_h__
 
+#include <list>
+
 #include <gtkmm/table.h>
 #include <gtkmm/button.h>
 #include <gtkmm/box.h>
@@ -27,17 +29,16 @@
 #include <gtkmm/radiomenuitem.h>
 #include <gtkmm/checkmenuitem.h>
 
-#include <gtkmm2ext/selector.h>
-#include <list>
+#include "gtkmm2ext/selector.h"
 
 #include "ardour/types.h"
 #include "ardour/region.h"
 
 #include "ardour_dialog.h"
+#include "ardour_dropdown.h"
 #include "route_ui.h"
 #include "enums.h"
 #include "route_time_axis.h"
-#include "canvas.h"
 #include "midi_streamview.h"
 
 namespace MIDI {
@@ -55,6 +56,10 @@ namespace ARDOUR {
 	class MidiPlaylist;
 }
 
+namespace Evoral {
+	template<typename Time> class Note;
+}
+
 class PublicEditor;
 class MidiStreamView;
 class MidiScroomer;
@@ -65,24 +70,23 @@ class MidiChannelSelectorWindow;
 
 class MidiTimeAxisView : public RouteTimeAxisView
 {
-  public:
- 	MidiTimeAxisView (PublicEditor&, ARDOUR::Session*, ArdourCanvas::Canvas& canvas);
- 	virtual ~MidiTimeAxisView ();
+public:
+	MidiTimeAxisView (PublicEditor&, ARDOUR::Session*, ArdourCanvas::Canvas& canvas);
+	virtual ~MidiTimeAxisView ();
 
 	void set_route (boost::shared_ptr<ARDOUR::Route>);
 
 	MidiStreamView* midi_view();
 
-	void set_height (uint32_t);
-
-	void enter_internal_edit_mode ();
-	void leave_internal_edit_mode ();
+	void set_height (uint32_t, TrackHeightMode m = OnlySelf);
 
 	boost::shared_ptr<ARDOUR::MidiRegion> add_region (ARDOUR::framepos_t, ARDOUR::framecnt_t, bool);
 
 	void show_all_automation (bool apply_to_selection = false);
 	void show_existing_automation (bool apply_to_selection = false);
 	void create_automation_child (const Evoral::Parameter& param, bool show);
+
+	bool paste (ARDOUR::framepos_t, const Selection&, PasteContext& ctx);
 
 	ARDOUR::NoteMode  note_mode() const { return _note_mode; }
 	ARDOUR::ColorMode color_mode() const { return _color_mode; }
@@ -101,21 +105,23 @@ class MidiTimeAxisView : public RouteTimeAxisView
 
 	uint8_t get_channel_for_add () const;
 
-  protected:
+	void get_per_region_note_selection (std::list<std::pair<PBD::ID, std::set<boost::shared_ptr<Evoral::Note<Evoral::Beats> > > > >&);
+
+protected:
 	void start_step_editing ();
 	void stop_step_editing ();
 
-  private:
+private:
 	sigc::signal<void, std::string, std::string>  _midi_patch_settings_changed;
 
-	void model_changed();
-	void custom_device_mode_changed();
+	void model_changed(const std::string& model);
+	void custom_device_mode_changed(const std::string& mode);
 
 	void append_extra_display_menu_items ();
 	void build_automation_action_menu (bool);
 	Gtk::Menu* build_note_mode_menu();
 	Gtk::Menu* build_color_mode_menu();
-	
+
 	void set_note_mode (ARDOUR::NoteMode mode, bool apply_to_selection = false);
 	void set_color_mode (ARDOUR::ColorMode, bool force = false, bool redisplay = true, bool apply_to_selection = false);
 	void set_note_range (MidiStreamView::VisibleNoteRange range, bool apply_to_selection = false);
@@ -134,14 +140,13 @@ class MidiTimeAxisView : public RouteTimeAxisView
 	Gtk::RadioMenuItem*          _meter_color_mode_item;
 	Gtk::RadioMenuItem*          _channel_color_mode_item;
 	Gtk::RadioMenuItem*          _track_color_mode_item;
-        Gtk::Label                   _playback_channel_status;
-        Gtk::Label                   _capture_channel_status;
- 	Gtk::HBox                    _channel_status_box;
-        Gtk::Button                  _channel_selector_button;
+	Gtk::Label                   _playback_channel_status;
+	Gtk::Label                   _capture_channel_status;
+	Gtk::HBox                    _channel_status_box;
 	Gtk::VBox                    _midi_controls_box;
 	MidiChannelSelectorWindow*   _channel_selector;
-	Gtk::ComboBoxText            _midnam_model_selector;
-	Gtk::ComboBoxText            _midnam_custom_device_mode_selector;
+	ArdourDropdown               _midnam_model_selector;
+	ArdourDropdown               _midnam_custom_device_mode_selector;
 
 	Gtk::CheckMenuItem*          _step_edit_item;
 	Gtk::Menu*                    default_channel_menu;
@@ -155,8 +160,8 @@ class MidiTimeAxisView : public RouteTimeAxisView
 	void add_single_channel_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items, int ctl, const std::string& name);
 	void add_multi_channel_controller_item (Gtk::Menu_Helpers::MenuList& ctl_items, int ctl, const std::string& name);
 	void build_controller_menu ();
-        void toggle_channel_selector ();
-        void channel_selector_hidden ();
+	void toggle_channel_selector ();
+	void channel_selector_hidden ();
 	void set_channel_mode (ARDOUR::ChannelMode, uint16_t);
 
 	void set_note_selection (uint8_t note);
@@ -167,6 +172,7 @@ class MidiTimeAxisView : public RouteTimeAxisView
 	void add_note_selection_region_view (RegionView* rv, uint8_t note, uint16_t chn_mask);
 	void extend_note_selection_region_view (RegionView*, uint8_t note, uint16_t chn_mask);
 	void toggle_note_selection_region_view (RegionView*, uint8_t note, uint16_t chn_mask);
+	void get_per_region_note_selection_region_view (RegionView*, std::list<std::pair<PBD::ID, std::set<boost::shared_ptr<Evoral::Note<Evoral::Beats> > > > >&);
 
 	void ensure_step_editor ();
 
@@ -177,9 +183,8 @@ class MidiTimeAxisView : public RouteTimeAxisView
 
 	StepEditor* _step_editor;
 
-        void capture_channel_mode_changed();
-        void playback_channel_mode_changed();
+	void capture_channel_mode_changed();
+	void playback_channel_mode_changed();
 };
 
 #endif /* __ardour_midi_time_axis_h__ */
-

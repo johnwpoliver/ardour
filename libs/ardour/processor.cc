@@ -63,6 +63,8 @@ Processor::Processor(Session& session, const string& name)
 	, _display_to_user (true)
 	, _pre_fader (false)
 	, _ui_pointer (0)
+	, _window_proxy (0)
+	, _owner (0)
 {
 }
 
@@ -78,6 +80,8 @@ Processor::Processor (const Processor& other)
 	, _display_to_user (true)
 	, _pre_fader (false)
 	, _ui_pointer (0)
+	, _window_proxy (0)
+	, _owner (0)
 {
 }
 
@@ -146,7 +150,9 @@ Processor::set_state_2X (const XMLNode & node, int /*version*/)
 			
 			set_id (**i);
 
-			if ((prop = (*i)->property ("active")) != 0) {
+			//note:  in A2, active state was stored in the Redirect node, not the child IO node
+			/*
+			 * if ((prop = (*i)->property ("active")) != 0) {
 				bool const a = string_is_affirmative (prop->value ());
 				if (_active != a) {
 					if (a) {
@@ -155,7 +161,8 @@ Processor::set_state_2X (const XMLNode & node, int /*version*/)
 						deactivate ();
 					}
 				}
-			}
+			}*/
+			
 		}
 	}
 
@@ -218,7 +225,7 @@ Processor::set_state (const XMLNode& node, int version)
 		}
 	}
 
-	bool const a = string_is_affirmative (prop->value ());
+	bool const a = string_is_affirmative (prop->value ()) && !_session.get_disable_all_loaded_plugins();
 	if (_active != a) {
 		if (a) {
 			activate ();
@@ -268,4 +275,22 @@ void
 Processor::set_ui (void* p)
 {
 	_ui_pointer = p;
+}
+
+void
+Processor::set_window_proxy (ProcessorWindowProxy* wp)
+{
+	_window_proxy = wp;
+}
+
+void
+Processor::set_owner (SessionObject* o)
+{
+	_owner = o;
+}
+
+SessionObject*
+Processor::owner() const
+{
+	return _owner;
 }

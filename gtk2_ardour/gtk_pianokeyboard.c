@@ -33,9 +33,9 @@
 
 #include <assert.h>
 #include <string.h>
-#include <strings.h>
 #include <stdint.h>
 #include <cairo/cairo.h>
+
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
 
@@ -155,6 +155,13 @@ press_key(PianoKeyboard *pk, int key)
 	else
 		pk->notes[key].sustained = 0;
 
+	if (pk->monophonic && pk->last_key != key) {
+		pk->notes[pk->last_key].pressed   = 0;
+		pk->notes[pk->last_key].sustained = 0;
+		queue_note_draw(pk, pk->last_key);
+	}
+	pk->last_key = key;
+
 	pk->notes[key].pressed = 1;
 
 	g_signal_emit_by_name(GTK_WIDGET(pk), "note-on", key);
@@ -244,7 +251,7 @@ bind_key(PianoKeyboard *pk, const char *key, int note)
 {
 	assert(pk->key_bindings != NULL);
 
-	g_hash_table_insert(pk->key_bindings, (gpointer)key, (gpointer)((intptr_t)note));
+	g_hash_table_insert(pk->key_bindings, (const gpointer)key, (gpointer)((intptr_t)note));
 }
 
 static void
@@ -360,6 +367,8 @@ keyboard_event_handler(GtkWidget *mk, GdkEventKey *event, gpointer ignored)
 	GdkKeymapKey	kk;
 	PianoKeyboard	*pk = PIANO_KEYBOARD(mk);
 
+        (void) ignored;
+
 	/* We're not using event->keyval, because we need keyval with level set to 0.
 	   E.g. if user holds Shift and presses '7', we want to get a '7', not '&'. */
 	kk.keycode = event->hardware_keycode;
@@ -440,6 +449,8 @@ mouse_button_event_handler(PianoKeyboard *pk, GdkEventButton *event, gpointer ig
 
 	int		note = get_note_for_xy(pk, x, y);
 
+        (void) ignored;
+
 	if (event->button != 1)
 		return TRUE;
 
@@ -476,6 +487,8 @@ static gboolean
 mouse_motion_event_handler(PianoKeyboard *pk, GdkEventMotion *event, gpointer ignored)
 {
 	int		note;
+
+        (void) ignored;
 
 	if ((event->state & GDK_BUTTON1_MASK) == 0)
 		return TRUE;
@@ -529,6 +542,8 @@ piano_keyboard_expose(GtkWidget *widget, GdkEventExpose *event)
 static void
 piano_keyboard_size_request(GtkWidget* w, GtkRequisition *requisition)
 {
+        (void) w;
+
 	requisition->width = PIANO_KEYBOARD_DEFAULT_WIDTH;
 	requisition->height = PIANO_KEYBOARD_DEFAULT_HEIGHT;
 }
@@ -602,15 +617,15 @@ piano_keyboard_class_init(PianoKeyboardClass *klass)
 
 	/* Set up signals. */
 	piano_keyboard_signals[NOTE_ON_SIGNAL] = g_signal_new ("note-on",
-		G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION,
+		G_TYPE_FROM_CLASS (klass), (GSignalFlags)(G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION),
 		0, NULL, NULL, g_cclosure_marshal_VOID__INT, G_TYPE_NONE, 1, G_TYPE_INT);
 
 	piano_keyboard_signals[NOTE_OFF_SIGNAL] = g_signal_new ("note-off",
-		G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION,
+		G_TYPE_FROM_CLASS (klass), (GSignalFlags)(G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION),
 		0, NULL, NULL, g_cclosure_marshal_VOID__INT, G_TYPE_NONE, 1, G_TYPE_INT);
 
 	piano_keyboard_signals[REST_SIGNAL] = g_signal_new ("rest",
-                G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION,
+                G_TYPE_FROM_CLASS (klass), (GSignalFlags)(G_SIGNAL_RUN_FIRST | G_SIGNAL_ACTION),
                 0, NULL, NULL, g_cclosure_marshal_VOID__VOID, G_TYPE_NONE, 0);
 
 	widget_klass = (GtkWidgetClass*) klass;
@@ -651,7 +666,7 @@ piano_keyboard_get_type(void)
                         0,    /* value_table */
 		};
 
-		mk_type = g_type_register_static(GTK_TYPE_DRAWING_AREA, "PianoKeyboard", &mk_info, 0);
+		mk_type = g_type_register_static(GTK_TYPE_DRAWING_AREA, "PianoKeyboard", &mk_info, (GTypeFlags)0);
 	}
 
 	return mk_type;
@@ -660,7 +675,7 @@ piano_keyboard_get_type(void)
 GtkWidget *
 piano_keyboard_new(void)
 {
-	GtkWidget *widget = gtk_type_new(piano_keyboard_get_type());
+	GtkWidget *widget = (GtkWidget*)gtk_type_new(piano_keyboard_get_type());
 
 	PianoKeyboard *pk = PIANO_KEYBOARD(widget);
 
@@ -669,7 +684,9 @@ piano_keyboard_new(void)
 	pk->enable_keyboard_cue = 0;
 	pk->octave = 4;
 	pk->note_being_pressed_using_mouse = -1;
-	memset((void *)pk->notes, 0, sizeof(struct Note) * NNOTES);
+	pk->last_key = 0;
+	pk->monophonic = FALSE;
+	memset((void *)pk->notes, 0, sizeof(struct PKNote) * NNOTES);
 	pk->key_bindings = g_hash_table_new(g_str_hash, g_str_equal);
 	bind_keys_qwerty(pk);
 
@@ -680,6 +697,12 @@ void
 piano_keyboard_set_keyboard_cue(PianoKeyboard *pk, int enabled)
 {
 	pk->enable_keyboard_cue = enabled;
+}
+
+void
+piano_keyboard_set_monophonic(PianoKeyboard *pk, gboolean monophonic)
+{
+	pk->monophonic = monophonic;
 }
 
 void
@@ -732,13 +755,13 @@ piano_keyboard_set_keyboard_layout(PianoKeyboard *pk, const char *layout)
 {
 	assert(layout);
 
-	if (!strcasecmp(layout, "QWERTY")) {
+	if (!g_ascii_strcasecmp(layout, "QWERTY")) {
 		bind_keys_qwerty(pk);
 
-	} else if (!strcasecmp(layout, "QWERTZ")) {
+	} else if (!g_ascii_strcasecmp(layout, "QWERTZ")) {
 		bind_keys_qwertz(pk);
 
-	} else if (!strcasecmp(layout, "AZERTY")) {
+	} else if (!g_ascii_strcasecmp(layout, "AZERTY")) {
 		bind_keys_azerty(pk);
 
 	} else {

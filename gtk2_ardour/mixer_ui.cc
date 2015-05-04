@@ -41,6 +41,7 @@
 #include "ardour/midi_track.h"
 #include "ardour/plugin_manager.h"
 #include "ardour/route_group.h"
+#include "ardour/route_sorters.h"
 #include "ardour/session.h"
 
 #include "keyboard.h"
@@ -56,10 +57,12 @@
 #include "actions.h"
 #include "gui_thread.h"
 #include "mixer_group_tabs.h"
+#include "timers.h"
 
 #include "i18n.h"
 
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace Glib;
@@ -89,14 +92,17 @@ Mixer_UI::Mixer_UI ()
 	, in_group_row_change (false)
 	, track_menu (0)
 	, _monitor_section (0)
-	, _strip_width (Config->get_default_narrow_ms() ? Narrow : Wide)
+	, _strip_width (ARDOUR_UI::config()->get_default_narrow_ms() ? Narrow : Wide)
 	, ignore_reorder (false)
+        , _in_group_rebuild_or_clear (false)
+        , _route_deletion_in_progress (false)
 	, _following_editor_selection (false)
+	, _maximised (false)
 {
 	/* allow this window to become the key focus window */
 	set_flags (CAN_FOCUS);
 
-	Route::SyncOrderKeys.connect (*this, invalidator (*this), boost::bind (&Mixer_UI::sync_treeview_from_order_keys, this, _1), gui_context());
+	Route::SyncOrderKeys.connect (*this, invalidator (*this), boost::bind (&Mixer_UI::sync_treeview_from_order_keys, this), gui_context());
 
 	scroller.set_can_default (true);
 	set_default (scroller);
@@ -115,7 +121,7 @@ Mixer_UI::Mixer_UI ()
 	b->show_all ();
 
 	scroller.add (*b);
-	scroller.set_policy (Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
+	scroller.set_policy (Gtk::POLICY_ALWAYS, Gtk::POLICY_AUTOMATIC);
 
 	setup_track_display ();
 
@@ -195,7 +201,7 @@ Mixer_UI::Mixer_UI ()
 #else
 	global_hpacker.pack_start (out_packer, false, false, 12);
 #endif
-	list_hpane.pack1(list_vpacker, true, true);
+	list_hpane.pack1(list_vpacker, false, false);
 	list_hpane.pack2(global_hpacker, true, false);
 
 	rhs_pane1.signal_size_allocate().connect (sigc::bind (sigc::mem_fun(*this, &Mixer_UI::pane_allocation_handler),
@@ -239,11 +245,7 @@ Mixer_UI::Mixer_UI ()
 	list_hpane.show();
 	group_display.show();
 
-	_in_group_rebuild_or_clear = false;
-
 	MixerStrip::CatchDeletion.connect (*this, invalidator (*this), boost::bind (&Mixer_UI::remove_strip, this, _1), gui_context());
-
-        MonitorSection::setup_knob_images ();
 
 #ifndef DEFER_PLUGIN_SELECTOR_LOAD
 	_plugin_selector = new PluginSelector (PluginManager::instance ());
@@ -290,7 +292,7 @@ Mixer_UI::show_window ()
 			ms = (*ri)[track_columns.strip];
 			ms->set_width_enum (ms->get_width_enum (), ms->width_owner());
 			/* Fix visibility of mixer strip stuff */
-			ms->parameter_changed (X_("mixer-strip-visibility"));
+			ms->parameter_changed (X_("mixer-element-visibility"));
 		}
 	}
 	
@@ -313,6 +315,22 @@ Mixer_UI::hide_window (GdkEventAny *ev)
 void
 Mixer_UI::add_strips (RouteList& routes)
 {
+	bool from_scratch = track_model->children().size() == 0;
+	Gtk::TreeModel::Children::iterator insert_iter = track_model->children().end();
+
+	for (Gtk::TreeModel::Children::iterator it = track_model->children().begin(); it != track_model->children().end(); ++it) {
+		boost::shared_ptr<Route> r = (*it)[track_columns.route];
+
+		if (r->order_key() == (routes.front()->order_key() + routes.size())) {
+			insert_iter = it;
+			break;
+		}
+	}
+
+	if(!from_scratch) {
+		_selection.clear_routes ();
+	}
+
 	MixerStrip* strip;
 
 	try {
@@ -351,7 +369,7 @@ Mixer_UI::add_strips (RouteList& routes)
 			strip = new MixerStrip (*this, _session, route);
 			strips.push_back (strip);
 
-			Config->get_default_narrow_ms() ? _strip_width = Narrow : _strip_width = Wide;
+			ARDOUR_UI::config()->get_default_narrow_ms() ? _strip_width = Narrow : _strip_width = Wide;
 			
 			if (strip->width_owner() != strip) {
 				strip->set_width_enum (_strip_width, this);
@@ -359,11 +377,15 @@ Mixer_UI::add_strips (RouteList& routes)
 			
 			show_strip (strip);
 			
-			TreeModel::Row row = *(track_model->append());
+			TreeModel::Row row = *(track_model->insert(insert_iter));
 			row[track_columns.text] = route->name();
 			row[track_columns.visible] = strip->route()->is_master() ? true : strip->marked_for_display();
 			row[track_columns.route] = route;
 			row[track_columns.strip] = strip;
+
+			if (!from_scratch) {
+				_selection.add (strip);
+			}
 			
 			route->PropertyChanged.connect (*this, invalidator (*this), boost::bind (&Mixer_UI::strip_property_changed, this, _1, strip), gui_context());
 			
@@ -380,6 +402,30 @@ Mixer_UI::add_strips (RouteList& routes)
 	sync_order_keys_from_treeview ();
 	redisplay_track_list ();
 }
+
+void
+Mixer_UI::deselect_all_strip_processors ()
+{
+	for (list<MixerStrip *>::iterator i = strips.begin(); i != strips.end(); ++i) {
+		(*i)->deselect_all_processors();
+	}
+}
+
+void
+Mixer_UI::select_none ()
+{
+	_selection.clear_routes();
+	deselect_all_strip_processors();
+}
+
+void
+Mixer_UI::delete_processors ()
+{
+	for (list<MixerStrip *>::iterator i = strips.begin(); i != strips.end(); ++i) {
+		(*i)->delete_processors();
+	}
+}
+
 
 void
 Mixer_UI::remove_strip (MixerStrip* strip)
@@ -399,6 +445,7 @@ Mixer_UI::remove_strip (MixerStrip* strip)
 	
 	for (ri = rows.begin(); ri != rows.end(); ++ri) {
 		if ((*ri)[track_columns.strip] == strip) {
+                        PBD::Unwinder<bool> uw (_route_deletion_in_progress, true);
 			track_model->erase (ri);
 			break;
 		}
@@ -408,7 +455,7 @@ Mixer_UI::remove_strip (MixerStrip* strip)
 void
 Mixer_UI::reset_remote_control_ids ()
 {
-	if (Config->get_remote_model() != MixerOrdered || !_session || _session->deletion_in_progress()) {
+	if (Config->get_remote_model() == UserOrdered || !_session || _session->deletion_in_progress()) {
 		return;
 	}
 
@@ -426,6 +473,17 @@ Mixer_UI::reset_remote_control_ids ()
 	uint32_t invisible_key = UINT32_MAX;
 
 	for (ri = rows.begin(); ri != rows.end(); ++ri) {
+
+		/* skip two special values */
+		
+		if (rid == Route::MasterBusRemoteControlID) {
+			rid++;
+		}
+		
+		if (rid == Route::MonitorBusRemoteControlID) {
+			rid++;
+		}
+
 		boost::shared_ptr<Route> route = (*ri)[track_columns.route];
 		bool visible = (*ri)[track_columns.visible];
 
@@ -434,7 +492,7 @@ Mixer_UI::reset_remote_control_ids ()
 			uint32_t new_rid = (visible ? rid : invisible_key--);
 			
 			if (new_rid != route->remote_control_id()) {
-				route->set_remote_control_id_from_order_key (MixerSort, new_rid);	
+				route->set_remote_control_id_explicit (new_rid);	
 				rid_change = true;
 			}
 			
@@ -476,10 +534,10 @@ Mixer_UI::sync_order_keys_from_treeview ()
 		boost::shared_ptr<Route> route = (*ri)[track_columns.route];
 		bool visible = (*ri)[track_columns.visible];
 
-		uint32_t old_key = route->order_key (MixerSort);
+		uint32_t old_key = route->order_key ();
 
 		if (order != old_key) {
-			route->set_order_key (MixerSort, order);
+			route->set_order_key (order);
 			changed = true;
 		}
 
@@ -488,7 +546,7 @@ Mixer_UI::sync_order_keys_from_treeview ()
 			uint32_t new_rid = (visible ? rid : invisible_key--);
 
 			if (new_rid != route->remote_control_id()) {
-				route->set_remote_control_id_from_order_key (MixerSort, new_rid);	
+				route->set_remote_control_id_explicit (new_rid);	
 				rid_change = true;
 			}
 			
@@ -503,7 +561,7 @@ Mixer_UI::sync_order_keys_from_treeview ()
 
 	if (changed) {
 		/* tell everyone that we changed the mixer sort keys */
-		_session->sync_order_keys (MixerSort);
+		_session->sync_order_keys ();
 	}
 
 	if (rid_change) {
@@ -513,33 +571,13 @@ Mixer_UI::sync_order_keys_from_treeview ()
 }
 
 void
-Mixer_UI::sync_treeview_from_order_keys (RouteSortOrderKey src)
+Mixer_UI::sync_treeview_from_order_keys ()
 {
 	if (!_session || _session->deletion_in_progress()) {
 		return;
 	}
 
-	DEBUG_TRACE (DEBUG::OrderKeys, string_compose ("mixer sync model from order keys, src = %1\n", enum_2_string (src)));
-
-	if (src == EditorSort) {
-
-		if (!Config->get_sync_all_route_ordering()) {
-			/* editor sort keys changed - we don't care */
-			return;
-		}
-
-		DEBUG_TRACE (DEBUG::OrderKeys, "reset mixer order key to match editor\n");
-
-		/* editor sort keys were changed, update the mixer sort
-		 * keys since "sync mixer+editor order" is enabled.
-		 */
-
-		boost::shared_ptr<RouteList> r = _session->get_routes ();
-		
-		for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
-			(*i)->sync_order_keys (src);
-		}
-	}
+	DEBUG_TRACE (DEBUG::OrderKeys, "mixer sync model from order keys.\n");
 
 	/* we could get here after either a change in the Mixer or Editor sort
 	 * order, but either way, the mixer order keys reflect the intended
@@ -559,7 +597,7 @@ Mixer_UI::sync_treeview_from_order_keys (RouteSortOrderKey src)
 
 	for (TreeModel::Children::iterator ri = rows.begin(); ri != rows.end(); ++ri, ++old_order) {
 		boost::shared_ptr<Route> route = (*ri)[track_columns.route];
-		sorted_routes.push_back (RoutePlusOrderKey (route, old_order, route->order_key (MixerSort)));
+		sorted_routes.push_back (RoutePlusOrderKey (route, old_order, route->order_key ()));
 	}
 
 	SortByNewDisplayOrder cmp;
@@ -592,7 +630,7 @@ Mixer_UI::sync_treeview_from_order_keys (RouteSortOrderKey src)
 void
 Mixer_UI::follow_editor_selection ()
 {
-	if (!Config->get_link_editor_and_mixer_selection() || _following_editor_selection) {
+	if (_following_editor_selection) {
 		return;
 	}
 
@@ -638,7 +676,10 @@ Mixer_UI::strip_button_release_event (GdkEventButton *ev, MixerStrip *strip)
 			/* primary-click: toggle selection state of strip */
 			if (Keyboard::modifier_state_equals (ev->state, Keyboard::PrimaryModifier)) {
 				_selection.remove (strip);
-			} 
+			} else if (_selection.routes.size() > 1) {
+				/* de-select others */
+				_selection.set (strip);
+			}
 		} else {
 			if (Keyboard::modifier_state_equals (ev->state, Keyboard::PrimaryModifier)) {
 				_selection.add (strip);
@@ -650,6 +691,7 @@ Mixer_UI::strip_button_release_event (GdkEventButton *ev, MixerStrip *strip)
 					
 					vector<MixerStrip*> tmp;
 					bool accumulate = false;
+					bool found_another = false;
 					
 					tmp.push_back (strip);
 
@@ -668,6 +710,7 @@ Mixer_UI::strip_button_release_event (GdkEventButton *ev, MixerStrip *strip)
 							/* hit selected strip. if currently accumulating others,
 							   we're done. if not accumulating others, start doing so.
 							*/
+							found_another = true;
 							if (accumulate) {
 								/* done */
 								break;
@@ -681,9 +724,12 @@ Mixer_UI::strip_button_release_event (GdkEventButton *ev, MixerStrip *strip)
 						}
 					}
 
-					for (vector<MixerStrip*>::iterator i = tmp.begin(); i != tmp.end(); ++i) {
-						_selection.add (*i);
-					}
+					if (found_another) {
+						for (vector<MixerStrip*>::iterator i = tmp.begin(); i != tmp.end(); ++i) {
+							_selection.add (*i);
+						}
+					} else
+						_selection.set (strip);  //user wants to start a range selection, but there aren't any others selected yet
 				}
 
 			} else {
@@ -853,7 +899,7 @@ Mixer_UI::hide_strip (MixerStrip* ms)
 gint
 Mixer_UI::start_updating ()
 {
-    fast_screen_update_connection = ARDOUR_UI::instance()->SuperRapidScreenUpdate.connect (sigc::mem_fun(*this, &Mixer_UI::fast_update_strips));
+    fast_screen_update_connection = Timers::super_rapid_connect (sigc::mem_fun(*this, &Mixer_UI::fast_update_strips));
     return 0;
 }
 
@@ -996,9 +1042,17 @@ Mixer_UI::track_list_delete (const Gtk::TreeModel::Path&)
 {
 	/* this happens as the second step of a DnD within the treeview as well
 	   as when a row/route is actually deleted.
+           
+           if it was a deletion then we have to force a redisplay because
+           order keys may not have changed.
 	*/
+
 	DEBUG_TRACE (DEBUG::OrderKeys, "mixer UI treeview row deleted\n");
 	sync_order_keys_from_treeview ();
+
+        if (_route_deletion_in_progress) {
+                redisplay_track_list ();
+        }
 }
 
 void
@@ -1089,28 +1143,12 @@ Mixer_UI::strip_width_changed ()
 
 }
 
-struct SignalOrderRouteSorter {
-    bool operator() (boost::shared_ptr<Route> a, boost::shared_ptr<Route> b) {
-	    if (a->is_master() || a->is_monitor()) {
-		    /* "a" is a special route (master, monitor, etc), and comes
-		     * last in the mixer ordering
-		     */
-		    return false;
-	    } else if (b->is_master() || b->is_monitor()) {
-		    /* everything comes before b */
-		    return true;
-	    }
-	    return a->order_key (MixerSort) < b->order_key (MixerSort);
-
-    }
-};
-
 void
 Mixer_UI::initial_track_display ()
 {
 	boost::shared_ptr<RouteList> routes = _session->get_routes();
 	RouteList copy (*routes);
-	SignalOrderRouteSorter sorter;
+	ARDOUR::SignalOrderRouteSorter sorter;
 
 	copy.sort (sorter);
 
@@ -1122,7 +1160,7 @@ Mixer_UI::initial_track_display ()
 		add_strips (copy);
 	}
 	
-	_session->sync_order_keys (MixerSort);
+	_session->sync_order_keys ();
 
 	redisplay_track_list ();
 }
@@ -1198,12 +1236,14 @@ Mixer_UI::group_display_button_press (GdkEventButton* ev)
 	int celly;
 
 	if (!group_display.get_path_at_pos ((int)ev->x, (int)ev->y, path, column, cellx, celly)) {
-		return false;
+		_group_tabs->get_menu(0)->popup (1, ev->time);
+		return true;
 	}
 
 	TreeIter iter = group_model->get_iter (path);
 	if (!iter) {
-		return false;
+		_group_tabs->get_menu(0)->popup (1, ev->time);
+		return true;
 	}
 
 	RouteGroup* group = (*iter)[group_columns.group];
@@ -1266,6 +1306,14 @@ Mixer_UI::route_groups_changed ()
 
 	group_model->clear ();
 
+#if 0
+	/* this is currently not used,
+	 * Mixer_UI::group_display_button_press() has a case for it,
+	 * and a commented edit_route_group() but that's n/a since 2011.
+	 *
+	 * This code is left as reminder that
+	 * row[group_columns.group] = 0 has special meaning.
+	 */
 	{
 		TreeModel::Row row;
 		row = *(group_model->append());
@@ -1273,6 +1321,7 @@ Mixer_UI::route_groups_changed ()
 		row[group_columns.text] = (_("-all-"));
 		row[group_columns.group] = 0;
 	}
+#endif
 
 	_session->foreach_route_group (sigc::mem_fun (*this, &Mixer_UI::add_route_group));
 
@@ -1477,12 +1526,12 @@ Mixer_UI::strip_scroller_button_release (GdkEventButton* ev)
 }
 
 void
-Mixer_UI::set_strip_width (Width w)
+Mixer_UI::set_strip_width (Width w, bool save)
 {
 	_strip_width = w;
 
 	for (list<MixerStrip*>::iterator i = strips.begin(); i != strips.end(); ++i) {
-		(*i)->set_width_enum (w, this);
+		(*i)->set_width_enum (w, save ? (*i)->width_owner() : this);
 	}
 }
 
@@ -1559,6 +1608,19 @@ Mixer_UI::set_state (const XMLNode& node)
 		}
 	}
 
+	if ((prop = node.property ("maximised"))) {
+		bool yn = string_is_affirmative (prop->value());
+		Glib::RefPtr<Action> act = ActionManager::get_action (X_("Common"), X_("ToggleMaximalMixer"));
+		assert (act);
+		Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic(act);
+		bool fs = tact && tact->get_active();
+		if (yn ^ fs) {
+			ActionManager::do_action ("Common",
+					"ToggleMaximalMixer");
+		}
+	}
+
+
 	return 0;
 }
 
@@ -1600,6 +1662,8 @@ Mixer_UI::get_state (void)
 	node->add_property ("narrow-strips", _strip_width == Narrow ? "yes" : "no");
 
 	node->add_property ("show-mixer", _visible ? "yes" : "no");
+
+	node->add_property ("maximised", _maximised ? "yes" : "no");
 
 	return *node;
 }
@@ -1666,6 +1730,7 @@ Mixer_UI::pane_allocation_handler (Allocation&, Gtk::Paned* which)
 void
 Mixer_UI::scroll_left ()
 {
+	if (!scroller.get_hscrollbar()) return;
 	Adjustment* adj = scroller.get_hscrollbar()->get_adjustment();
 	/* stupid GTK: can't rely on clamping across versions */
 	scroller.get_hscrollbar()->set_value (max (adj->get_lower(), adj->get_value() - adj->get_step_increment()));
@@ -1674,6 +1739,7 @@ Mixer_UI::scroll_left ()
 void
 Mixer_UI::scroll_right ()
 {
+	if (!scroller.get_hscrollbar()) return;
 	Adjustment* adj = scroller.get_hscrollbar()->get_adjustment();
 	/* stupid GTK: can't rely on clamping across versions */
 	scroller.get_hscrollbar()->set_value (min (adj->get_upper(), adj->get_value() + adj->get_step_increment()));
@@ -1758,7 +1824,7 @@ Mixer_UI::parameter_changed (string const & p)
 			_group_tabs->hide ();
 		}
 	} else if (p == "default-narrow_ms") {
-		bool const s = Config->get_default_narrow_ms ();
+		bool const s = ARDOUR_UI::config()->get_default_narrow_ms ();
 		for (list<MixerStrip*>::iterator i = strips.begin(); i != strips.end(); ++i) {
 			(*i)->set_width_enum (s ? Narrow : Wide, this);
 		}
@@ -1795,6 +1861,7 @@ Mixer_UI::setup_track_display ()
 	track_display.get_column (1)->set_data (X_("colnum"), GUINT_TO_POINTER(1));
 	track_display.get_column (0)->set_expand(true);
 	track_display.get_column (1)->set_expand(false);
+	track_display.get_column (0)->set_sizing (Gtk::TREE_VIEW_COLUMN_FIXED);
 	track_display.set_name (X_("EditGroupList"));
 	track_display.get_selection()->set_mode (Gtk::SELECTION_NONE);
 	track_display.set_reorderable (true);
@@ -1899,16 +1966,8 @@ Mixer_UI::set_route_targets_for_operation ()
 		return;
 	}
 
-	/* nothing selected ... try to get mixer strip at mouse */
+//  removed "implicit" selections of strips, after discussion on IRC
 
-	int x, y;
-	get_pointer (x, y);
-	
-	MixerStrip* ms = strip_by_x (x);
-	
-	if (ms) {
-		_route_targets.insert (ms);
-	}
 }
 
 void
@@ -1924,7 +1983,7 @@ void
 Mixer_UI::toggle_midi_input_active (bool flip_others)
 {
 	boost::shared_ptr<RouteList> rl (new RouteList);
-	bool onoff;
+	bool onoff = false;
 
 	set_route_targets_for_operation ();
 
@@ -1940,3 +1999,26 @@ Mixer_UI::toggle_midi_input_active (bool flip_others)
 	_session->set_exclusive_input_active (rl, onoff, flip_others);
 }
 
+void
+Mixer_UI::maximise_mixer_space ()
+{
+	if (_maximised) {
+		return;
+	}
+
+	fullscreen ();
+
+	_maximised = true;
+}
+
+void
+Mixer_UI::restore_mixer_space ()
+{
+	if (!_maximised) {
+		return;
+	}
+
+	unfullscreen();
+
+	_maximised = false;
+}

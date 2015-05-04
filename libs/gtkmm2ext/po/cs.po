@@ -6,8 +6,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2013-04-09 09:28-0400\n"
-"PO-Revision-Date: 2013-02-22 21:09+0100\n"
+"POT-Creation-Date: 2015-03-31 20:13-0400\n"
+"PO-Revision-Date: 2013-06-13 22:33+0200\n"
 "Last-Translator: Pavel Fric <pavelfric@seznam.cz>\n"
 "Language-Team: Czech <kde-i18n-doc@kde.org>\n"
 "Language: cs\n"
@@ -17,11 +17,15 @@ msgstr ""
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "X-Generator: Lokalize 1.5\n"
 
-#: actions.cc:386
+#: actions.cc:336
+msgid "programming error: %1"
+msgstr ""
+
+#: actions.cc:511
 msgid "Unknown action name: %1"
 msgstr "Neznámý název pro činnost: %1"
 
-#: binding_proxy.cc:84
+#: binding_proxy.cc:81
 msgid "operate controller now"
 msgstr "Obsluhovat ovladač nyní"
 
@@ -29,11 +33,19 @@ msgstr "Obsluhovat ovladač nyní"
 msgid "button cannot watch state of non-existing Controllable\n"
 msgstr "Tlačítko nemůže sledovat stav neexistujícího ovladatelného cíle\n"
 
-#: gtk_ui.cc:107
+#: cursors.cc:82
+msgid "cursor hotspots info file %1 has an error on line %2"
+msgstr ""
+
+#: emscale.cc:52
+msgid "ABCDEFGHIJLKMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+msgstr ""
+
+#: gtk_ui.cc:113
 msgid "Log"
 msgstr "Zápis"
 
-#: gtk_ui.cc:361
+#: gtk_ui.cc:370
 msgid ""
 "\n"
 "\n"
@@ -43,48 +55,82 @@ msgstr ""
 "\n"
 "Kurzbefehl: "
 
-#: gtk_ui.cc:633
+#: gtk_ui.cc:638
 msgid "Press To Exit"
 msgstr "Stisknout pro ukončení"
 
-#: gtk_ui.cc:669
+#: gtk_ui.cc:674
 msgid "I'm sorry %1, I can't do that"
 msgstr "Bohužel to nelze udělat, %1"
 
-#: keyboard.cc:68
+#: keyboard.cc:73
 msgid "Command"
 msgstr "Příkaz"
 
-#: keyboard.cc:69 keyboard.cc:72 keyboard.cc:85 keyboard.cc:89
+#: keyboard.cc:74 keyboard.cc:77 keyboard.cc:90 keyboard.cc:94
 msgid "Control"
 msgstr "Ctrl"
 
-#: keyboard.cc:70 keyboard.cc:73 keyboard.cc:87 keyboard.cc:90
+#: keyboard.cc:75 keyboard.cc:78 keyboard.cc:92 keyboard.cc:95
 msgid "Key|Shift"
 msgstr "Key|Shift"
 
-#: keyboard.cc:71
+#: keyboard.cc:76
 msgid "Option"
 msgstr "Volba"
 
-#: keyboard.cc:86
+#: keyboard.cc:91
 msgid "Alt"
 msgstr "Alt"
 
-#: keyboard.cc:88
+#: keyboard.cc:93
 msgid "Meta"
 msgstr "Meta"
 
-#: keyboard.cc:134 keyboard.cc:523
+#: keyboard.cc:144 keyboard.cc:540
 msgid "Unknown"
 msgstr "Neznámý"
 
-#: keyboard.cc:534
-#, fuzzy
+#: keyboard.cc:551
 msgid "key bindings file not found at \"%2\" or contains errors."
 msgstr ""
-"Soubor s přiřazením kláves pro Ardour \"%1\"se nepodařilo najít, nebo "
-"obsahuje chyby."
+"Soubor s přiřazením kláves \"%2\"se nepodařilo najít, nebo obsahuje chyby."
+
+#: keyboard.cc:602
+msgid "Cannot rename your own keybinding file (%1)"
+msgstr ""
+
+#: motionfeedback.cc:486
+msgid "motionfeedback: failed to open a temporary file for writing: %1"
+msgstr ""
+
+#: motionfeedback.cc:516
+msgid "motionfeedback: could not save image set to %1"
+msgstr ""
+
+#: motionfeedback.cc:526
+msgid "motionfeedback: caught PixbufError: %1"
+msgstr ""
+
+#: motionfeedback.cc:528
+msgid "motionfeedback: unknown exception"
+msgstr ""
+
+#: paths_dialog.cc:32
+msgid "Add"
+msgstr ""
+
+#: paths_dialog.cc:33
+msgid "Delete"
+msgstr ""
+
+#: paths_dialog.cc:34
+msgid "Reset to Default"
+msgstr ""
+
+#: paths_dialog.cc:109
+msgid "Add folder to search path"
+msgstr ""
 
 #: tearoff.cc:57
 msgid "Click to tear this into its own window"

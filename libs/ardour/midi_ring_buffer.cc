@@ -57,8 +57,12 @@ MidiRingBuffer<T>::read(MidiBuffer& dst, framepos_t start, framepos_t end, frame
 		*/
 		this->peek (peekbuf, prefix_size);
 
-		ev_time = *((T*) peekbuf);
-		ev_size = *((uint32_t*)(peekbuf + sizeof(T) + sizeof (Evoral::EventType)));
+		ev_time = *(reinterpret_cast<T*>((uintptr_t)peekbuf));
+		ev_size = *(reinterpret_cast<uint32_t*>((uintptr_t)(peekbuf + sizeof(T) + sizeof (Evoral::EventType))));
+
+		if (this->read_space() < ev_size) {
+			break;;
+		}
 
 		if (ev_time >= end) {
 			DEBUG_TRACE (DEBUG::MidiDiskstreamIO, string_compose ("MRB event @ %1 past end @ %2\n", ev_time, end));
@@ -114,13 +118,7 @@ MidiRingBuffer<T>::read(MidiBuffer& dst, framepos_t start, framepos_t end, frame
 #endif
 
 		if (success) {
-
-			if (is_note_on(write_loc[0]) ) {
-				_tracker.add (write_loc[1], write_loc[0] & 0xf);
-			} else if (is_note_off(write_loc[0])) {
-				_tracker.remove (write_loc[1], write_loc[0] & 0xf);
-			}
-
+			_tracker.track(write_loc);
 			++count;
 		} else {
 			cerr << "WARNING: error reading event contents from MIDI ring" << endl;
@@ -129,6 +127,71 @@ MidiRingBuffer<T>::read(MidiBuffer& dst, framepos_t start, framepos_t end, frame
 
 	return count;
 }
+
+template<typename T>
+size_t
+MidiRingBuffer<T>::skip_to(framepos_t start)
+{
+	if (this->read_space() == 0) {
+		return 0;
+	}
+
+	T                 ev_time;
+	uint32_t          ev_size;
+	size_t            count = 0;
+	const size_t      prefix_size = sizeof(T) + sizeof(Evoral::EventType) + sizeof(uint32_t);
+
+	while (this->read_space() >= prefix_size) {
+
+		uint8_t peekbuf[prefix_size];
+		this->peek (peekbuf, prefix_size);
+
+		ev_time = *(reinterpret_cast<T*>((uintptr_t)peekbuf));
+		ev_size = *(reinterpret_cast<uint32_t*>((uintptr_t)(peekbuf + sizeof(T) + sizeof (Evoral::EventType))));
+
+		if (ev_time >= start) {
+			return count;
+		}
+
+		if (this->read_space() < ev_size) {
+			continue;
+		}
+
+		this->increment_read_ptr (prefix_size);
+
+		uint8_t status;
+		bool r = this->peek (&status, sizeof(uint8_t));
+		assert (r); // If this failed, buffer is corrupt, all hope is lost
+
+		++count;
+
+		/* TODO investigate and think:
+		 *
+		 * Does it makes sense to keep track of notes
+		 * that are skipped (because they're either too late
+		 * (underrun) or never used (read-ahead, loop) ?
+		 *
+		 * skip_to() is called on the rinbuffer between
+		 * disk and process. it seems wrong to track them
+		 * (a potential synth never sees skipped notes, either)
+		 * but there may be more to this.
+		 */
+
+		if (ev_size >= 8) {
+			this->increment_read_ptr (ev_size);
+		} else {
+			// we only track note on/off, 8 bytes are plenty.
+			uint8_t write_loc[8];
+			bool success = read_contents (ev_size, write_loc);
+			if (success) {
+				_tracker.track(write_loc);
+			}
+		}
+	}
+	return count;
+}
+
+
 
 template<typename T>
 void
@@ -148,13 +211,13 @@ MidiRingBuffer<T>::flush (framepos_t /*start*/, framepos_t end)
 		*/
 		assert (success);
 
-		ev_time = *((T*) peekbuf);
+		ev_time = *(reinterpret_cast<T*>((uintptr_t)peekbuf));
 		
 		if (ev_time >= end) {
 			break;
 		}
 
-		ev_size = *((uint32_t*)(peekbuf + sizeof(T) + sizeof (Evoral::EventType)));
+		ev_size = *(reinterpret_cast<uint32_t*>((uintptr_t)(peekbuf + sizeof(T) + sizeof (Evoral::EventType))));
 		this->increment_read_ptr (prefix_size);
 		this->increment_read_ptr (ev_size);
 	}
@@ -247,9 +310,16 @@ MidiRingBuffer<T>::reset_tracker ()
 
 template<typename T>
 void
-MidiRingBuffer<T>::loop_resolve (MidiBuffer& dst, framepos_t t)
+MidiRingBuffer<T>::resolve_tracker (MidiBuffer& dst, framepos_t t)
 {
 	_tracker.resolve_notes (dst, t);
+}
+
+template<typename T>
+void
+MidiRingBuffer<T>::resolve_tracker (Evoral::EventSink<framepos_t>& dst, framepos_t t)
+{
+	_tracker.resolve_notes(dst, t);
 }
 
 template class MidiRingBuffer<framepos_t>;

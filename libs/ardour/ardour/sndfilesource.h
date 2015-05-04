@@ -24,11 +24,10 @@
 
 #include "ardour/audiofilesource.h"
 #include "ardour/broadcast_info.h"
-#include "pbd/sndfile_manager.h"
 
 namespace ARDOUR {
 
-class SndFileSource : public AudioFileSource {
+class LIBARDOUR_API SndFileSource : public AudioFileSource {
   public:
 	/** Constructor to be called for existing external-to-session files */
 	SndFileSource (Session&, const std::string& path, int chn, Flag flags);
@@ -38,7 +37,16 @@ class SndFileSource : public AudioFileSource {
 	               SampleFormat samp_format, HeaderFormat hdr_format, framecnt_t rate,
 	               Flag flags = SndFileSource::default_writable_flags);
 
-	/** Constructor to be called for existing in-session files */
+	/* Constructor to be called for recovering files being used for
+	 * capture. They are in-session, they already exist, they should not
+	 * be writable. They are an odd hybrid (from a constructor point of
+	 * view) of the previous two constructors.
+	 */
+	SndFileSource (Session&, const std::string& path, int chn);
+
+	/** Constructor to be called for existing in-session files during
+	 * session loading 
+	 */
 	SndFileSource (Session&, const XMLNode&);
 
 	~SndFileSource ();
@@ -46,6 +54,7 @@ class SndFileSource : public AudioFileSource {
 	float sample_rate () const;
 	int update_header (framepos_t when, struct tm&, time_t);
 	int flush_header ();
+	void flush ();
 
 	framepos_t natural_position () const;
 
@@ -66,6 +75,8 @@ class SndFileSource : public AudioFileSource {
 	static int get_soundfile_info (const std::string& path, SoundFileInfo& _info, std::string& error_msg);
 
   protected:
+	void close ();
+
 	void set_path (const std::string& p);
 	void set_header_timeline_position ();
 
@@ -74,7 +85,7 @@ class SndFileSource : public AudioFileSource {
 	framecnt_t write_float (Sample* data, framepos_t pos, framecnt_t cnt);
 
   private:
-	PBD::SndFileDescriptor* _descriptor;
+	SNDFILE* _sndfile;
 	SF_INFO _info;
 	BroadcastInfo *_broadcast_info;
 
@@ -93,8 +104,6 @@ class SndFileSource : public AudioFileSource {
 	bool          _capture_end;
 	framepos_t     capture_start_frame;
 	framepos_t     file_pos; // unit is frames
-	framecnt_t     xfade_out_count;
-	framecnt_t     xfade_in_count;
 	Sample*        xfade_buf;
 
 	framecnt_t crossfade (Sample* data, framecnt_t cnt, int dir);
@@ -103,7 +112,6 @@ class SndFileSource : public AudioFileSource {
 	framecnt_t nondestructive_write_unlocked (Sample *dst, framecnt_t cnt);
 	void handle_header_position_change ();
 	PBD::ScopedConnection header_position_connection;
-	PBD::ScopedConnection file_manager_connection;
 };
 
 } // namespace ARDOUR

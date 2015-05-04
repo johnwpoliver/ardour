@@ -25,6 +25,9 @@
 #undef check
 #undef YES
 #undef NO
+#ifdef verify
+#undef verify
+#endif
 
 #include "ardour_ui.h"
 #include "actions.h"
@@ -75,14 +78,6 @@ set_language_preference ()
 {
 	gtk_disable_setlocale ();
 
-	if (g_getenv ("LANGUAGE") || g_getenv ("LC_ALL") || g_getenv ("LANG")) {
-		return;
-	}
-
-	if (g_getenv ("ARDOUR_EN")) {
-		return;
-	}
-
 	/* the gettext manual is potentially misleading about the utility of
 	   LANGUAGE.  It notes that if LANGUAGE is set to include a dialect/region-free
 	   language code, like "it", it will assume that you mean the main
@@ -112,7 +107,7 @@ set_language_preference ()
 				break;
 			}
 		}
-		NSRange r = { 0, count };
+		NSRange r = { 0, static_cast<NSUInteger> (count) };
 		setenv ("LANGUAGE", [[[languages subarrayWithRange:r] componentsJoinedByString:@":"] UTF8String], 0);
 		cout << "LANGUAGE set to " << getenv ("LANGUAGE") << endl;
 	}
@@ -126,6 +121,6 @@ set_language_preference ()
 	 */
 
 	cout << "LANG set to " << [nslocale UTF8String] << endl;
-	setenv ("LANG", [nslocale UTF8String], 0);
+        setenv ("LANG", [nslocale UTF8String], 0);
 	CFRelease (cflocale);
 }

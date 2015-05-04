@@ -30,6 +30,7 @@
 #include "pbd/stateful.h"
 #include "pbd/signals.h"
 
+#include "control_protocol/visibility.h"
 #include "control_protocol/basic_ui.h"
 #include "control_protocol/types.h"
 
@@ -39,7 +40,7 @@ class Route;
 class Session;
 class Bundle;
 
-class ControlProtocol : public PBD::Stateful, public PBD::ScopedConnectionList, public BasicUI
+class LIBCONTROLCP_API ControlProtocol : public PBD::Stateful, public PBD::ScopedConnectionList, public BasicUI
 {
   public:
 	ControlProtocol (Session&, std::string name);
@@ -47,8 +48,8 @@ class ControlProtocol : public PBD::Stateful, public PBD::ScopedConnectionList, 
 
 	std::string name() const { return _name; }
 
-	virtual int set_active (bool yn) = 0;
-	bool get_active() const { return _active; }
+        virtual int set_active (bool yn);
+        bool active() const { return _active; }
 
 	virtual int set_feedback (bool /*yn*/) { return 0; }
 	virtual bool get_feedback () const { return false; }
@@ -133,16 +134,19 @@ class ControlProtocol : public PBD::Stateful, public PBD::ScopedConnectionList, 
 	virtual void* get_gui() const { return 0; }
 	virtual void  tear_down_gui() { }
 
+        XMLNode& get_state ();
+        static const std::string state_node_name;
+
   protected:
 	std::vector<boost::shared_ptr<ARDOUR::Route> > route_table;
 	std::string _name;
-	bool _active;
 
 	void next_track (uint32_t initial_id);
 	void prev_track (uint32_t initial_id);
 
   private:
-	ControlProtocol (const ControlProtocol&); /* noncopyable */
+	LIBCONTROLCP_LOCAL ControlProtocol (const ControlProtocol&); /* noncopyable */
+        bool _active;
 };
 
 extern "C" {

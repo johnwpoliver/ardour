@@ -27,7 +27,7 @@
 
 namespace ARDOUR {
 
-struct SoundFileInfo {
+struct LIBARDOUR_API SoundFileInfo {
 	float       samplerate;
 	uint16_t    channels;
 	int64_t     length;
@@ -35,13 +35,9 @@ struct SoundFileInfo {
 	int64_t     timecode;
 };
 
-class AudioFileSource : public AudioSource, public FileSource {
+class LIBARDOUR_API AudioFileSource : public AudioSource, public FileSource {
 public:
 	virtual ~AudioFileSource ();
-
-	bool set_name (const std::string& newname) {
-		return (set_source_name(newname, destructive()) == 0);
-	}
 
 	std::string peak_path (std::string audio_path);
 	std::string find_broken_peakfile (std::string missing_peak_path,
@@ -64,10 +60,11 @@ public:
 	virtual void      clear_capture_marks() {}
 	virtual bool      one_of_several_channels () const { return false; }
 
+	virtual void flush () = 0;
 	virtual int update_header (framepos_t when, struct tm&, time_t) = 0;
 	virtual int flush_header () = 0;
 
-	void mark_streaming_write_completed ();
+	void mark_streaming_write_completed (const Lock& lock);
 
 	int setup_peakfile ();
 
@@ -96,6 +93,12 @@ protected:
 
 	/** Constructor to be called for existing in-session files */
 	AudioFileSource (Session&, const XMLNode&, bool must_exist = true);
+
+	/** Constructor to be called for crash recovery. Final argument is not
+	 * used but exists to differentiate from the external-to-session
+	 * constructor above.
+	 */
+	AudioFileSource (Session&, const std::string& path, Source::Flag flags, bool);
 
 	int init (const std::string& idstr, bool must_exist);
 

@@ -21,6 +21,7 @@
 
 #include <string>
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/chan_count.h"
 #include "ardour/io_processor.h"
@@ -34,7 +35,7 @@ class PannerShell;
 class Panner;
 class Pannable;
 
-class Delivery : public IOProcessor
+class LIBARDOUR_API Delivery : public IOProcessor
 {
 public:
 	enum Role {
@@ -67,7 +68,7 @@ public:
 	std::string display_name() const;
 
 	Role role() const { return _role; }
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
 
 	void run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pframes_t nframes, bool);

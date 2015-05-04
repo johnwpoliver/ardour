@@ -43,6 +43,7 @@
 #include "ardour/ardour.h"
 #include "ardour/instrument_info.h"
 #include "ardour/io.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/mute_master.h"
 #include "ardour/route_group_member.h"
@@ -53,6 +54,7 @@
 namespace ARDOUR {
 
 class Amp;
+class DelayLine;
 class Delivery;
 class IOProcessor;
 class Panner;
@@ -67,7 +69,7 @@ class Pannable;
 class CapturingProcessor;
 class InternalSend;
 
-class Route : public SessionObject, public Automatable, public RouteGroupMember, public GraphNode, public boost::enable_shared_from_this<Route>
+class LIBARDOUR_API Route : public SessionObject, public Automatable, public RouteGroupMember, public GraphNode, public boost::enable_shared_from_this<Route>
 {
   public:
 
@@ -101,10 +103,9 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	bool set_name (const std::string& str);
 	static void set_name_in_state (XMLNode &, const std::string &);
 
-        uint32_t order_key (RouteSortOrderKey) const;
-        bool has_order_key (RouteSortOrderKey) const;
-	void set_order_key (RouteSortOrderKey, uint32_t);
-        void sync_order_keys (RouteSortOrderKey);
+        uint32_t order_key () const;
+        bool has_order_key () const;
+	void set_order_key (uint32_t);
 
 	bool is_auditioner() const { return _flags & Auditioner; }
 	bool is_master() const { return _flags & MasterOut; }
@@ -140,6 +141,9 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 
 	void set_gain (gain_t val, void *src);
 	void inc_gain (gain_t delta, void *src);
+
+	void set_trim (gain_t val, void *src);
+	void inc_trim (gain_t delta, void *src);
 
 	void set_mute_points (MuteMaster::MutePoint);
 	MuteMaster::MutePoint mute_points () const;
@@ -178,15 +182,21 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	bool denormal_protection() const;
 
 	void         set_meter_point (MeterPoint, bool force = false);
-	MeterPoint   meter_point() const { return _meter_point; }
-	void         meter ();
+	bool         apply_processor_changes_rt ();
+	void         emit_pending_signals ();
+	MeterPoint   meter_point() const { return _pending_meter_point; }
+
+	void         set_meter_type (MeterType t) { _meter_type = t; }
+	MeterType    meter_type() const { return _meter_type; }
 
 	/* Processors */
 
 	boost::shared_ptr<Amp> amp() const  { return _amp; }
+	boost::shared_ptr<Amp> trim() const { return _trim; }
 	PeakMeter&       peak_meter()       { return *_meter.get(); }
 	const PeakMeter& peak_meter() const { return *_meter.get(); }
 	boost::shared_ptr<PeakMeter> shared_peak_meter() const { return _meter; }
+	boost::shared_ptr<DelayLine> delay_line() const  { return _delayline; }
 
 	void flush_processors ();
 
@@ -250,6 +260,7 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	int add_processors (const ProcessorList&, boost::shared_ptr<Processor>, ProcessorStreams* err = 0);
 	boost::shared_ptr<Processor> before_processor_for_placement (Placement);
 	boost::shared_ptr<Processor> before_processor_for_index (int);
+	bool processors_reorder_needs_configure (const ProcessorList& new_order);
 	int remove_processor (boost::shared_ptr<Processor>, ProcessorStreams* err = 0, bool need_process_lock = true);
 	int remove_processors (const ProcessorList&, ProcessorStreams* err = 0);
 	int reorder_processors (const ProcessorList& new_order, ProcessorStreams* err = 0);
@@ -281,6 +292,21 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	PBD::Signal1<void,void*> comment_changed;
 	PBD::Signal1<void,void*> mute_changed;
 	PBD::Signal0<void>       mute_points_changed;
+
+	/** track numbers - assigned by session
+	 * nubers > 0 indicate tracks (audio+midi)
+	 * nubers < 0 indicate busses
+	 * zero is reserved for unnumbered special busses.
+	 * */
+	PBD::Signal0<void> track_number_changed;
+	int64_t track_number() const { return _track_number; }
+
+	void set_track_number(int64_t tn) {
+		if (tn == _track_number) { return; }
+		_track_number = tn;
+		track_number_changed();
+		PropertyChanged (ARDOUR::Properties::name);
+	}
 
 	/** the processors have changed; the parameter indicates what changed */
 	PBD::Signal1<void,RouteProcessorChange> processors_changed;
@@ -374,15 +400,18 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 		void set_value (double);
 		double get_value () const;
 
+		/* Pretend to change value, but do not affect actual route mute. */
+		void set_superficial_value(bool muted);
+
 	private:
 		boost::weak_ptr<Route> _route;
 	};
 
-	boost::shared_ptr<AutomationControl> solo_control() const {
+	boost::shared_ptr<SoloControllable> solo_control() const {
 		return _solo_control;
 	}
 
-	boost::shared_ptr<AutomationControl> mute_control() const {
+	boost::shared_ptr<MuteControllable> mute_control() const {
 		return _mute_control;
 	}
 
@@ -423,7 +452,7 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 
 	void     set_remote_control_id (uint32_t id, bool notify_class_listeners = true);
 	uint32_t remote_control_id () const;
-        void     set_remote_control_id_from_order_key (RouteSortOrderKey, uint32_t order_key);
+        void     set_remote_control_id_explicit (uint32_t order_key);
 
 	/* for things concerned about *this* route's RID */
 
@@ -432,7 +461,7 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	/* for things concerned about *any* route's RID changes */
 
 	static PBD::Signal0<void> RemoteControlIDChange;
-	static PBD::Signal1<void,RouteSortOrderKey> SyncOrderKeys;
+	static PBD::Signal0<void> SyncOrderKeys;
 
 	bool has_external_redirects() const;
 
@@ -467,11 +496,21 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	                                     pframes_t nframes, int declick,
 	                                     bool gain_automation_ok);
 
+	virtual void bounce_process (BufferSet& bufs,
+	                             framepos_t start_frame, framecnt_t nframes,
+															 boost::shared_ptr<Processor> endpoint, bool include_endpoint,
+	                             bool for_export, bool for_freeze);
+
+	framecnt_t   bounce_get_latency (boost::shared_ptr<Processor> endpoint, bool include_endpoint, bool for_export, bool for_freeze) const;
+	ChanCount    bounce_get_output_streams (ChanCount &cc, boost::shared_ptr<Processor> endpoint, bool include_endpoint, bool for_export, bool for_freeze) const;
+
 	boost::shared_ptr<IO> _input;
 	boost::shared_ptr<IO> _output;
 
 	bool           _active;
 	framecnt_t     _signal_latency;
+	framecnt_t     _signal_latency_at_amp_position;
+	framecnt_t     _signal_latency_at_trim_position;
 	framecnt_t     _initial_delay;
 	framecnt_t     _roll_delay;
 
@@ -483,9 +522,22 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	boost::shared_ptr<MonitorProcessor> _monitor_control;
 	boost::shared_ptr<Pannable> _pannable;
 
+	enum {
+		EmitNone = 0x00,
+		EmitMeterChanged = 0x01,
+		EmitMeterVisibilityChange = 0x02,
+		EmitRtProcessorChange = 0x04
+	};
+
+	ProcessorList  _pending_processor_order;
+	gint           _pending_process_reorder; // atomic
+	gint           _pending_signals; // atomic
+
 	Flag           _flags;
 	int            _pending_declick;
 	MeterPoint     _meter_point;
+	MeterPoint     _pending_meter_point;
+	MeterType      _meter_type;
 	boost::dynamic_bitset<> _phase_invert;
 	bool           _self_solo;
 	uint32_t       _soloed_by_others_upstream;
@@ -526,6 +578,7 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	void silence_unlocked (framecnt_t);
 
 	ChanCount processor_max_streams;
+	ChanCount processor_out_streams;
 
 	uint32_t pans_required() const;
 	ChanCount n_process_buffers ();
@@ -533,7 +586,9 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	virtual void maybe_declick (BufferSet&, framecnt_t, int);
 
 	boost::shared_ptr<Amp>       _amp;
+	boost::shared_ptr<Amp>       _trim;
 	boost::shared_ptr<PeakMeter> _meter;
+	boost::shared_ptr<DelayLine> _delayline;
 
 	boost::shared_ptr<Processor> the_instrument_unlocked() const;
 
@@ -541,18 +596,25 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	int set_state_2X (const XMLNode&, int);
 	void set_processor_state_2X (XMLNodeList const &, int);
 
-	typedef std::map<RouteSortOrderKey,uint32_t> OrderKeys;
- 	OrderKeys order_keys;
+ 	uint32_t _order_key;
+	bool _has_order_key;
         uint32_t _remote_control_id;
+
+	int64_t _track_number;
 
 	void input_change_handler (IOChange, void *src);
 	void output_change_handler (IOChange, void *src);
 
 	bool input_port_count_changing (ChanCount);
+	bool output_port_count_changing (ChanCount);
 
 	bool _in_configure_processors;
+	bool _initial_io_setup;
 
 	int configure_processors_unlocked (ProcessorStreams*);
+	bool set_meter_point_unlocked ();
+	void apply_processor_order (const ProcessorList& new_order);
+
 	std::list<std::pair<ChanCount, ChanCount> > try_configure_processors (ChanCount, ProcessorStreams *);
 	std::list<std::pair<ChanCount, ChanCount> > try_configure_processors_unlocked (ChanCount, ProcessorStreams *);
 
@@ -609,8 +671,6 @@ class Route : public SessionObject, public Automatable, public RouteGroupMember,
 	    or 0.
 	*/
 	boost::weak_ptr<Processor> _processor_after_last_custom_meter;
-	/** true if the last custom meter position was at the end of the processor list */
-	bool _last_custom_meter_was_at_end;
 
         void reset_instrument_info ();
 

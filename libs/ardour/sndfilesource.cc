@@ -26,10 +26,12 @@
 #include <climits>
 #include <cstdarg>
 
-#include <pwd.h>
-#include <sys/utsname.h>
 #include <sys/stat.h>
 
+#ifdef PLATFORM_WINDOWS
+#include <glibmm/convert.h>
+#endif
+#include <glibmm/fileutils.h>
 #include <glibmm/miscutils.h>
 
 #include "ardour/sndfilesource.h"
@@ -56,38 +58,69 @@ const Source::Flag SndFileSource::default_writable_flags = Source::Flag (
 SndFileSource::SndFileSource (Session& s, const XMLNode& node)
 	: Source(s, node)
 	, AudioFileSource (s, node)
+	, _sndfile (0)
+	, _broadcast_info (0)
+	, _capture_start (false)
+	, _capture_end (false)
+	, file_pos (0)
+	, xfade_buf (0)
 {
 	init_sndfile ();
+
+        assert (Glib::file_test (_path, Glib::FILE_TEST_EXISTS));
+	existence_check ();
 
 	if (open()) {
 		throw failed_constructor ();
 	}
 }
 
-/** Files created this way are never writable or removable */
+/** Constructor for existing external-to-session files.
+    Files created this way are never writable or removable 
+*/
 SndFileSource::SndFileSource (Session& s, const string& path, int chn, Flag flags)
 	: Source(s, DataType::AUDIO, path, flags)
           /* note that the origin of an external file is itself */
 	, AudioFileSource (s, path, Flag (flags & ~(Writable|Removable|RemovableIfEmpty|RemoveAtDestroy)))
+	, _sndfile (0)
+	, _broadcast_info (0)
+	, _capture_start (false)
+	, _capture_end (false)
+	, file_pos (0)
+	, xfade_buf (0)
 {
 	_channel = chn;
 
 	init_sndfile ();
 
+        assert (Glib::file_test (_path, Glib::FILE_TEST_EXISTS));
+	existence_check ();
+
 	if (open()) {
 		throw failed_constructor ();
 	}
 }
 
-/** This constructor is used to construct new files, not open existing ones. */
+/** This constructor is used to construct new internal-to-session files, 
+    not open existing ones. 
+*/
 SndFileSource::SndFileSource (Session& s, const string& path, const string& origin,
                               SampleFormat sfmt, HeaderFormat hf, framecnt_t rate, Flag flags)
 	: Source(s, DataType::AUDIO, path, flags)
 	, AudioFileSource (s, path, origin, flags, sfmt, hf)
+	, _sndfile (0)
+	, _broadcast_info (0)
+	, _capture_start (false)
+	, _capture_end (false)
+	, file_pos (0)
+	, xfade_buf (0)
 {
 	int fmt = 0;
 
         init_sndfile ();
+
+        assert (!Glib::file_test (_path, Glib::FILE_TEST_EXISTS));
+	existence_check ();
 
 	_file_is_new = true;
 
@@ -119,7 +152,7 @@ SndFileSource::SndFileSource (Session& s, const string& path, const string& orig
 
 	default:
 		fatal << string_compose (_("programming error: %1"), X_("unsupported audio header format requested")) << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		break;
 
 	}
@@ -147,31 +180,47 @@ SndFileSource::SndFileSource (Session& s, const string& path, const string& orig
 			throw failed_constructor();
 		}
 	} else {
-		/* normal mode: do not open the file here - do that in write_unlocked() as needed
+		/* normal mode: do not open the file here - do that in {read,write}_unlocked() as needed
 		 */
+	}
+}
+
+/** Constructor to be called for recovering files being used for
+ * capture. They are in-session, they already exist, they should not
+ * be writable. They are an odd hybrid (from a constructor point of
+ * view) of the previous two constructors.
+ */
+SndFileSource::SndFileSource (Session& s, const string& path, int chn)
+	: Source (s, DataType::AUDIO, path, Flag (0))
+	  /* the final boolean argument is not used, its value is irrelevant. see audiofilesource.h for explanation */
+	, AudioFileSource (s, path, Flag (0))
+	, _sndfile (0)
+	, _broadcast_info (0)
+	, _capture_start (false)
+	, _capture_end (false)
+	, file_pos (0)
+	, xfade_buf (0)
+{
+	_channel = chn;
+
+	init_sndfile ();
+
+        assert (Glib::file_test (_path, Glib::FILE_TEST_EXISTS));
+	existence_check ();
+
+	if (open()) {
+		throw failed_constructor ();
 	}
 }
 
 void
 SndFileSource::init_sndfile ()
 {
-	string file;
-
-        _descriptor = 0;
-
-	// lets try to keep the object initalizations here at the top
-	xfade_buf = 0;
-	_broadcast_info = 0;
-
 	/* although libsndfile says we don't need to set this,
 	   valgrind and source code shows us that we do.
 	*/
 
 	memset (&_info, 0, sizeof(_info));
-
-	_capture_start = false;
-	_capture_end = false;
-	file_pos = 0;
 
 	if (destructive()) {
 		xfade_buf = new Sample[xfade_frames];
@@ -181,25 +230,44 @@ SndFileSource::init_sndfile ()
 	AudioFileSource::HeaderPositionOffsetChanged.connect_same_thread (header_position_connection, boost::bind (&SndFileSource::handle_header_position_change, this));
 }
 
+void
+SndFileSource::close ()
+{
+	if (_sndfile) {
+		sf_close (_sndfile);
+		_sndfile = 0;
+	}
+}
+
 int
 SndFileSource::open ()
 {
-	_descriptor = new SndFileDescriptor (_path, writable(), &_info);
-	_descriptor->Closed.connect_same_thread (file_manager_connection, boost::bind (&SndFileSource::file_closed, this));
-	SNDFILE* sf = _descriptor->allocate ();
+	string path_to_open;
 
-	if (sf == 0) {
-		char errbuf[256];
+	if (_sndfile) {
+		return 0;
+	}
+	
+#ifdef PLATFORM_WINDOWS
+	path_to_open = Glib::locale_from_utf8(_path);
+#else
+	path_to_open = _path;
+#endif
+
+	_sndfile = sf_open (path_to_open.c_str(), writable() ? SFM_RDWR : SFM_READ, &_info);
+
+	if (_sndfile == 0) {
+		char errbuf[1024];
 		sf_error_str (0, errbuf, sizeof (errbuf) - 1);
 #ifndef HAVE_COREAUDIO
 		/* if we have CoreAudio, we will be falling back to that if libsndfile fails,
 		   so we don't want to see this message.
 		*/
 
-                cerr << "failed to open " << _path << " with name " << _name << endl;
+                cerr << "failed to open " << path_to_open << " with name " << _name << endl;
 
 		error << string_compose(_("SndFileSource: cannot open file \"%1\" for %2 (%3)"),
-					_path, (writable() ? "read+write" : "reading"), errbuf) << endmsg;
+					path_to_open, (writable() ? "read+write" : "reading"), errbuf) << endmsg;
 #endif
 		return -1;
 	}
@@ -208,8 +276,8 @@ SndFileSource::open ()
 #ifndef HAVE_COREAUDIO
 		error << string_compose(_("SndFileSource: file only contains %1 channels; %2 is invalid as a channel number"), _info.channels, _channel) << endmsg;
 #endif
-		delete _descriptor;
-		_descriptor = 0;
+		sf_close (_sndfile);
+		_sndfile = 0;
 		return -1;
 	}
 
@@ -219,7 +287,7 @@ SndFileSource::open ()
 		_broadcast_info = new BroadcastInfo;
 	}
 
-	bool bwf_info_exists = _broadcast_info->load_from_file (sf);
+	bool bwf_info_exists = _broadcast_info->load_from_file (_sndfile);
 
 	if (_file_is_new && _length == 0 && writable() && !bwf_info_exists) {
 		/* newly created files will not have a BWF header at this point in time.
@@ -237,10 +305,18 @@ SndFileSource::open ()
 		delete _broadcast_info;
 		_broadcast_info = 0;
 		_flags = Flag (_flags & ~Broadcast);
+	} 
+
+	/* Set the broadcast flag if the BWF info is already there. We need
+	 * this when recovering or using existing files.
+	 */
+	
+	if (bwf_info_exists) {
+		_flags = Flag (_flags | Broadcast);
 	}
 
 	if (writable()) {
-		sf_command (sf, SFC_SET_UPDATE_HEADER_AUTO, 0, SF_FALSE);
+		sf_command (_sndfile, SFC_SET_UPDATE_HEADER_AUTO, 0, SF_FALSE);
 
                 if (_flags & Broadcast) {
 
@@ -251,9 +327,9 @@ SndFileSource::open ()
                         _broadcast_info->set_from_session (_session, header_position_offset);
                         _broadcast_info->set_description (string_compose ("BWF %1", _name));
 
-                        if (!_broadcast_info->write_to_file (sf)) {
+                        if (!_broadcast_info->write_to_file (_sndfile)) {
                                 error << string_compose (_("cannot set broadcast info for audio file %1 (%2); dropping broadcast info for this file"),
-                                                         _path, _broadcast_info->get_error())
+                                                         path_to_open, _broadcast_info->get_error())
                                       << endmsg;
                                 _flags = Flag (_flags & ~Broadcast);
                                 delete _broadcast_info;
@@ -261,15 +337,13 @@ SndFileSource::open ()
                         }
                 }
         }
-
-        _descriptor->release ();
-        _open = true;
+	
 	return 0;
 }
 
 SndFileSource::~SndFileSource ()
 {
-	delete _descriptor;
+	close ();
 	delete _broadcast_info;
 	delete [] xfade_buf;
 }
@@ -285,23 +359,21 @@ SndFileSource::read_unlocked (Sample *dst, framepos_t start, framecnt_t cnt) con
 {
 	assert (cnt >= 0);
 	
-	int32_t nread;
+	framecnt_t nread;
 	float *ptr;
-	uint32_t real_cnt;
+	framecnt_t real_cnt;
 	framepos_t file_cnt;
 
-        if (writable() && !_open) {
+        if (writable() && !_sndfile) {
                 /* file has not been opened yet - nothing written to it */
                 memset (dst, 0, sizeof (Sample) * cnt);
                 return cnt;
         }
 
-	SNDFILE* sf = _descriptor->allocate ();
-
-	if (sf == 0) {
-		error << string_compose (_("could not allocate file %1 for reading."), _path) << endmsg;
+        if (const_cast<SndFileSource*>(this)->open()) {
+		error << string_compose (_("could not open file %1 for reading."), _path) << endmsg;
 		return 0;
-	}
+        }
 
 	if (start > _length) {
 
@@ -331,22 +403,20 @@ SndFileSource::read_unlocked (Sample *dst, framepos_t start, framecnt_t cnt) con
 
 	if (file_cnt) {
 
-		if (sf_seek (sf, (sf_count_t) start, SEEK_SET|SFM_READ) != (sf_count_t) start) {
+		if (sf_seek (_sndfile, (sf_count_t) start, SEEK_SET|SFM_READ) != (sf_count_t) start) {
 			char errbuf[256];
 			sf_error_str (0, errbuf, sizeof (errbuf) - 1);
 			error << string_compose(_("SndFileSource: could not seek to frame %1 within %2 (%3)"), start, _name.val().substr (1), errbuf) << endmsg;
-			_descriptor->release ();
 			return 0;
 		}
 
 		if (_info.channels == 1) {
-			framecnt_t ret = sf_read_float (sf, dst, file_cnt);
+			framecnt_t ret = sf_read_float (_sndfile, dst, file_cnt);
 			if (ret != file_cnt) {
 				char errbuf[256];
 				sf_error_str (0, errbuf, sizeof (errbuf) - 1);
 				error << string_compose(_("SndFileSource: @ %1 could not read %2 within %3 (%4) (len = %5, ret was %6)"), start, file_cnt, _name.val().substr (1), errbuf, _length, ret) << endl;
 			}
-			_descriptor->release ();
 			return ret;
 		}
 	}
@@ -355,25 +425,24 @@ SndFileSource::read_unlocked (Sample *dst, framepos_t start, framecnt_t cnt) con
 
 	Sample* interleave_buf = get_interleave_buffer (real_cnt);
 
-	nread = sf_read_float (sf, interleave_buf, real_cnt);
+	nread = sf_read_float (_sndfile, interleave_buf, real_cnt);
 	ptr = interleave_buf + _channel;
 	nread /= _info.channels;
 
 	/* stride through the interleaved data */
 
-	for (int32_t n = 0; n < nread; ++n) {
+	for (framecnt_t n = 0; n < nread; ++n) {
 		dst[n] = *ptr;
 		ptr += _info.channels;
 	}
 
-	_descriptor->release ();
 	return nread;
 }
 
 framecnt_t
 SndFileSource::write_unlocked (Sample *data, framecnt_t cnt)
 {
-        if (!_open && open()) {
+        if (open()) {
                 return 0; // failure
         }
 
@@ -394,11 +463,11 @@ SndFileSource::nondestructive_write_unlocked (Sample *data, framecnt_t cnt)
 
 	if (_info.channels != 1) {
 		fatal << string_compose (_("programming error: %1 %2"), X_("SndFileSource::write called on non-mono file"), _path) << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		return 0;
 	}
 
-	int32_t frame_pos = _length;
+	framepos_t frame_pos = _length;
 
 	if (write_float (data, frame_pos, cnt) != cnt) {
 		return 0;
@@ -407,7 +476,7 @@ SndFileSource::nondestructive_write_unlocked (Sample *data, framecnt_t cnt)
 	update_length (_length + cnt);
 
 	if (_build_peakfiles) {
-		compute_and_write_peaks (data, frame_pos, cnt, false, true);
+		compute_and_write_peaks (data, frame_pos, cnt, true, true);
 	}
 
 	return cnt;
@@ -494,7 +563,7 @@ SndFileSource::destructive_write_unlocked (Sample* data, framecnt_t cnt)
 	update_length (file_pos + cnt);
 
 	if (_build_peakfiles) {
-		compute_and_write_peaks (data, file_pos, cnt, false, true);
+		compute_and_write_peaks (data, file_pos, cnt, true, true);
 	}
 
 	file_pos += cnt;
@@ -524,21 +593,31 @@ SndFileSource::flush_header ()
 		return -1;
 	}
 
-        if (!_open) {
-		warning << string_compose (_("attempt to flush an un-opened audio file source (%1)"), _path) << endmsg;
-		return -1;
-        }
-
-	SNDFILE* sf = _descriptor->allocate ();
-	if (sf == 0) {
+	if (_sndfile == 0) {
 		error << string_compose (_("could not allocate file %1 to write header"), _path) << endmsg;
 		return -1;
 	}
 
-	int const r = sf_command (sf, SFC_UPDATE_HEADER_NOW, 0, 0) != SF_TRUE;
-	_descriptor->release ();
+	int const r = sf_command (_sndfile, SFC_UPDATE_HEADER_NOW, 0, 0) != SF_TRUE;
 
 	return r;
+}
+
+void
+SndFileSource::flush ()
+{
+	if (!writable()) {
+		warning << string_compose (_("attempt to flush a non-writable audio file source (%1)"), _path) << endmsg;
+		return;
+	}
+
+	if (_sndfile == 0) {
+		error << string_compose (_("could not allocate file %1 to flush contents"), _path) << endmsg;
+		return;
+	}
+
+	// Hopefully everything OK
+	sf_write_sync (_sndfile);
 }
 
 int
@@ -549,12 +628,12 @@ SndFileSource::setup_broadcast_info (framepos_t /*when*/, struct tm& now, time_t
 		return -1;
 	}
 
-        if (!_open) {
+        if (!_sndfile) {
 		warning << string_compose (_("attempt to set BWF info for an un-opened audio file source (%1)"), _path) << endmsg;
 		return -1;
         }
 
-	if (!(_flags & Broadcast)) {
+	if (!(_flags & Broadcast) || !_broadcast_info) {
 		return 0;
 	}
 
@@ -565,18 +644,6 @@ SndFileSource::setup_broadcast_info (framepos_t /*when*/, struct tm& now, time_t
 
 	set_header_timeline_position ();
 
-	SNDFILE* sf = _descriptor->allocate ();
-
-	if (sf == 0 || !_broadcast_info->write_to_file (sf)) {
-		error << string_compose (_("cannot set broadcast info for audio file %1 (%2); dropping broadcast info for this file"),
-		                           _path, _broadcast_info->get_error())
-		      << endmsg;
-		_flags = Flag (_flags & ~Broadcast);
-		delete _broadcast_info;
-		_broadcast_info = 0;
-	}
-
-	_descriptor->release ();
 	return 0;
 }
 
@@ -586,12 +653,11 @@ SndFileSource::set_header_timeline_position ()
 	if (!(_flags & Broadcast)) {
 		return;
 	}
+	assert (_broadcast_info);
 
 	_broadcast_info->set_time_reference (_timeline_position);
 
-	SNDFILE* sf = _descriptor->allocate ();
-	
-	if (sf == 0 || !_broadcast_info->write_to_file (sf)) {
+	if (_sndfile == 0 || !_broadcast_info->write_to_file (_sndfile)) {
 		error << string_compose (_("cannot set broadcast info for audio file %1 (%2); dropping broadcast info for this file"),
 		                           _path, _broadcast_info->get_error())
 		      << endmsg;
@@ -599,29 +665,22 @@ SndFileSource::set_header_timeline_position ()
 		delete _broadcast_info;
 		_broadcast_info = 0;
 	}
-
-	_descriptor->release ();
 }
 
 framecnt_t
 SndFileSource::write_float (Sample* data, framepos_t frame_pos, framecnt_t cnt)
 {
-	SNDFILE* sf = _descriptor->allocate ();
-
-	if (sf == 0 || sf_seek (sf, frame_pos, SEEK_SET|SFM_WRITE) < 0) {
+	if (_sndfile == 0 || sf_seek (_sndfile, frame_pos, SEEK_SET|SFM_WRITE) < 0) {
 		char errbuf[256];
 		sf_error_str (0, errbuf, sizeof (errbuf) - 1);
 		error << string_compose (_("%1: cannot seek to %2 (libsndfile error: %3)"), _path, frame_pos, errbuf) << endmsg;
-		_descriptor->release ();
 		return 0;
 	}
 
-	if (sf_writef_float (sf, data, cnt) != (ssize_t) cnt) {
-		_descriptor->release ();
+	if (sf_writef_float (_sndfile, data, cnt) != (ssize_t) cnt) {
 		return 0;
 	}
 
-	_descriptor->release ();
 	return cnt;
 }
 
@@ -768,12 +827,12 @@ SndFileSource::crossfade (Sample* data, framecnt_t cnt, int fade_in)
 
 	} else if (xfade < xfade_frames) {
 
-		gain_t in[xfade];
-		gain_t out[xfade];
+		std::vector<gain_t> in(xfade);
+		std::vector<gain_t> out(xfade);
 
 		/* short xfade, compute custom curve */
 
-		compute_equal_power_fades (xfade, in, out);
+		compute_equal_power_fades (xfade, &in[0], &out[0]);
 
 		for (framecnt_t n = 0; n < xfade; ++n) {
 			xfade_buf[n] = (xfade_buf[n] * out[n]) + (fade_data[n] * in[n]);
@@ -922,8 +981,5 @@ void
 SndFileSource::set_path (const string& p)
 {
         FileSource::set_path (p);
-
-        if (_descriptor) {
-                _descriptor->set_path (_path);
-        }
 }
+

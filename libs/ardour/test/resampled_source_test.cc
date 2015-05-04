@@ -1,15 +1,26 @@
+#include "test_util.h"
+
+#include "pbd/file_utils.h"
 #include "ardour/resampled_source.h"
 #include "ardour/sndfileimportable.h"
 #include "resampled_source_test.h"
 
+
 CPPUNIT_TEST_SUITE_REGISTRATION (ResampledSourceTest);
 
+using namespace std;
 using namespace ARDOUR;
+using namespace PBD;
 
 void
 ResampledSourceTest::seekTest ()
 {
-	boost::shared_ptr<SndFileImportableSource> s (new SndFileImportableSource ("../libs/ardour/test/data/test.wav"));
+	std::string test_file_path;
+	const string test_filename = "test.wav";
+
+	CPPUNIT_ASSERT (find_file (test_search_path (), test_filename, test_file_path));
+
+	boost::shared_ptr<SndFileImportableSource> s (new SndFileImportableSource (test_file_path));
 	ResampledImportableSource r (s, 48000, SrcBest);
 
 	/* Make sure that seek (0) has the desired effect, ie that

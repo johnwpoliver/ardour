@@ -19,42 +19,32 @@
 #ifndef __ardour_tempo_lines_h__
 #define __ardour_tempo_lines_h__
 
-#include <map>
-#include <boost/pool/pool.hpp>
-#include <boost/pool/pool_alloc.hpp>
 #include "ardour/tempo.h"
-#include "canvas.h"
-#include "simpleline.h"
 
-typedef boost::fast_pool_allocator<
-		std::pair<const double, ArdourCanvas::SimpleLine*>,
-		boost::default_user_allocator_new_delete,
-		boost::details::pool::null_mutex,
-		8192>
-	MapAllocator;
+#include "canvas/line_set.h"
 
 class TempoLines {
 public:
-	TempoLines(ArdourCanvas::Canvas& canvas, ArdourCanvas::Group* group, double screen_height);
+	TempoLines (ArdourCanvas::Container* group, double screen_height);
 
 	void tempo_map_changed();
 
-	void draw(const ARDOUR::TempoMap::BBTPointList::const_iterator& begin, 
-		  const ARDOUR::TempoMap::BBTPointList::const_iterator& end, 
-		  double frames_per_unit);
+	void draw (const ARDOUR::TempoMap::BBTPointList::const_iterator& begin, 
+	           const ARDOUR::TempoMap::BBTPointList::const_iterator& end,
+	           unsigned                                              divisions,
+	           framecnt_t                                            leftmost_frame,
+	           framecnt_t                                            frame_rate);
 
 	void show();
 	void hide();
 
 private:
-	typedef std::map<double, ArdourCanvas::SimpleLine*, std::less<double>, MapAllocator> Lines;
-	Lines _lines;
+	void draw_ticks (const ARDOUR::TempoMap::BBTPointList::const_iterator& b,
+	                 unsigned                                              divisions,
+	                 framecnt_t                                            leftmost_frame,
+	                 framecnt_t                                            frame_rate);
 
-	ArdourCanvas::Canvas& _canvas;
-	ArdourCanvas::Group*  _group;
-	double                _clean_left;
-	double                _clean_right;
-	double                _height;
+	ArdourCanvas::LineSet lines;
 };
 
 #endif /* __ardour_tempo_lines_h__ */

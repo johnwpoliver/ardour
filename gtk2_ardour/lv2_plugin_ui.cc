@@ -21,8 +21,8 @@
 #include "ardour/session.h"
 #include "pbd/error.h"
 
-#include "ardour_ui.h"
 #include "lv2_plugin_ui.h"
+#include "timers.h"
 
 #include "lv2/lv2plug.in/ns/extensions/ui/ui.h"
 
@@ -56,7 +56,7 @@ LV2PluginUI::write_from_ui(void*       controller,
 		if (ac) {
 			ac->set_value(*(const float*)buffer);
 		}
-	} else if (format == me->_lv2->urids.atom_eventTransfer) {
+	} else if (format == URIMap::instance().urids.atom_eventTransfer) {
 
 		const int cnt = me->_pi->get_count();
 		for (int i=0; i < cnt; i++ ) {
@@ -113,6 +113,7 @@ LV2PluginUI::update_timeout()
 void
 LV2PluginUI::on_external_ui_closed(void* controller)
 {
+	//printf("LV2PluginUI::on_external_ui_closed\n");
 	LV2PluginUI* me = (LV2PluginUI*)controller;
 	me->_screen_update_connection.disconnect();
 	me->_external_ui_ptr = NULL;
@@ -144,7 +145,7 @@ LV2PluginUI::start_updating(GdkEventAny*)
 {
 	if (!_output_ports.empty()) {
 		_screen_update_connection.disconnect();
-		_screen_update_connection = ARDOUR_UI::instance()->RapidScreenUpdate.connect
+		_screen_update_connection = Timers::super_rapid_connect
 		        (sigc::mem_fun(*this, &LV2PluginUI::output_update));
 	}
 	return false;
@@ -167,6 +168,19 @@ LV2PluginUI::output_update()
 	//cout << "output_update" << endl;
 	if (_external_ui_ptr) {
 		LV2_EXTERNAL_UI_RUN(_external_ui_ptr);
+		if (_lv2->is_external_kx() && !_external_ui_ptr) {
+			// clean up external UI if it closes itself via
+			// on_external_ui_closed() during run()
+			//printf("LV2PluginUI::output_update -- UI was closed\n");
+			//_screen_update_connection.disconnect();
+			_message_update_connection.disconnect();
+			if (_inst) {
+				suil_instance_free((SuilInstance*)_inst);
+			}
+			_inst = NULL;
+			_external_ui_ptr = NULL;
+			return;
+		}
 	}
 
 	/* FIXME only works with control output ports (which is all we support now anyway) */
@@ -184,11 +198,19 @@ LV2PluginUI::LV2PluginUI(boost::shared_ptr<PluginInsert> pi,
 	, _pi(pi)
 	, _lv2(lv2p)
 	, _gui_widget(NULL)
-	, _ardour_buttons_box(NULL)
 	, _values(NULL)
 	, _external_ui_ptr(NULL)
 	, _inst(NULL)
 {
+	_ardour_buttons_box.set_spacing (6);
+	_ardour_buttons_box.set_border_width (6);
+	_ardour_buttons_box.pack_end (focus_button, false, false);
+	_ardour_buttons_box.pack_end (bypass_button, false, false, 10);
+	_ardour_buttons_box.pack_end (delete_button, false, false);
+	_ardour_buttons_box.pack_end (save_button, false, false);
+	_ardour_buttons_box.pack_end (add_button, false, false);
+	_ardour_buttons_box.pack_end (_preset_combo, false, false);
+	_ardour_buttons_box.pack_end (_preset_modified, false, false);
 }
 
 void
@@ -210,27 +232,24 @@ LV2PluginUI::lv2ui_instantiate(const std::string& title)
 		_external_ui_feature.URI  = LV2_EXTERNAL_UI_URI;
 		_external_ui_feature.data = &_external_ui_host;
 
+		_external_kxui_feature.URI  = LV2_EXTERNAL_UI_KX__Host;
+		_external_kxui_feature.data = &_external_ui_host;
+
 		++features_count;
 		features = (LV2_Feature**)malloc(
-			sizeof(LV2_Feature*) * (features_count + 1));
-		for (size_t i = 0; i < features_count - 1; ++i) {
+			sizeof(LV2_Feature*) * (features_count + 2));
+		for (size_t i = 0; i < features_count - 2; ++i) {
 			features[i] = features_src[i];
 		}
+		features[features_count - 2] = &_external_kxui_feature;
 		features[features_count - 1] = &_external_ui_feature;
 		features[features_count]     = NULL;
 	} else {
-		_ardour_buttons_box = manage (new Gtk::HBox);
-		_ardour_buttons_box->set_spacing (6);
-		_ardour_buttons_box->set_border_width (6);
-		_ardour_buttons_box->pack_end (focus_button, false, false);
-		_ardour_buttons_box->pack_end (bypass_button, false, false, 10);
-		_ardour_buttons_box->pack_end (delete_button, false, false);
-		_ardour_buttons_box->pack_end (save_button, false, false);
-		_ardour_buttons_box->pack_end (add_button, false, false);
-		_ardour_buttons_box->pack_end (_preset_combo, false, false);
-		_ardour_buttons_box->pack_end (_preset_modified, false, false);
-		_ardour_buttons_box->show_all();
-		pack_start(*_ardour_buttons_box, false, false);
+		if (_ardour_buttons_box.get_parent()) {
+			_ardour_buttons_box.get_parent()->remove(_ardour_buttons_box);
+		}
+		pack_start(_ardour_buttons_box, false, false);
+		_ardour_buttons_box.show_all();
 
 		_gui_widget = Gtk::manage((container = new Gtk::Alignment()));
 		pack_start(*_gui_widget, true, true);
@@ -259,7 +278,28 @@ LV2PluginUI::lv2ui_instantiate(const std::string& title)
 		? NS_UI "external"
 		: NS_UI "GtkUI";
 
-	const LilvUI* ui = (const LilvUI*)_lv2->c_ui();
+	if (_lv2->has_message_output()) {
+		_lv2->enable_ui_emission();
+	}
+
+	const LilvUI*   ui     = (const LilvUI*)_lv2->c_ui();
+	const LilvNode* bundle = lilv_ui_get_bundle_uri(ui);
+	const LilvNode* binary = lilv_ui_get_binary_uri(ui);
+#ifdef HAVE_LILV_0_21_3
+	char* ui_bundle_path = lilv_file_uri_parse(lilv_node_as_uri(bundle), NULL);
+	char* ui_binary_path = lilv_file_uri_parse(lilv_node_as_uri(binary), NULL);
+#else
+	char* ui_bundle_path = strdup(lilv_uri_to_path(lilv_node_as_uri(bundle)));
+	char* ui_binary_path = strdup(lilv_uri_to_path(lilv_node_as_uri(binary)));
+#endif
+	if (!ui_bundle_path || !ui_binary_path) {
+		error << _("failed to get path for UI bindle or binary") << endmsg;
+		free(ui_bundle_path);
+		free(ui_binary_path);
+		free(features);
+		return;
+	}
+
 	_inst = suil_instance_new(
 		ui_host,
 		this,
@@ -267,10 +307,12 @@ LV2PluginUI::lv2ui_instantiate(const std::string& title)
 		_lv2->uri(),
 		lilv_node_as_uri(lilv_ui_get_uri(ui)),
 		lilv_node_as_uri((const LilvNode*)_lv2->c_ui_type()),
-		lilv_uri_to_path(lilv_node_as_uri(lilv_ui_get_bundle_uri(ui))),
-		lilv_uri_to_path(lilv_node_as_uri(lilv_ui_get_binary_uri(ui))),
+		ui_bundle_path,
+		ui_binary_path,
 		features);
 
+	free(ui_bundle_path);
+	free(ui_binary_path);
 	free(features);
 
 #define GET_WIDGET(inst) suil_instance_get_widget((SuilInstance*)inst);
@@ -299,6 +341,8 @@ LV2PluginUI::lv2ui_instantiate(const std::string& title)
 				container->add(*Gtk::manage(Glib::wrap(c_widget)));
 			}
 			container->show_all();
+			gtk_widget_set_can_focus(c_widget, true);
+			gtk_widget_grab_focus(c_widget);
 		} else {
 			_external_ui_ptr = (struct lv2_external_ui*)GET_WIDGET(_inst);
 		}
@@ -321,9 +365,17 @@ LV2PluginUI::lv2ui_instantiate(const std::string& title)
 	}
 
 	if (_lv2->has_message_output()) {
-		_lv2->enable_ui_emmission();
-		ARDOUR_UI::instance()->RapidScreenUpdate.connect(
+		_message_update_connection = Timers::super_rapid_connect (
 			sigc::mem_fun(*this, &LV2PluginUI::update_timeout));
+	}
+}
+
+void
+LV2PluginUI::grab_focus()
+{
+	if (_inst && !_lv2->is_external_ui()) {
+		GtkWidget* c_widget = (GtkWidget*)GET_WIDGET(_inst);
+		gtk_widget_grab_focus(c_widget);
 	}
 }
 
@@ -349,17 +401,14 @@ LV2PluginUI::~LV2PluginUI ()
 		delete[] _values;
 	}
 
-	/* Close and delete GUI. */
-	lv2ui_free();
-
+	_message_update_connection.disconnect();
 	_screen_update_connection.disconnect();
 
-	if (_lv2->is_external_ui()) {
-		/* External UI is no longer valid.
-		   on_window_hide() will not try to use it if is NULL.
-		*/
-		_external_ui_ptr = NULL;
+	if (_external_ui_ptr && _lv2->is_external_kx()) {
+		LV2_EXTERNAL_UI_HIDE(_external_ui_ptr);
 	}
+	lv2ui_free();
+	_external_ui_ptr = NULL;
 }
 
 int
@@ -422,7 +471,15 @@ LV2PluginUI::on_window_show(const std::string& title)
 
 	if (_lv2->is_external_ui()) {
 		if (_external_ui_ptr) {
+			_screen_update_connection.disconnect();
+			_message_update_connection.disconnect();
 			LV2_EXTERNAL_UI_SHOW(_external_ui_ptr);
+			_screen_update_connection = Timers::super_rapid_connect
+		        (sigc::mem_fun(*this, &LV2PluginUI::output_update));
+			if (_lv2->has_message_output()) {
+				_message_update_connection = Timers::super_rapid_connect (
+					sigc::mem_fun(*this, &LV2PluginUI::update_timeout));
+			}
 			return false;
 		}
 		lv2ui_instantiate(title);
@@ -430,10 +487,15 @@ LV2PluginUI::on_window_show(const std::string& title)
 			return false;
 		}
 
-		LV2_EXTERNAL_UI_SHOW(_external_ui_ptr);
 		_screen_update_connection.disconnect();
-		_screen_update_connection = ARDOUR_UI::instance()->RapidScreenUpdate.connect
-		        (sigc::mem_fun(*this, &LV2PluginUI::output_update));
+		_message_update_connection.disconnect();
+		LV2_EXTERNAL_UI_SHOW(_external_ui_ptr);
+		_screen_update_connection = Timers::super_rapid_connect
+			(sigc::mem_fun(*this, &LV2PluginUI::output_update));
+		if (_lv2->has_message_output()) {
+			_message_update_connection = Timers::super_rapid_connect (
+				sigc::mem_fun(*this, &LV2PluginUI::update_timeout));
+		}
 		return false;
 	} else {
 		lv2ui_instantiate("gtk2gui");
@@ -445,13 +507,17 @@ LV2PluginUI::on_window_show(const std::string& title)
 void
 LV2PluginUI::on_window_hide()
 {
-	//cout << "on_window_hide" << endl; flush(cout);
+	//printf("LV2PluginUI::on_window_hide\n");
 
-	if (_external_ui_ptr) {
+	if (_lv2->is_external_ui()) {
+		if (!_external_ui_ptr) { return; }
 		LV2_EXTERNAL_UI_HIDE(_external_ui_ptr);
-		//slv2_ui_instance_get_descriptor(_inst)->cleanup(_inst);
-		//_external_ui_ptr = NULL;
-		//_screen_update_connection.disconnect();
+		if (!_lv2->is_external_kx()) { return ; }
+		_message_update_connection.disconnect();
+		_screen_update_connection.disconnect();
+		_external_ui_ptr = NULL;
+		suil_instance_free((SuilInstance*)_inst);
+		_inst = NULL;
 	} else {
 		lv2ui_free();
 	}

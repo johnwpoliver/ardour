@@ -25,6 +25,10 @@
 #include <stdint.h>
 #include <assert.h>
 
+#ifdef PLATFORM_WINDOWS
+#include <intrin.h>
+#endif
+
 #include "pbd/fpu.h"
 #include "pbd/error.h"
 
@@ -39,12 +43,26 @@ FPU::FPU ()
 
 	_flags = Flags (0);
 
-#if !( (defined __x86_64__) || (defined __i386__) ) // !ARCH_X86
+#if !( (defined __x86_64__) || (defined __i386__) || (defined _M_X64) || (defined _M_IX86) ) // !ARCH_X86
 	return;
 #else
 
+#ifdef PLATFORM_WINDOWS
+
+	// Get CPU flags using Microsoft function
+	// It works for both 64 and 32 bit systems
+	// no need to use assembler for getting info from register, this function does this for us
+	int cpuInfo[4];
+	__cpuid (cpuInfo, 1);
+	cpuflags = cpuInfo[3];
+
+#else	
+
+#ifndef _LP64 /* *nix; 32 bit version. This odd macro constant is required because we need something that identifies this as a 32 bit
+                 build on Linux and on OS X. Anything that serves this purpose will do, but this is the best thing we've identified
+                 so far.
+              */
 	
-#ifndef _LP64 //USE_X86_64_ASM
 	asm volatile (
 		"mov $1, %%eax\n"
 		"pushl %%ebx\n"
@@ -56,7 +74,7 @@ FPU::FPU ()
 		: "%eax", "%ecx", "%edx"
 		);
 	
-#else
+#else /* *nix; 64 bit version */
 	
 	/* asm notes: although we explicitly save&restore rbx, we must tell
 	   gcc that ebx,rbx is clobbered so that it doesn't try to use it as an intermediate
@@ -75,7 +93,8 @@ FPU::FPU ()
 		: "%rax", "%rbx", "%rcx", "%rdx"
 		);
 
-#endif /* USE_X86_64_ASM */
+#endif /* _LP64 */
+#endif /* PLATFORM_WINDOWS */
 
 	if (cpuflags & (1<<25)) {
 		_flags = Flags (_flags | (HasSSE|HasFlushToZero));
@@ -98,27 +117,43 @@ FPU::FPU ()
 		   31 for the MXCSR_MASK value. If bit 6 is set, DAZ is
 		   supported, otherwise, it isn't.
 		*/
-		
+
 #ifndef HAVE_POSIX_MEMALIGN
+#  ifdef PLATFORM_WINDOWS
+		fxbuf = (char **) _aligned_malloc (sizeof (char *), 16);
+		assert (fxbuf);
+		*fxbuf = (char *) _aligned_malloc (512, 16);
+		assert (*fxbuf);
+#  else
+#  warning using default malloc for aligned memory
 		fxbuf = (char **) malloc (sizeof (char *));
 		assert (fxbuf);
 		*fxbuf = (char *) malloc (512);
 		assert (*fxbuf);
+#  endif
 #else
-		posix_memalign ((void **) &fxbuf, 16, sizeof (char *));
+		(void) posix_memalign ((void **) &fxbuf, 16, sizeof (char *));
 		assert (fxbuf);
-		posix_memalign ((void **) fxbuf, 16, 512);
+		(void) posix_memalign ((void **) fxbuf, 16, 512);
 		assert (*fxbuf);
 #endif			
 		
 		memset (*fxbuf, 0, 512);
 		
+#ifdef COMPILER_MSVC
+		char *buf = *fxbuf;
+		__asm {
+			mov eax, buf
+			fxsave   [eax]
+		};
+#else
 		asm volatile (
 			"fxsave (%0)"
 			:
 			: "r" (*fxbuf)
 			: "memory"
 			);
+#endif
 		
 		uint32_t mxcsr_mask = *((uint32_t*) &((*fxbuf)[28]));
 		
@@ -132,8 +167,13 @@ FPU::FPU ()
 			_flags = Flags (_flags | HasDenormalsAreZero);
 		} 
 		
+#if !defined HAVE_POSIX_MEMALIGN && defined PLATFORM_WINDOWS
+		_aligned_free (*fxbuf);
+		_aligned_free (fxbuf);
+#else
 		free (*fxbuf);
 		free (fxbuf);
+#endif
 	}
 #endif
 }			

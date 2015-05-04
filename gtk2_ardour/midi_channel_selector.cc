@@ -27,6 +27,7 @@
 #include <gtkmm/table.h>
 
 #include "pbd/compose.h"
+#include "pbd/ffs.h"
 
 #include "gtkmm2ext/gtk_ui.h"
 #include "gtkmm2ext/gui_thread.h"
@@ -44,14 +45,11 @@ using namespace Gtk;
 using namespace ARDOUR;
 
 MidiChannelSelector::MidiChannelSelector(int n_rows, int n_columns, int start_row, int start_column)
-	: Table(n_rows, n_columns, true)
+	: Table(std::max(4, std::max(n_rows,    start_row    + 4)),
+	        std::max(4, std::max(n_columns, start_column + 4)),
+	        true)
 	, _recursion_counter(0)
 {
-	n_rows    = std::max(4, n_rows);
-	n_rows    = std::max(4, start_row + 4);
-	n_columns = std::max(4, n_columns);
-	n_columns = std::max(4, start_column + 4);
-
 	property_column_spacing() = 0;
 	property_row_spacing() = 0;
 
@@ -346,10 +344,10 @@ MidiChannelSelectorWindow::MidiChannelSelectorWindow (boost::shared_ptr<MidiTrac
 	playback_mask_changed ();
 	capture_mask_changed ();
 
-	track->PlaybackChannelMaskChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::playback_mask_changed, this), gui_context());
-	track->PlaybackChannelModeChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::playback_mode_changed, this), gui_context());
-	track->CaptureChannelMaskChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::capture_mask_changed, this), gui_context());
-	track->CaptureChannelModeChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::capture_mode_changed, this), gui_context());
+	track->playback_filter().ChannelMaskChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::playback_mask_changed, this), gui_context());
+	track->playback_filter().ChannelModeChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::playback_mode_changed, this), gui_context());
+	track->capture_filter().ChannelMaskChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::capture_mask_changed, this), gui_context());
+	track->capture_filter().ChannelModeChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&MidiChannelSelectorWindow::capture_mode_changed, this), gui_context());
 }
 
 MidiChannelSelectorWindow::~MidiChannelSelectorWindow()
@@ -516,7 +514,7 @@ MidiChannelSelectorWindow::set_playback_selected_channels (uint16_t mask)
 	case ForceChannel:
 		/* only set the lowest set channel in the mask as active */
 		for (uint16_t i = 0; i < 16; i++) {
-			playback_buttons[i]->set_active (i == (ffs (mask) - 1));
+			playback_buttons[i]->set_active (i == (PBD::ffs (mask) - 1));
 		}
 		break;
 	}
@@ -539,7 +537,7 @@ MidiChannelSelectorWindow::set_capture_selected_channels (uint16_t mask)
 	case ForceChannel:
 		/* only set the lowest set channel in the mask as active */
 		for (uint16_t i = 0; i < 16; i++) {
-			capture_buttons[i]->set_active (i == (ffs (mask) - 1));
+			capture_buttons[i]->set_active (i == (PBD::ffs (mask) - 1));
 		}
 		break;
 	}
@@ -595,7 +593,7 @@ MidiChannelSelectorWindow::playback_mode_changed ()
 	case ForceChannel:
 		if (last_drawn_playback_mode == AllChannels || last_drawn_playback_mode == FilterChannels) {
 			playback_buttons.clear ();
-			first_channel = ffs (track->get_playback_channel_mask()) - 1;
+			first_channel = PBD::ffs (track->get_playback_channel_mask()) - 1;
 		}
 		for (vector<Widget*>::iterator i = playback_mask_controls.begin(); i != playback_mask_controls.end(); ++i) {
 			(*i)->set_sensitive (false);
@@ -693,7 +691,7 @@ MidiChannelSelectorWindow::capture_mode_changed ()
 	case ForceChannel:
 		if (last_drawn_capture_mode == AllChannels || last_drawn_capture_mode == FilterChannels) {
 			capture_buttons.clear ();
-			first_channel = ffs (track->get_capture_channel_mask()) - 1;
+			first_channel = PBD::ffs (track->get_capture_channel_mask()) - 1;
 		}
 		for (vector<Widget*>::iterator i = capture_mask_controls.begin(); i != capture_mask_controls.end(); ++i) {
 			(*i)->set_sensitive (false);

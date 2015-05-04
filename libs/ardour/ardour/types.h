@@ -26,10 +26,9 @@
 #include <boost/shared_ptr.hpp>
 #include <sys/types.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include <inttypes.h>
-#include <jack/types.h>
-#include <jack/midiport.h>
 
 #include "timecode/bbt_time.h"
 #include "timecode/time.h"
@@ -39,6 +38,7 @@
 #include "evoral/Range.hpp"
 
 #include "ardour/chan_count.h"
+#include "ardour/plugin_types.h"
 
 #include <map>
 
@@ -53,12 +53,12 @@ namespace ARDOUR {
 	class Route;
 	class Region;
 
-	typedef jack_default_audio_sample_t Sample;
-	typedef float                       pan_t;
-	typedef float                       gain_t;
-	typedef uint32_t                    layer_t;
-	typedef uint64_t                    microseconds_t;
-	typedef jack_nframes_t              pframes_t;
+	typedef float    Sample;
+	typedef float    pan_t;
+	typedef float    gain_t;
+	typedef uint32_t layer_t;
+	typedef uint64_t microseconds_t;
+	typedef uint32_t pframes_t;
 
 	/* Any position measured in audio frames.
 	   Assumed to be non-negative but not enforced.
@@ -127,6 +127,7 @@ namespace ARDOUR {
 		PanFrontBackAutomation,
 		PanLFEAutomation,
 		PluginAutomation,
+		PluginPropertyAutomation,
 		SoloAutomation,
 		MuteAutomation,
 		MidiCCAutomation,
@@ -137,7 +138,8 @@ namespace ARDOUR {
 		FadeInAutomation,
 		FadeOutAutomation,
 		EnvelopeAutomation,
-		RecEnableAutomation
+		RecEnableAutomation,
+		TrimAutomation,
 	};
 
 	enum AutoState {
@@ -177,6 +179,22 @@ namespace ARDOUR {
 		MeterCustom
 	};
 
+	enum MeterType {
+		MeterMaxSignal = 0x0001,
+		MeterMaxPeak   = 0x0002,
+		MeterPeak      = 0x0004,
+		MeterKrms      = 0x0008,
+		MeterK20       = 0x0010,
+		MeterK14       = 0x0020,
+		MeterIEC1DIN   = 0x0040,
+		MeterIEC1NOR   = 0x0080,
+		MeterIEC2BBC   = 0x0100,
+		MeterIEC2EBU   = 0x0200,
+		MeterVU        = 0x0400,
+		MeterK12       = 0x0800,
+		MeterPeak0dB   = 0x1000
+	};
+
 	enum TrackMode {
 		Normal,
 		NonLayered,
@@ -198,6 +216,14 @@ namespace ARDOUR {
 		MeterColors = 0,
 		ChannelColors,
 		TrackColor
+	};
+
+	enum RoundMode {
+		RoundDownMaybe  = -2,  ///< Round down only if necessary
+		RoundDownAlways = -1,  ///< Always round down, even if on a division
+		RoundNearest    = 0,   ///< Round to nearest
+		RoundUpAlways   = 1,   ///< Always round up, even if on a division
+		RoundUpMaybe    = 2    ///< Round up only if necessary
 	};
 
 	class AnyTime {
@@ -251,8 +277,7 @@ namespace ARDOUR {
 				return seconds != 0;
 			}
 
-			/* NOTREACHED */
-			assert (false);
+			abort(); /* NOTREACHED */
 			return false;
 		}
 	};
@@ -308,10 +333,12 @@ namespace ARDOUR {
 		MeterFalloffOff = 0,
 		MeterFalloffSlowest = 1,
 		MeterFalloffSlow = 2,
-		MeterFalloffMedium = 3,
-		MeterFalloffFast = 4,
-		MeterFalloffFaster = 5,
-		MeterFalloffFastest = 6
+		MeterFalloffSlowish = 3,
+		MeterFalloffModerate = 4,
+		MeterFalloffMedium = 5,
+		MeterFalloffFast = 6,
+		MeterFalloffFaster = 7,
+		MeterFalloffFastest = 8,
 	};
 
 	enum MeterHold {
@@ -324,7 +351,19 @@ namespace ARDOUR {
 	enum EditMode {
 		Slide,
 		Splice,
+		Ripple,
 		Lock
+	};
+
+	enum RegionSelectionAfterSplit {
+		None = 0,
+		NewlyCreatedLeft = 1,  // bit 0
+		NewlyCreatedRight = 2, // bit 1
+		NewlyCreatedBoth = 3,
+		Existing = 4,          // bit 2
+		ExistingNewlyCreatedLeft = 5,
+		ExistingNewlyCreatedRight = 6,
+		ExistingNewlyCreatedBoth = 7
 	};
 
 	enum RegionPoint {
@@ -338,11 +377,6 @@ namespace ARDOUR {
 		PostFader
 	};
 
-        enum RouteSortOrderKey { 
-		EditorSort,
-		MixerSort
-	};
-	    
 	enum MonitorModel {
 		HardwareMonitoring, ///< JACK does monitoring
 		SoftwareMonitoring, ///< Ardour does monitoring
@@ -365,6 +399,20 @@ namespace ARDOUR {
 	enum MeterState {
 		MeteringInput, ///< meter the input IO, regardless of what is going through the route
 		MeteringRoute  ///< meter what is going through the route
+	};
+
+	enum VUMeterStandard {
+		MeteringVUfrench,   // 0VU = -2dBu
+		MeteringVUamerican, // 0VU =  0dBu
+		MeteringVUstandard, // 0VU = +4dBu
+		MeteringVUeight     // 0VU = +8dBu
+	};
+
+	enum MeterLineUp {
+		MeteringLineUp24,
+		MeteringLineUp20,
+		MeteringLineUp18,
+		MeteringLineUp15
 	};
 
 	enum PFLPosition {
@@ -390,19 +438,7 @@ namespace ARDOUR {
 
 	enum RemoteModel {
 		UserOrdered,
-		MixerOrdered,
-		EditorOrdered
-	};
-
-	enum CrossfadeModel {
-		FullCrossfade,
-		ShortCrossfade
-	};
-
-	enum CrossfadeChoice {
-		RegionFades,
-		ConstantPowerMinus3dB,
-		ConstantPowerMinus6dB,
+		MixerOrdered
 	};
 
 	enum ListenPosition {
@@ -422,10 +458,13 @@ namespace ARDOUR {
 		FormatInt16
 	};
 
+	int format_data_width (ARDOUR::SampleFormat);
+
 	enum CDMarkerFormat {
 		CDMarkerNone,
 		CDMarkerCUE,
-		CDMarkerTOC
+		CDMarkerTOC,
+		MP4Chaps
 	};
 
 	enum HeaderFormat {
@@ -445,14 +484,6 @@ namespace ARDOUR {
 		PeakDatum max;
 	};
 
-	enum PluginType {
-		AudioUnit,
-		LADSPA,
-		LV2,
-		Windows_VST,
-		LXVST,
-	};
-
 	enum RunContext {
 		ButlerContext = 0,
 		TransportContext,
@@ -460,7 +491,12 @@ namespace ARDOUR {
 	};
 
 	enum SyncSource {
-		JACK,
+		/* These are "synonyms". It is important for JACK to be first
+		   both here and in enums.cc, so that the string "JACK" is
+		   correctly recognized in older session and preference files.
+		*/
+		JACK = 0,
+		Engine = 0,
 		MTC,
 		MIDIClock,
 		LTC
@@ -521,7 +557,8 @@ namespace ARDOUR {
 	struct RouteProcessorChange {
 		enum Type {
 			GeneralChange = 0x0,
-			MeterPointChange = 0x1
+			MeterPointChange = 0x1,
+			RealTimeChange = 0x2
 		};
 
 		RouteProcessorChange () : type (GeneralChange), meter_visibly_changed (true)
@@ -555,13 +592,38 @@ namespace ARDOUR {
 		FadeSymmetric,
 	};
 
+	enum TransportState {
+		/* these values happen to match the constants used by JACK but
+		   this equality cannot be assumed.
+		*/
+		TransportStopped = 0,
+		TransportRolling = 1, 
+		TransportLooping = 2, 
+		TransportStarting = 3,
+	};
+
+	enum PortFlags {
+		/* these values happen to match the constants used by JACK but
+		   this equality cannot be assumed.
+		*/
+		IsInput = 0x1, 
+		IsOutput = 0x2,
+		IsPhysical = 0x4,
+		CanMonitor = 0x8,
+		IsTerminal = 0x10
+	};
+
+	struct LatencyRange {
+	    uint32_t min; //< samples
+	    uint32_t max; //< samples
+	};
+
 } // namespace ARDOUR
 
 
 /* these cover types declared above in this header. See enums.cc
    for the definitions.
 */
-
 std::istream& operator>>(std::istream& o, ARDOUR::SampleFormat& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::HeaderFormat& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::AutoConnectOption& sf);
@@ -572,16 +634,14 @@ std::istream& operator>>(std::istream& o, ARDOUR::AFLPosition& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::RemoteModel& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::ListenPosition& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::InsertMergePolicy& sf);
-std::istream& operator>>(std::istream& o, ARDOUR::CrossfadeModel& sf);
-std::istream& operator>>(std::istream& o, ARDOUR::CrossfadeChoice& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::SyncSource& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::ShuttleBehaviour& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::ShuttleUnits& sf);
 std::istream& operator>>(std::istream& o, Timecode::TimecodeFormat& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::DenormalModel& sf);
-std::istream& operator>>(std::istream& o, ARDOUR::WaveformScale& sf);
-std::istream& operator>>(std::istream& o, ARDOUR::WaveformShape& sf);
 std::istream& operator>>(std::istream& o, ARDOUR::PositionLockStyle& sf);
+std::istream& operator>>(std::istream& o, ARDOUR::FadeShape& sf);
+std::istream& operator>>(std::istream& o, ARDOUR::RegionSelectionAfterSplit& sf);
 
 std::ostream& operator<<(std::ostream& o, const ARDOUR::SampleFormat& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::HeaderFormat& sf);
@@ -593,16 +653,29 @@ std::ostream& operator<<(std::ostream& o, const ARDOUR::AFLPosition& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::RemoteModel& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::ListenPosition& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::InsertMergePolicy& sf);
-std::ostream& operator<<(std::ostream& o, const ARDOUR::CrossfadeModel& sf);
-std::ostream& operator<<(std::ostream& o, const ARDOUR::CrossfadeChoice& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::SyncSource& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::ShuttleBehaviour& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::ShuttleUnits& sf);
 std::ostream& operator<<(std::ostream& o, const Timecode::TimecodeFormat& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::DenormalModel& sf);
-std::ostream& operator<<(std::ostream& o, const ARDOUR::WaveformScale& sf);
-std::ostream& operator<<(std::ostream& o, const ARDOUR::WaveformShape& sf);
 std::ostream& operator<<(std::ostream& o, const ARDOUR::PositionLockStyle& sf);
+std::ostream& operator<<(std::ostream& o, const ARDOUR::FadeShape& sf);
+std::ostream& operator<<(std::ostream& o, const ARDOUR::RegionSelectionAfterSplit& sf);
+
+
+/* because these operators work on types which can be used when making
+   a UI_CONFIG_VARIABLE (in gtk2_ardour) we need them to be exported.
+*/
+LIBARDOUR_API std::istream& operator>>(std::istream& o, ARDOUR::WaveformScale& sf);
+LIBARDOUR_API std::istream& operator>>(std::istream& o, ARDOUR::WaveformShape& sf);
+LIBARDOUR_API std::istream& operator>>(std::istream& o, ARDOUR::VUMeterStandard& sf);
+LIBARDOUR_API std::istream& operator>>(std::istream& o, ARDOUR::MeterLineUp& sf);
+
+LIBARDOUR_API std::ostream& operator<<(std::ostream& o, const ARDOUR::WaveformScale& sf);
+LIBARDOUR_API std::ostream& operator<<(std::ostream& o, const ARDOUR::WaveformShape& sf);
+LIBARDOUR_API std::ostream& operator<<(std::ostream& o, const ARDOUR::VUMeterStandard& sf);
+LIBARDOUR_API std::ostream& operator<<(std::ostream& o, const ARDOUR::MeterLineUp& sf);
+
 
 static inline ARDOUR::framepos_t
 session_frame_to_track_frame (ARDOUR::framepos_t session_frame, double speed)

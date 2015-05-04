@@ -39,12 +39,8 @@ public:
 		};
 	}
 
-	bool is_integer (const Evoral::Parameter& /*param*/) const { return true; }
-
-	Parameter new_parameter(uint32_t type, uint8_t channel, uint32_t id) const {
-		Parameter p(type, channel, id);
-		p.set_range(type, 0.0f, 1.0f, 0.0f);
-		return p;
+	ParameterDescriptor descriptor(const Parameter& param) const {
+		return ParameterDescriptor();
 	}
 
 	std::string to_symbol(const Parameter& /*param*/) const { return "control"; }
@@ -56,11 +52,9 @@ public:
 	MySequence(DummyTypeMap&map) : Sequence<Time>(map) {}
 
 	boost::shared_ptr<Control> control_factory(const Parameter& param) {
-
-		return boost::shared_ptr<Control>(
-			new Control(param, boost::shared_ptr<ControlList> (
-				new ControlList(param)
-		)));
+		const Evoral::ParameterDescriptor desc;
+		boost::shared_ptr<ControlList>    list(new ControlList(param, desc));
+		return boost::shared_ptr<Control>(new Control(param, desc, list));
 	}
 };
 
@@ -119,7 +113,7 @@ class SequenceTest : public CppUnit::TestFixture
 	CPPUNIT_TEST_SUITE_END ();
 
 public:
-	typedef double Time;
+	typedef Beats Time;
 	typedef std::vector< boost::shared_ptr< Note<Time> > > Notes;
 
 	void setUp () {
@@ -129,8 +123,9 @@ public:
 		assert(seq);
 
 		for (int i = 0; i < 12; i++) {
-			test_notes.push_back(boost::shared_ptr<Note<Time> >
-					(new Note<Time>(0, i * 100, 100, 64 + i, 64)));
+			test_notes.push_back(
+				boost::shared_ptr<Note<Time> >(
+					new Note<Time>(0, Beats(i * 100), Beats(100), 64 + i, 64)));
 		}
 	}
 

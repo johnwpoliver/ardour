@@ -32,14 +32,14 @@ namespace ARDOUR {
 
 class MidiModel;
 
-class MidiOperator {
+class LIBARDOUR_API MidiOperator {
   public:
 	MidiOperator () {}
 	virtual ~MidiOperator() {}
 
 	virtual Command* operator() (boost::shared_ptr<ARDOUR::MidiModel>,
-	                             double,
-	                             std::vector<Evoral::Sequence<Evoral::MusicalTime>::Notes>&) = 0;
+	                             Evoral::Beats,
+	                             std::vector<Evoral::Sequence<Evoral::Beats>::Notes>&) = 0;
 	virtual std::string name() const = 0;
 };
 

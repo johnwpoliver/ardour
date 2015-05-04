@@ -47,14 +47,21 @@ public:
 
 private:
 	void init (const Timecode::BBT_Time& start, double, double, bool);
+	bool is_user_input_valid() const;
 	void bpm_changed ();
 	bool bpm_button_press (GdkEventButton* );
 	bool bpm_button_release (GdkEventButton* );
 	bool entry_key_release (GdkEventKey* );
 	void pulse_change ();
+	bool tap_tempo_button_press (GdkEventButton* );
+	bool tap_tempo_focus_out (GdkEventFocus* );
 
 	typedef std::map<std::string,float> NoteTypes;
 	NoteTypes note_types;
+
+	bool tapped;      // whether the tap-tempo button has been clicked
+	gint64 last_tap;
+	double average_interval;
 
 	Gtk::ComboBoxText pulse_selector;
 	Gtk::Adjustment   bpm_adjustment;
@@ -64,6 +71,7 @@ private:
 	Gtk::Label   when_bar_label;
 	Gtk::Label   when_beat_label;
 	Gtk::Label   pulse_selector_label;
+	Gtk::Button  tap_tempo_button;
 };
 
 class MeterDialog : public ArdourDialog
@@ -79,6 +87,7 @@ public:
 
 private:
 	void init (const Timecode::BBT_Time&, double, double, bool);
+	bool is_user_input_valid() const;
 	bool entry_key_press (GdkEventKey* );
 	bool entry_key_release (GdkEventKey* );
 	void note_type_change ();

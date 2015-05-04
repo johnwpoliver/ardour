@@ -22,13 +22,16 @@
 #include <string>
 #include <iostream>
 
-#include <jack/types.h>
+#include <pthread.h>
 
 #include "pbd/xml++.h"
+#ifndef PLATFORM_WINDOWS
 #include "pbd/crossthread.h"
+#endif
 #include "pbd/signals.h"
 #include "pbd/ringbuffer.h"
 
+#include "midi++/libmidi_visibility.h"
 #include "midi++/types.h"
 #include "midi++/parser.h"
 
@@ -37,11 +40,11 @@ namespace MIDI {
 class Channel;
 class PortRequest;
 
-class Port {
+class LIBMIDIPP_API Port {
   public:
 	enum Flags {
-		IsInput = JackPortIsInput,
-		IsOutput = JackPortIsOutput,
+		IsInput = 0x1,  /* MUST MATCH JACK's JackPortIsInput */
+		IsOutput = 0x2, /* MUST MATCH JACK's JackPortIsOutput */
 	};
 	
 	Port (std::string const &, Flags);
@@ -50,13 +53,6 @@ class Port {
 
 	virtual XMLNode& get_state () const;
 	virtual void set_state (const XMLNode&);
-
-	// FIXME: make Manager a friend of port so these can be hidden?
-
-	/* Only for use by MidiManager.  Don't ever call this. */
-	virtual void cycle_start (pframes_t) {}
-	/* Only for use by MidiManager.  Don't ever call this. */
-	virtual void cycle_end () {}
 
 	/** Write a message to port.
 	 * @param msg Raw MIDI message to send
@@ -143,7 +139,7 @@ class Port {
 	void init (std::string const &, Flags);
 };
 
-struct PortSet {
+struct LIBMIDIPP_API PortSet {
     PortSet (std::string str) : owner (str) { }
     
     std::string owner;

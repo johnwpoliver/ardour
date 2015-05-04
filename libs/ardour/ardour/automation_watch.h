@@ -30,7 +30,7 @@ namespace ARDOUR {
 
 class AutomationControl;
 
-class AutomationWatch : public sigc::trackable, public ARDOUR::SessionHandlePtr, public PBD::ScopedConnectionList {
+class LIBARDOUR_API AutomationWatch : public sigc::trackable, public ARDOUR::SessionHandlePtr, public PBD::ScopedConnectionList {
   public:
     static AutomationWatch& instance();
 
@@ -48,6 +48,7 @@ class AutomationWatch : public sigc::trackable, public ARDOUR::SessionHandlePtr,
 
     static AutomationWatch* _instance;
     Glib::Threads::Thread*  _thread;
+    framepos_t              _last_time;
     bool                    _run_thread;
     AutomationWatches        automation_watches;
     Glib::Threads::Mutex     automation_watch_lock;

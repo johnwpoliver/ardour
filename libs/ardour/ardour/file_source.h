@@ -28,7 +28,7 @@
 
 namespace ARDOUR {
 
-class MissingSource : public std::exception
+class LIBARDOUR_API MissingSource : public std::exception
 {
   public:
 	MissingSource (const std::string& p, DataType t) throw ()
@@ -42,12 +42,12 @@ class MissingSource : public std::exception
 };
 
 /** A source associated with a file on disk somewhere */
-class FileSource : virtual public Source {
+class LIBARDOUR_API FileSource : virtual public Source {
 public:
-	virtual ~FileSource () {}
+	virtual ~FileSource ();
 
-	virtual const std::string& path() const { return _path; }
-
+	const std::string& path() const { return _path; }
+	
 	virtual bool safe_file_extension (const std::string& path) const = 0;
 
 	int  move_to_trash (const std::string& trash_dir_name);
@@ -74,14 +74,24 @@ public:
 
 	void inc_use_count ();
 	bool removable () const;
+        bool is_stub () const;
 
 	const std::string& origin() const { return _origin; }
 
 	virtual void set_path (const std::string&);
 	
-	static PBD::Signal3<int,std::string,std::string,std::vector<std::string> > AmbiguousFileName;
+	static PBD::Signal2<int,std::string,std::vector<std::string> > AmbiguousFileName;
 
-protected:
+	void existence_check ();
+	virtual void prevent_deletion ();
+
+	/** Rename the file on disk referenced by this source to \param newname
+	 */
+	int rename (const std::string& name);
+
+	virtual void close () = 0;
+
+  protected:
 	FileSource (Session& session, DataType type,
 	            const std::string& path,
 	            const std::string& origin,
@@ -100,9 +110,6 @@ protected:
 	uint16_t    _channel;
 	bool        _within_session;
 	std::string _origin;
-	bool        _open;
-
-	void prevent_deletion ();
 };
 
 } // namespace ARDOUR

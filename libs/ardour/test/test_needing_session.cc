@@ -1,4 +1,5 @@
-#include "midi++/manager.h"
+#include <glibmm/miscutils.h>
+
 #include "pbd/compose.h"
 #include "pbd/enumwriter.h"
 #include "ardour/session.h"
@@ -13,18 +14,16 @@ using namespace PBD;
 void
 TestNeedingSession::setUp ()
 {
-	string const test_session_path = "libs/ardour/test/test_session";
-	system (string_compose ("rm -rf %1", test_session_path).c_str());
-	_session = load_session (test_session_path, "test_session");
+	const string session_name("test_session");
+	std::string new_session_dir = Glib::build_filename (new_test_output_dir(), session_name);
+	create_and_start_dummy_backend ();
+	_session = load_session (new_session_dir, "test_session");
 }
 
 void
 TestNeedingSession::tearDown ()
 {
-	AudioEngine::instance()->remove_session ();
 	delete _session;
-	AudioEngine::instance()->stop (true);
-	
-	MIDI::Manager::destroy ();
-	AudioEngine::destroy ();
+	stop_and_destroy_backend ();
+	_session = 0;
 }

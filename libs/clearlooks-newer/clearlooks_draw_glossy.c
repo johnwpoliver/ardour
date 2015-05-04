@@ -746,7 +746,7 @@ clearlooks_glossy_draw_tab (cairo_t *cr,
 
 	if (params->active)
 	{
-		CairoColor shadow, hilight, f1, f2;
+		CairoColor shadow, f1, f2;
 
 		pattern = cairo_pattern_create_linear (tab->gap_side == CL_GAP_LEFT   ? width-1  : 0,
 		                                       tab->gap_side == CL_GAP_TOP    ? height-2 : 1,
@@ -1088,13 +1088,16 @@ clearlooks_glossy_draw_toolbar (cairo_t *cr,
                          const ToolbarParameters         *toolbar,
                          int x, int y, int width, int height)
 {
+	CairoColor light;
+	const CairoColor *dark;
+	
+	const CairoColor *fill  = &colors->bg[GTK_STATE_NORMAL];
+	dark  = &colors->shade[3];
+
 	(void) widget;
 	(void) width;
 	(void) height;
-	
-	const CairoColor *fill  = &colors->bg[GTK_STATE_NORMAL];
-	const CairoColor *dark  = &colors->shade[3];
-	CairoColor light;
+
 	ge_shade_color (fill, 1.1, &light);
 	
 	cairo_set_line_width (cr, 1.0);
@@ -1232,9 +1235,6 @@ clearlooks_glossy_draw_radiobutton (cairo_t *cr,
                              const CheckboxParameters *checkbox,
                              int x, int y, int width, int height)
 {
-	(void) width;
-	(void) height;
-	
 	const CairoColor *border;
 	const CairoColor *dot;
 	CairoColor shadow;
@@ -1242,6 +1242,9 @@ clearlooks_glossy_draw_radiobutton (cairo_t *cr,
 	cairo_pattern_t *pt;
 	gboolean inconsistent;
 	gboolean draw_bullet = (checkbox->shadow_type == GTK_SHADOW_IN);
+
+	(void) width;
+	(void) height;
 
 	inconsistent = (checkbox->shadow_type == GTK_SHADOW_ETCHED_IN);
 	draw_bullet |= inconsistent;

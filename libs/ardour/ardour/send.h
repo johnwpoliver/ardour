@@ -26,16 +26,17 @@
 
 #include "ardour/ardour.h"
 #include "ardour/delivery.h"
+#include "ardour/delayline.h"
 
 namespace ARDOUR {
 
 class PeakMeter;
 class Amp;
 
-class Send : public Delivery
+class LIBARDOUR_API Send : public Delivery
 {
   public:
-	Send (Session&, boost::shared_ptr<Pannable> pannable, boost::shared_ptr<MuteMaster>, Delivery::Role r = Delivery::Send);
+	Send (Session&, boost::shared_ptr<Pannable> pannable, boost::shared_ptr<MuteMaster>, Delivery::Role r = Delivery::Send, bool ignore_bitslot = false);
 	virtual ~Send ();
 
 	uint32_t bit_slot() const { return _bitslot; }
@@ -56,8 +57,14 @@ class Send : public Delivery
 
 	void run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pframes_t nframes, bool);
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
+
+	/* latency compensation */
+	void set_delay_in (framecnt_t);
+	void set_delay_out (framecnt_t);
+	framecnt_t get_delay_in () const { return _delay_in; }
+	framecnt_t get_delay_out () const { return _delay_out; }
 
 	void activate ();
 	void deactivate ();
@@ -67,20 +74,25 @@ class Send : public Delivery
 	std::string value_as_string (boost::shared_ptr<AutomationControl>) const;
 	
 	static uint32_t how_many_sends();
-	static std::string name_and_id_new_send (Session&, Delivery::Role r, uint32_t&);
+	static std::string name_and_id_new_send (Session&, Delivery::Role r, uint32_t&, bool);
 
   protected:
 	bool _metering;
 	boost::shared_ptr<Amp> _amp;
 	boost::shared_ptr<PeakMeter> _meter;
+	boost::shared_ptr<DelayLine> _delayline;
 
   private:
 	/* disallow copy construction */
 	Send (const Send&);
+	void panshell_changed ();
 
 	int set_state_2X (XMLNode const &, int);
 
 	uint32_t  _bitslot;
+
+	framecnt_t _delay_in;
+	framecnt_t _delay_out;
 };
 
 } // namespace ARDOUR

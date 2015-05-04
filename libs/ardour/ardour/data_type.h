@@ -21,10 +21,12 @@
 #define __ardour_data_type_h__
 
 #include <string>
-#include <jack/jack.h>
+#include <stdint.h>
+#include <glib.h>
+
+#include "ardour/libardour_visibility.h"
 
 namespace ARDOUR {
-
 
 /** A type of Data Ardour is capable of processing.
  *
@@ -32,7 +34,7 @@ namespace ARDOUR {
  * other type representations, simple comparison between then, etc.  This code
  * is deliberately 'ugly' so other code doesn't have to be.
  */
-class DataType
+class LIBARDOUR_API DataType
 {
 public:
 	/** Numeric symbol for this DataType.
@@ -61,33 +63,25 @@ public:
 
 	/** Construct from a string (Used for loading from XML and Ports)
 	 * The string can be as in an XML file (eg "audio" or "midi"), or a
-	 * Jack type string (from jack_port_type) */
+	 */
 	DataType(const std::string& str)
 	: _symbol(NIL) {
-		if (str == "audio" || str == JACK_DEFAULT_AUDIO_TYPE)
+		if (!g_ascii_strncasecmp(str.c_str(), "audio", str.length())) {
 			_symbol = AUDIO;
-		else if (str == "midi" || str == JACK_DEFAULT_MIDI_TYPE)
+		} else if (!g_ascii_strncasecmp(str.c_str(), "midi", str.length())) {
 			_symbol = MIDI;
-	}
-
-	/** Get the Jack type this DataType corresponds to */
-	const char* to_jack_type() const {
-		switch (_symbol) {
-			case AUDIO: return JACK_DEFAULT_AUDIO_TYPE;
-			case MIDI:  return JACK_DEFAULT_MIDI_TYPE;
-			default:    return "";
 		}
 	}
 
 	/** Inverse of the from-string constructor */
 	const char* to_string() const {
 		switch (_symbol) {
-			case AUDIO: return "audio";
-			case MIDI:  return "midi";
-			default:    return "unknown"; // reeeally shouldn't ever happen
+		case AUDIO: return "audio";
+		case MIDI:  return "midi";
+		default:    return "unknown"; // reeeally shouldn't ever happen
 		}
 	}
-
+    
 	const char* to_i18n_string () const;
 
 	inline operator uint32_t() const { return (uint32_t)_symbol; }
@@ -123,7 +117,6 @@ public:
 private:
 	Symbol _symbol; // could be const if not for the string constructor
 };
-
 
 
 } // namespace ARDOUR

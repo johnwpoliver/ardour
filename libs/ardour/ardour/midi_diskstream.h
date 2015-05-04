@@ -36,9 +36,9 @@
 
 #include "ardour/ardour.h"
 #include "ardour/diskstream.h"
-#include "ardour/midi_playlist.h"
-#include "ardour/midi_ring_buffer.h"
+#include "ardour/midi_buffer.h"
 #include "ardour/utils.h"
+#include "ardour/interpolation.h"
 
 struct tm;
 
@@ -46,16 +46,20 @@ namespace ARDOUR {
 
 class IO;
 class MidiEngine;
+class MidiPlaylist;
 class MidiPort;
 class MidiRingbuffer;
+class MidiSource;
 class SMFSource;
 class Send;
 class Session;
 
-class MidiDiskstream : public Diskstream
+template<typename T> class MidiRingBuffer;
+
+class LIBARDOUR_API MidiDiskstream : public Diskstream
 {
   public:
-	MidiDiskstream (Session &, const string& name, Diskstream::Flag f = Recordable);
+	MidiDiskstream (Session &, const std::string& name, Diskstream::Flag f = Recordable);
 	MidiDiskstream (Session &, const XMLNode&);
 	~MidiDiskstream();
 
@@ -63,25 +67,27 @@ class MidiDiskstream : public Diskstream
 	float capture_buffer_load() const;
 
 	void get_playback (MidiBuffer& dst, framecnt_t);
-        void flush_playback (framepos_t, framepos_t);
+	void flush_playback (framepos_t, framepos_t);
 
 	void set_record_enabled (bool yn);
 	
 	void reset_tracker ();
+	void resolve_tracker (Evoral::EventSink<framepos_t>& buffer, framepos_t time);
 
-	boost::shared_ptr<MidiPlaylist> midi_playlist () { return boost::dynamic_pointer_cast<MidiPlaylist>(_playlist); }
+	boost::shared_ptr<MidiPlaylist> midi_playlist ();
 
 	int use_playlist (boost::shared_ptr<Playlist>);
 	int use_new_playlist ();
 	int use_copy_playlist ();
 
 	bool set_name (std::string const &);
+	bool set_write_source_name (const std::string& str);
 
 	/* stateful */
 	XMLNode& get_state(void);
 	int set_state(const XMLNode&, int version);
 
-	void ensure_jack_monitors_input (bool);
+	void ensure_input_monitoring (bool);
 
 	boost::shared_ptr<SMFSource> write_source ()    { return _write_source; }
 
@@ -111,7 +117,7 @@ class MidiDiskstream : public Diskstream
 	void set_block_size (pframes_t);
 	int  internal_playback_seek (framecnt_t distance);
 	int  can_internal_playback_seek (framecnt_t distance);
-	std::list<boost::shared_ptr<Source> > steal_write_sources();
+	std::string steal_write_source_name();
 	void reset_write_sources (bool, bool force = false);
 	void non_realtime_input_change ();
 	void non_realtime_locate (framepos_t location);
@@ -119,13 +125,15 @@ class MidiDiskstream : public Diskstream
 	static void set_readahead_frames (framecnt_t frames_ahead) { midi_readahead = frames_ahead; }
 
   protected:
+	friend class MidiTrack;
+	friend class Auditioner;
 	int seek (framepos_t which_sample, bool complete_refill = false);
 
-  protected:
-	friend class MidiTrack;
+	int process (BufferSet&, framepos_t transport_frame, pframes_t nframes, framecnt_t &, bool need_diskstream);
 
-        int  process (BufferSet&, framepos_t transport_frame, pframes_t nframes, framecnt_t &, bool need_diskstream);
-	bool commit  (framecnt_t nframes);
+	frameoffset_t calculate_playback_distance (pframes_t nframes);
+	bool commit (framecnt_t nframes);
+
 	static framecnt_t midi_readahead;
 
   private:
@@ -146,7 +154,7 @@ class MidiDiskstream : public Diskstream
 
 	int use_new_write_source (uint32_t n=0);
 
-	int find_and_use_playlist (const string&);
+	int find_and_use_playlist (const std::string&);
 
 	void allocate_temporary_buffers ();
 
@@ -173,12 +181,15 @@ class MidiDiskstream : public Diskstream
 	gint                         _frames_read_from_ringbuffer;
 	volatile gint                _frames_pending_write;
 	volatile gint                _num_captured_loops;
+	framepos_t                   _accumulated_capture_offset;
 
 	/** A buffer that we use to put newly-arrived MIDI data in for
 	    the GUI to read (so that it can update itself).
 	*/
 	MidiBuffer                   _gui_feed_buffer;
 	mutable Glib::Threads::Mutex _gui_feed_buffer_mutex;
+
+	CubicMidiInterpolation interpolation;
 };
 
 }; /* namespace ARDOUR */

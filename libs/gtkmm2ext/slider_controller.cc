@@ -22,61 +22,81 @@
 #include <gtkmm2ext/gtk_ui.h>
 #include <gtkmm2ext/pixfader.h>
 #include <gtkmm2ext/slider_controller.h>
+#include "pbd/controllable.h"
 
 #include "i18n.h"
 
 using namespace Gtkmm2ext;
 using namespace PBD;
 
-SliderController::SliderController (Gtk::Adjustment *adj, int orientation, int fader_length, int fader_girth)
+SliderController::SliderController (Gtk::Adjustment *adj, boost::shared_ptr<PBD::Controllable> mc, int orientation, int fader_length, int fader_girth)
 	: PixFader (*adj, orientation, fader_length, fader_girth)
-	, spin (*adj, 0, 2)
-{			  
-	spin.set_name ("SliderControllerValue");
-	spin.set_size_request (70,-1); // should be based on font size somehow
-	spin.set_numeric (true);
-	spin.set_snap_to_ticks (false);
+	, _ctrl (mc)
+	, _ctrl_adj (adj)
+	, _spin_adj (0, 0, 1.0, .1, .01)
+	, _spin (_spin_adj, 0, 2)
+	, _ctrl_ignore (false)
+	, _spin_ignore (false)
+{
+	if (mc) {
+		_spin_adj.set_lower (mc->lower ());
+		_spin_adj.set_upper (mc->upper ());
+		_spin_adj.set_step_increment(_ctrl->interface_to_internal(adj->get_step_increment()) - mc->lower ());
+		_spin_adj.set_page_increment(_ctrl->interface_to_internal(adj->get_page_increment()) - mc->lower ());
+
+		adj->signal_value_changed().connect (sigc::mem_fun(*this, &SliderController::ctrl_adjusted));
+		_spin_adj.signal_value_changed().connect (sigc::mem_fun(*this, &SliderController::spin_adjusted));
+
+		_binding_proxy.set_controllable (mc);
+	}
+
+	_spin.set_name ("SliderControllerValue");
+	_spin.set_numeric (true);
+	_spin.set_snap_to_ticks (false);
 }
 
-void
-SliderController::set_value (float v)
+bool
+SliderController::on_button_press_event (GdkEventButton *ev)
 {
-	adjustment.set_value (v);
-}
-
-bool 
-SliderController::on_button_press_event (GdkEventButton *ev) 
-{
-	if (binding_proxy.button_press_handler (ev)) {
+	if (_binding_proxy.button_press_handler (ev)) {
 		return true;
 	}
 
 	return PixFader::on_button_press_event (ev);
 }
 
-VSliderController::VSliderController (Gtk::Adjustment *adj, int fader_length, int fader_girth, bool with_numeric)
-
-	: SliderController (adj, VERT, fader_length, fader_girth)
+void
+SliderController::ctrl_adjusted ()
 {
-	if (with_numeric) {
-		spin_frame.add (spin);
-		spin_frame.set_shadow_type (Gtk::SHADOW_IN);
-		spin_frame.set_name ("BaseFrame");
-		spin_hbox.pack_start (spin_frame, false, true);
-		// pack_start (spin_hbox, false, false);
-	}
+	assert (_ctrl); // only used w/BarControlle
+	if (_spin_ignore) return;
+	_ctrl_ignore = true;
+	// TODO consider using internal_to_user, too (amp, dB)
+	// (also needs _spin_adj min/max range changed accordingly
+	//  and dedicated support for log-scale, revert parts of ceff2e3a62f839)
+	_spin_adj.set_value (_ctrl->interface_to_internal (_ctrl_adj->get_value()));
+	_ctrl_ignore = false;
 }
 
-HSliderController::HSliderController (Gtk::Adjustment *adj, int fader_length, int fader_girth,
-				      bool with_numeric)
-	
-	: SliderController (adj, HORIZ, fader_length, fader_girth)
+void
+SliderController::spin_adjusted ()
 {
-	if (with_numeric) {
-		spin_frame.add (spin);
-		//spin_frame.set_shadow_type (Gtk::SHADOW_IN);
-		spin_frame.set_name ("BaseFrame");
-		spin_hbox.pack_start (spin_frame, false, true);
-		// pack_start (spin_hbox, false, false);
-	}
+	assert (_ctrl); // only used w/BarController
+	if (_ctrl_ignore) return;
+	_spin_ignore = true;
+	// TODO consider using user_to_internal, as well
+	_ctrl_adj->set_value(_ctrl->internal_to_interface (_spin_adj.get_value()));
+	_spin_ignore = false;
+}
+
+
+
+VSliderController::VSliderController (Gtk::Adjustment *adj, boost::shared_ptr<PBD::Controllable> mc, int fader_length, int fader_girth)
+	: SliderController (adj, mc, VERT, fader_length, fader_girth)
+{
+}
+
+HSliderController::HSliderController (Gtk::Adjustment *adj, boost::shared_ptr<PBD::Controllable> mc, int fader_length, int fader_girth)
+	: SliderController (adj, mc, HORIZ, fader_length, fader_girth)
+{
 }

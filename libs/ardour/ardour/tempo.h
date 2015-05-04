@@ -45,7 +45,7 @@ class Meter;
 class TempoMap;
 
 /** Tempo, the speed at which musical time progresses (BPM). */
-class Tempo {
+class LIBARDOUR_API Tempo {
   public:
 	Tempo (double bpm, double type=4.0) // defaulting to quarter note
 		: _beats_per_minute (bpm), _note_type(type) {}
@@ -62,7 +62,7 @@ class Tempo {
 };
 
 /** Meter, or time signature (beats per bar, and which note type is a beat). */
-class Meter {
+class LIBARDOUR_API Meter {
   public:
 	Meter (double dpb, double bt)
 		: _divisions_per_bar (dpb), _note_type (bt) {}
@@ -87,7 +87,7 @@ class Meter {
 };
 
 /** A section of timeline with a certain Tempo or Meter. */
-class MetricSection {
+class LIBARDOUR_API MetricSection {
   public:
 	MetricSection (const Timecode::BBT_Time& start)
 		: _start (start), _frame (0), _movable (true) {}
@@ -123,7 +123,7 @@ class MetricSection {
 };
 
 /** A section of timeline with a certain Meter. */
-class MeterSection : public MetricSection, public Meter {
+class LIBARDOUR_API MeterSection : public MetricSection, public Meter {
   public:
 	MeterSection (const Timecode::BBT_Time& start, double bpb, double note_type)
 		: MetricSection (start), Meter (bpb, note_type) {}
@@ -137,7 +137,7 @@ class MeterSection : public MetricSection, public Meter {
 };
 
 /** A section of timeline with a certain Tempo. */
-class TempoSection : public MetricSection, public Tempo {
+class LIBARDOUR_API TempoSection : public MetricSection, public Tempo {
   public:
 	TempoSection (const Timecode::BBT_Time& start, double qpm, double note_type)
 		: MetricSection (start), Tempo (qpm, note_type), _bar_offset (-1.0)  {}
@@ -170,7 +170,7 @@ typedef std::list<MetricSection*> Metrics;
 /** Helper class to keep track of the Meter *AND* Tempo in effect
     at a given point in time.
 */
-class TempoMetric {
+class LIBARDOUR_API TempoMetric {
   public:
 	TempoMetric (const Meter& m, const Tempo& t)
 		: _meter (&m), _tempo (&t), _frame (0) {}
@@ -205,7 +205,7 @@ class TempoMetric {
 	Timecode::BBT_Time _start;
 };
 
-class TempoMap : public PBD::StatefulDestructible
+class LIBARDOUR_API TempoMap : public PBD::StatefulDestructible
 {
   public:
 	TempoMap (framecnt_t frame_rate);
@@ -276,9 +276,9 @@ class TempoMap : public PBD::StatefulDestructible
 	*/
 
 	framepos_t framepos_plus_bbt (framepos_t pos, Timecode::BBT_Time b) const;
-	framepos_t framepos_plus_beats (framepos_t, Evoral::MusicalTime) const;
-	framepos_t framepos_minus_beats (framepos_t, Evoral::MusicalTime) const;
-	Evoral::MusicalTime framewalk_to_beats (framepos_t pos, framecnt_t distance) const;
+	framepos_t framepos_plus_beats (framepos_t, Evoral::Beats) const;
+	framepos_t framepos_minus_beats (framepos_t, Evoral::Beats) const;
+	Evoral::Beats framewalk_to_beats (framepos_t pos, framecnt_t distance) const;
 
 	static const Tempo& default_tempo() { return _default_tempo; }
 	static const Meter& default_meter() { return _default_meter; }
@@ -287,6 +287,7 @@ class TempoMap : public PBD::StatefulDestructible
 	const Meter& meter_at (framepos_t) const;
 
 	const TempoSection& tempo_section_at (framepos_t) const;
+	const MeterSection& meter_section_at (framepos_t) const;
 
 	void add_tempo (const Tempo&, Timecode::BBT_Time where);
 	void add_meter (const Meter&, Timecode::BBT_Time where);
@@ -297,10 +298,9 @@ class TempoMap : public PBD::StatefulDestructible
 	void replace_tempo (const TempoSection&, const Tempo&, const Timecode::BBT_Time& where);
 	void replace_meter (const MeterSection&, const Meter&, const Timecode::BBT_Time& where);
 
-	framepos_t round_to_bar  (framepos_t frame, int dir);
-	framepos_t round_to_beat (framepos_t frame, int dir);
-	framepos_t round_to_beat_subdivision (framepos_t fr, int sub_num, int dir);
-	framepos_t round_to_tick (framepos_t frame, int dir);
+	framepos_t round_to_bar  (framepos_t frame, RoundMode dir);
+	framepos_t round_to_beat (framepos_t frame, RoundMode dir);
+	framepos_t round_to_beat_subdivision (framepos_t fr, int sub_num, RoundMode dir);
 
 	void set_length (framepos_t frames);
 
@@ -323,7 +323,8 @@ class TempoMap : public PBD::StatefulDestructible
 	void change_initial_tempo (double bpm, double note_type);
 
 	void insert_time (framepos_t, framecnt_t);
-
+	bool cut_time (framepos_t where, framecnt_t amount);  //returns true if anything was moved
+	
 	int n_tempos () const;
 	int n_meters () const;
 
@@ -355,14 +356,23 @@ class TempoMap : public PBD::StatefulDestructible
 	BBTPointList::const_iterator bbt_before_or_at (const Timecode::BBT_Time&);
 	BBTPointList::const_iterator bbt_after_or_at (framepos_t);
 	
-	framepos_t round_to_type (framepos_t fr, int dir, BBTPointType);
+	framepos_t round_to_type (framepos_t fr, RoundMode dir, BBTPointType);
 	void bbt_time (framepos_t, Timecode::BBT_Time&, const BBTPointList::const_iterator&);
 	framecnt_t bbt_duration_at_unlocked (const Timecode::BBT_Time& when, const Timecode::BBT_Time& bbt, int dir);
 	
 	const MeterSection& first_meter() const;
+	MeterSection&       first_meter();
 	const TempoSection& first_tempo() const;
+	TempoSection&       first_tempo();
 	
 	void do_insert (MetricSection* section);
+
+	void add_tempo_locked (const Tempo&, Timecode::BBT_Time where, bool recompute);
+	void add_meter_locked (const Meter&, Timecode::BBT_Time where, bool recompute);
+
+	bool remove_tempo_locked (const TempoSection&);
+	bool remove_meter_locked (const MeterSection&);
+
 };
 
 }; /* namespace ARDOUR */

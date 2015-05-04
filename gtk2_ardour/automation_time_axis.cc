@@ -23,13 +23,18 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
 
+#include "pbd/error.h"
 #include "pbd/memento_command.h"
 #include "pbd/stacktrace.h"
 
 #include "ardour/automation_control.h"
 #include "ardour/event_type_map.h"
+#include "ardour/parameter_types.h"
+#include "ardour/profile.h"
 #include "ardour/route.h"
 #include "ardour/session.h"
+
+#include "canvas/debug.h"
 
 #include "ardour_ui.h"
 #include "automation_time_axis.h"
@@ -38,19 +43,20 @@
 #include "gui_thread.h"
 #include "route_time_axis.h"
 #include "automation_line.h"
+#include "paste_context.h"
 #include "public_editor.h"
-#include "simplerect.h"
 #include "selection.h"
 #include "rgb_macros.h"
 #include "point_selection.h"
-#include "canvas_impl.h"
 #include "control_point.h"
 #include "utils.h"
+#include "item_counts.h"
 
 #include "i18n.h"
 
 using namespace std;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace Gtkmm2ext;
@@ -84,20 +90,43 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 	, _control (c)
 	, _automatable (a)
 	, _parameter (p)
-	, _base_rect (0)
+	, _base_rect (new ArdourCanvas::Rectangle (_canvas_display))
 	, _view (show_regions ? new AutomationStreamView (*this) : 0)
-	, _name (nom)
 	, auto_button (X_("")) /* force addition of a label */
 	, _show_regions (show_regions)
 {
+	//concatenate plugin name and param name into the tooltip
+	string tipname = nomparent;
+	if (!tipname.empty()) {
+		tipname += ": ";
+	}
+	tipname += nom;
+	ARDOUR_UI::instance()->set_tip(controls_ebox, tipname);
+
+	//plugin name and param name appear on 2 separate lines in the track header
+	tipname = nomparent;
+	if (!tipname.empty()) {
+		tipname += "\n";
+	}
+	tipname += nom;
+	_name = tipname;
+	
+	CANVAS_DEBUG_NAME (_canvas_display, string_compose ("main for auto %2/%1", _name, r->name()));
+	CANVAS_DEBUG_NAME (selection_group, string_compose ("selections for auto %2/%1", _name, r->name()));
+	CANVAS_DEBUG_NAME (_ghost_group, string_compose ("ghosts for auto %2/%1", _name, r->name()));
+
 	if (!have_name_font) {
 		name_font = get_font_for_style (X_("AutomationTrackName"));
 		have_name_font = true;
 	}
 
 	if (_automatable && _control) {
-		_controller = AutomationController::create (_automatable, _control->parameter(), _control);
+		_controller = AutomationController::create (_automatable, _control->parameter(), _control->desc(), _control);
 	}
+
+	const std::string fill_color_name = (dynamic_cast<MidiTimeAxisView*>(&parent)
+	                                     ? "midi automation track fill"
+	                                     : "audio automation track fill");
 
 	automation_menu = 0;
 	auto_off_item = 0;
@@ -110,33 +139,22 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 	ignore_state_request = false;
 	first_call_to_set_height = true;
 
-	_base_rect = new SimpleRect(*_canvas_display);
-	_base_rect->property_x1() = 0.0;
-	_base_rect->property_y1() = 0.0;
-	/** gnomecanvas sometimes converts this value to int or adds 2 to it, so it must be
-	    set correctly to avoid overflow.
-	*/
-	_base_rect->property_x2() = INT_MAX - 2;
-	_base_rect->property_outline_color_rgba() = ARDOUR_UI::config()->canvasvar_AutomationTrackOutline.get();
-
-	/* outline ends and bottom */
-	_base_rect->property_outline_what() = (guint32) (0x1|0x2|0x8);
-	_base_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_AutomationTrackFill.get();
-
+	CANVAS_DEBUG_NAME (_base_rect, string_compose ("base rect for %1", _name));
+	_base_rect->set_x1 (ArdourCanvas::COORD_MAX);
+	_base_rect->set_outline (false);
+	_base_rect->set_fill_color (ARDOUR_UI::config()->color_mod (fill_color_name, "automation track fill"));
 	_base_rect->set_data ("trackview", this);
-
-	_base_rect->signal_event().connect (sigc::bind (
-			sigc::mem_fun (_editor, &PublicEditor::canvas_automation_track_event),
-			_base_rect, this));
-
+	_base_rect->Event.connect (sigc::bind (sigc::mem_fun (_editor, &PublicEditor::canvas_automation_track_event), _base_rect, this));
 	if (!a) {
 		_base_rect->lower_to_bottom();
 	}
 
-	hide_button.add (*(manage (new Gtk::Image (::get_icon("hide")))));
+	hide_button.set_elements ((ArdourButton::Element)(ArdourButton::Edge|ArdourButton::Body|ArdourButton::VectorIcon));
+	hide_button.set_icon (ArdourButton::CloseCross);
+	hide_button.set_tweaks(ArdourButton::TrackHeader);
 
-	auto_button.set_name ("TrackVisualButton");
-	hide_button.set_name ("TrackRemoveButton");
+	auto_button.set_name ("route button");
+	hide_button.set_name ("route button");
 
 	auto_button.unset_flags (Gtk::CAN_FOCUS);
 	hide_button.unset_flags (Gtk::CAN_FOCUS);
@@ -153,6 +171,9 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 		set_height (preset_height (HeightNormal));
 	}
 
+	//name label isn't editable on an automation track; remove the tooltip
+	ARDOUR_UI::instance()->set_tip (name_label, X_(""));
+
 	/* repack the name label */
 
 	if (name_label.get_parent()) {
@@ -160,40 +181,71 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 	}
 	
 	name_label.set_text (_name);
-	name_label.set_alignment (Gtk::ALIGN_CENTER, Gtk::ALIGN_CENTER);
-        name_label.set_name (X_("TrackParameterName"));
+	name_label.set_alignment (Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER);
+	name_label.set_name (X_("TrackParameterName"));
 	name_label.set_ellipsize (Pango::ELLIPSIZE_END);
 
-	string tipname = nomparent;
-	if (!tipname.empty()) {
-		tipname += ": ";
-	}
-	tipname += _name;
-	ARDOUR_UI::instance()->set_tip(controls_ebox, tipname);
-
 	/* add the buttons */
-	controls_table.attach (hide_button, 0, 1, 0, 1, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND);
-	controls_table.attach (name_label, 0, 6, 1, 2, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND);
-	controls_table.attach (auto_button, 6, 8, 1, 2, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND);
+	controls_table.set_border_width (1);
+	controls_table.remove (name_hbox);
+	controls_table.attach (hide_button, 1, 2, 0, 1, Gtk::SHRINK, Gtk::SHRINK, 0, 0);
+	controls_table.attach (name_label,  2, 3, 1, 3, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND, 2, 0);
+	controls_table.attach (auto_button, 3, 4, 2, 3, Gtk::SHRINK, Gtk::SHRINK, 0, 0);
 
+	Gtk::DrawingArea *blank0 = manage (new Gtk::DrawingArea());
+	Gtk::DrawingArea *blank1 = manage (new Gtk::DrawingArea());
+
+	RouteTimeAxisView* rtv = dynamic_cast<RouteTimeAxisView*>(&parent);
+	// TODO use rtv->controls_base_unselected_name
+	// subscribe to route_active_changed, ...
+	if (rtv && rtv->is_audio_track()) {
+		blank0->set_name ("AudioTrackControlsBaseUnselected");
+	}
+	else if (rtv && rtv->is_midi_track()) {
+		blank0->set_name ("MidiTrackControlsBaseUnselected");
+	}
+	else {
+		blank0->set_name ("AudioBusControlsBaseUnselected");
+	}
+	blank0->set_size_request (-1, -1);
+	blank1->set_size_request (1, 0);
+	VSeparator* separator = manage (new VSeparator());
+	separator->set_name("TrackSeparator");
+	separator->set_size_request (1, -1);
+
+	controls_button_size_group->add_widget(hide_button);
+	controls_button_size_group->add_widget(*blank0);
+
+	time_axis_hbox.pack_start (*blank0, false, false);
+	time_axis_hbox.pack_start (*separator, false, false);
+	time_axis_hbox.reorder_child (*blank0, 0);
+	time_axis_hbox.reorder_child (*separator, 1);
+	time_axis_hbox.reorder_child (time_axis_vbox, 2);
+
+	if (!ARDOUR::Profile->get_mixbus() ) {
+		time_axis_hbox.pack_start (*blank1, false, false);
+	}
+
+	blank0->show();
+	separator->show();
 	name_label.show ();
+	hide_button.show ();
 
 	if (_controller) {
-		_controller.get()->set_size_request(-1, 24);
-		/* add bar controller */
-		controls_table.attach (*_controller.get(), 1, 8, 0, 1, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND);
-		/* note that this handler connects *before* the default handler */
-		_controller->event_widget().signal_scroll_event().connect (mem_fun (*this, &AutomationTimeAxisView::controls_ebox_scroll), false);
+		_controller->disable_vertical_scroll ();
+		controls_table.attach (*_controller.get(), 2, 4, 0, 1, Gtk::FILL|Gtk::EXPAND, Gtk::FILL|Gtk::EXPAND, 0, 0);
 	}
 
 	controls_table.show_all ();
 
-	hide_button.signal_clicked().connect (sigc::mem_fun(*this, &AutomationTimeAxisView::hide_clicked));
-	auto_button.signal_clicked().connect (sigc::mem_fun(*this, &AutomationTimeAxisView::auto_clicked));
+	hide_button.signal_clicked.connect (sigc::mem_fun(*this, &AutomationTimeAxisView::hide_clicked));
+	auto_button.signal_clicked.connect (sigc::mem_fun(*this, &AutomationTimeAxisView::auto_clicked));
 
 	controls_base_selected_name = X_("AutomationTrackControlsBaseSelected");
 	controls_base_unselected_name = X_("AutomationTrackControlsBase");
+
 	controls_ebox.set_name (controls_base_unselected_name);
+	time_axis_frame.set_name (controls_base_unselected_name);
 
 	/* ask for notifications of any new RegionViews */
 	if (show_regions) {
@@ -212,11 +264,12 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 				ARDOUR::EventTypeMap::instance().to_symbol(_parameter),
 				*this,
 				*_canvas_display,
-				_control->alist()
+				_control->alist(),
+				_control->desc()
 				)
 			);
 
-		line->set_line_color (ARDOUR_UI::config()->canvasvar_ProcessorAutomationLine.get());
+		line->set_line_color (ARDOUR_UI::config()->color ("processor automation line"));
 		line->queue_reset ();
 		add_line (line);
 	}
@@ -233,6 +286,7 @@ AutomationTimeAxisView::AutomationTimeAxisView (
 
 AutomationTimeAxisView::~AutomationTimeAxisView ()
 {
+	cleanup_gui_properties ();
 	delete _view;
 }
 
@@ -304,7 +358,7 @@ AutomationTimeAxisView::automation_state_changed ()
 
 	switch (state & (ARDOUR::Off|Play|Touch|Write)) {
 	case ARDOUR::Off:
-		auto_button.set_label (S_("Automation|Manual"));
+		auto_button.set_text (S_("Automation|Manual"));
 		if (auto_off_item) {
 			ignore_state_request = true;
 			auto_off_item->set_active (true);
@@ -315,7 +369,7 @@ AutomationTimeAxisView::automation_state_changed ()
 		}
 		break;
 	case Play:
-		auto_button.set_label (_("Play"));
+		auto_button.set_text (_("Play"));
 		if (auto_play_item) {
 			ignore_state_request = true;
 			auto_play_item->set_active (true);
@@ -326,7 +380,7 @@ AutomationTimeAxisView::automation_state_changed ()
 		}
 		break;
 	case Write:
-		auto_button.set_label (_("Write"));
+		auto_button.set_text (_("Write"));
 		if (auto_write_item) {
 			ignore_state_request = true;
 			auto_write_item->set_active (true);
@@ -337,7 +391,7 @@ AutomationTimeAxisView::automation_state_changed ()
 		}
 		break;
 	case Touch:
-		auto_button.set_label (_("Touch"));
+		auto_button.set_text (_("Touch"));
 		if (auto_touch_item) {
 			ignore_state_request = true;
 			auto_touch_item->set_active (true);
@@ -348,7 +402,7 @@ AutomationTimeAxisView::automation_state_changed ()
 		}
 		break;
 	default:
-		auto_button.set_label (_("???"));
+		auto_button.set_text (_("???"));
 		break;
 	}
 }
@@ -389,7 +443,7 @@ AutomationTimeAxisView::clear_clicked ()
 {
 	assert (_line || _view);
 
-	_session->begin_reversible_command (_("clear automation"));
+	_editor.begin_reversible_command (_("clear automation"));
 
 	if (_line) {
 		_line->clear ();
@@ -397,23 +451,23 @@ AutomationTimeAxisView::clear_clicked ()
 		_view->clear ();
 	}
 
-	_session->commit_reversible_command ();
+	_editor.commit_reversible_command ();
 	_session->set_dirty ();
 }
 
 void
-AutomationTimeAxisView::set_height (uint32_t h)
+AutomationTimeAxisView::set_height (uint32_t h, TrackHeightMode m)
 {
 	bool const changed = (height != (uint32_t) h) || first_call_to_set_height;
 	uint32_t const normal = preset_height (HeightNormal);
 	bool const changed_between_small_and_normal = ( (height < normal && h >= normal) || (height >= normal || h < normal) );
 
-	TimeAxisView::set_height (h);
+	TimeAxisView::set_height (h, m);
 
-	_base_rect->property_y2() = h;
+	_base_rect->set_y1 (h);
 
 	if (_line) {
-		_line->set_height(h);
+		_line->set_height(h - 2.5);
 	}
 
 	if (_view) {
@@ -426,17 +480,22 @@ AutomationTimeAxisView::set_height (uint32_t h)
 		first_call_to_set_height = false;
 
 		if (h >= preset_height (HeightNormal)) {
-			auto_button.show();
-			hide_button.show_all();
+			if (!(_parameter.type() >= MidiCCAutomation &&
+			      _parameter.type() <= MidiChannelPressureAutomation)) {
+				auto_button.show();
+			}
+			name_label.show();
+			hide_button.show();
 
 		} else if (h >= preset_height (HeightSmall)) {
 			controls_table.hide_all ();
 			auto_button.hide();
+			name_label.hide();
 		}
 	}
 
 	if (changed) {
-		if (canvas_item_visible (_canvas_display) && _route) {
+		if (_canvas_display->visible() && _route) {
 			/* only emit the signal if the height really changed and we were visible */
 			_route->gui_changed ("visible_tracks", (void *) 0); /* EMIT_SIGNAL */
 		}
@@ -444,16 +503,16 @@ AutomationTimeAxisView::set_height (uint32_t h)
 }
 
 void
-AutomationTimeAxisView::set_samples_per_unit (double spu)
+AutomationTimeAxisView::set_samples_per_pixel (double fpp)
 {
-	TimeAxisView::set_samples_per_unit (spu);
+	TimeAxisView::set_samples_per_pixel (fpp);
 
 	if (_line) {
 		_line->reset ();
 	}
 
 	if (_view) {
-		_view->set_samples_per_unit (spu);
+		_view->set_samples_per_pixel (fpp);
 	}
 }
 
@@ -496,31 +555,34 @@ AutomationTimeAxisView::build_display_menu ()
 	as_items.push_back (CheckMenuElem (S_("Automation|Manual"), sigc::bind (
 			sigc::mem_fun(*this, &AutomationTimeAxisView::set_automation_state),
 			(AutoState) ARDOUR::Off)));
-	auto_off_item = dynamic_cast<CheckMenuItem*>(&as_items.back());
+	auto_off_item = dynamic_cast<Gtk::CheckMenuItem*>(&as_items.back());
 
 	as_items.push_back (CheckMenuElem (_("Play"), sigc::bind (
 			sigc::mem_fun(*this, &AutomationTimeAxisView::set_automation_state),
 			(AutoState) Play)));
-	auto_play_item = dynamic_cast<CheckMenuItem*>(&as_items.back());
+	auto_play_item = dynamic_cast<Gtk::CheckMenuItem*>(&as_items.back());
 
 	as_items.push_back (CheckMenuElem (_("Write"), sigc::bind (
 			sigc::mem_fun(*this, &AutomationTimeAxisView::set_automation_state),
 			(AutoState) Write)));
-	auto_write_item = dynamic_cast<CheckMenuItem*>(&as_items.back());
+	auto_write_item = dynamic_cast<Gtk::CheckMenuItem*>(&as_items.back());
 
 	as_items.push_back (CheckMenuElem (_("Touch"), sigc::bind (
 			sigc::mem_fun(*this, &AutomationTimeAxisView::set_automation_state),
 			(AutoState) Touch)));
-	auto_touch_item = dynamic_cast<CheckMenuItem*>(&as_items.back());
+	auto_touch_item = dynamic_cast<Gtk::CheckMenuItem*>(&as_items.back());
 
-	items.push_back (MenuElem (_("State"), *auto_state_menu));
+	if (!(_parameter.type() >= MidiCCAutomation &&
+	      _parameter.type() <= MidiChannelPressureAutomation)) {
+		items.push_back (MenuElem (_("State"), *auto_state_menu));
+	}
 
 	/* mode menu */
 
 	/* current interpolation state */
 	AutomationList::InterpolationStyle const s = _view ? _view->interpolation() : _control->list()->interpolation ();
 
-	if (EventTypeMap::instance().is_midi_parameter(_parameter)) {
+	if (ARDOUR::parameter_is_midi((AutomationType)_parameter.type())) {
 
 		Menu* auto_mode_menu = manage (new Menu);
 		auto_mode_menu->set_name ("ArdourContextMenu");
@@ -531,13 +593,13 @@ AutomationTimeAxisView::build_display_menu ()
 		am_items.push_back (RadioMenuElem (group, _("Discrete"), sigc::bind (
 				sigc::mem_fun(*this, &AutomationTimeAxisView::set_interpolation),
 				AutomationList::Discrete)));
-		mode_discrete_item = dynamic_cast<CheckMenuItem*>(&am_items.back());
+		mode_discrete_item = dynamic_cast<Gtk::CheckMenuItem*>(&am_items.back());
 		mode_discrete_item->set_active (s == AutomationList::Discrete);
 
 		am_items.push_back (RadioMenuElem (group, _("Linear"), sigc::bind (
 				sigc::mem_fun(*this, &AutomationTimeAxisView::set_interpolation),
 				AutomationList::Linear)));
-		mode_line_item = dynamic_cast<CheckMenuItem*>(&am_items.back());
+		mode_line_item = dynamic_cast<Gtk::CheckMenuItem*>(&am_items.back());
 		mode_line_item->set_active (s == AutomationList::Linear);
 
 		items.push_back (MenuElem (_("Mode"), *auto_mode_menu));
@@ -550,7 +612,7 @@ AutomationTimeAxisView::build_display_menu ()
 }
 
 void
-AutomationTimeAxisView::add_automation_event (GdkEvent* event, framepos_t when, double y)
+AutomationTimeAxisView::add_automation_event (GdkEvent* event, framepos_t when, double y, bool with_guard_points)
 {
 	if (!_line) {
 		return;
@@ -567,7 +629,7 @@ AutomationTimeAxisView::add_automation_event (GdkEvent* event, framepos_t when, 
 
 	double x = 0;
 
-	_canvas_display->w2i (x, y);
+	_canvas_display->canvas_to_item (x, y);
 
 	/* compute vertical fractional position */
 
@@ -580,58 +642,63 @@ AutomationTimeAxisView::add_automation_event (GdkEvent* event, framepos_t when, 
 
 	_editor.snap_to_with_modifier (when, event);
 
-	_session->begin_reversible_command (_("add automation event"));
+	_editor.begin_reversible_command (_("add automation event"));
 	XMLNode& before = list->get_state();
 
-	list->add (when, y);
+	list->add (when, y, with_guard_points);
 
 	XMLNode& after = list->get_state();
-	_session->commit_reversible_command (new MementoCommand<ARDOUR::AutomationList> (*list, &before, &after));
+	_session->add_command (new MementoCommand<ARDOUR::AutomationList> (*list, &before, &after));
+	_editor.commit_reversible_command ();
 	_session->set_dirty ();
 }
 
-/** Paste a selection.
- *  @param pos Position to paste to (session frames).
- *  @param times Number of times to paste.
- *  @param selection Selection to paste.
- *  @param nth Index of the AutomationList within the selection to paste from.
- */
 bool
-AutomationTimeAxisView::paste (framepos_t pos, float times, Selection& selection, size_t nth)
+AutomationTimeAxisView::paste (framepos_t pos, const Selection& selection, PasteContext& ctx)
 {
-	boost::shared_ptr<AutomationLine> line;
-
 	if (_line) {
-		line = _line;
+		return paste_one (pos, ctx.count, ctx.times, selection, ctx.counts, ctx.greedy);
 	} else if (_view) {
-		line = _view->paste_line (pos);
+		AutomationSelection::const_iterator l = selection.lines.get_nth(_parameter, ctx.counts.n_lines(_parameter));
+		if (l == selection.lines.end()) {
+			if (ctx.greedy && selection.lines.size() == 1) {
+				l = selection.lines.begin();
+			}
+		}
+		if (l != selection.lines.end() && _view->paste (pos, ctx.count, ctx.times, *l)) {
+			ctx.counts.increase_n_lines(_parameter);
+			return true;
+		}
 	}
 
-	if (!line) {
-		return false;
-	}
-
-	return paste_one (*line, pos, times, selection, nth);
+	return false;
 }
 
 bool
-AutomationTimeAxisView::paste_one (AutomationLine& line, framepos_t pos, float times, Selection& selection, size_t nth)
+AutomationTimeAxisView::paste_one (framepos_t pos, unsigned paste_count, float times, const Selection& selection, ItemCounts& counts, bool greedy)
 {
-	AutomationSelection::iterator p;
-	boost::shared_ptr<AutomationList> alist(line.the_list());
+	boost::shared_ptr<AutomationList> alist(_line->the_list());
 
 	if (_session->transport_rolling() && alist->automation_write()) {
 		/* do not paste if this control is in write mode and we're rolling */
 		return false;
 	}
 
-	for (p = selection.lines.begin(); p != selection.lines.end() && nth; ++p, --nth) {}
-
+	/* Get appropriate list from selection. */
+	AutomationSelection::const_iterator p = selection.lines.get_nth(_parameter, counts.n_lines(_parameter));
 	if (p == selection.lines.end()) {
-		return false;
+		if (greedy && selection.lines.size() == 1) {
+			p = selection.lines.begin();
+		} else {
+			return false;
+		}
 	}
+	counts.increase_n_lines(_parameter);
 
-	double const model_pos = line.time_converter().from (pos - line.time_converter().origin_b ());
+	/* add multi-paste offset if applicable */
+	pos += _editor.get_paste_offset(pos, paste_count, (*p)->length());
+
+	double const model_pos = _line->time_converter().from (pos - _line->time_converter().origin_b ());
 
 	XMLNode &before = alist->get_state();
 	alist->paste (**p, model_pos, times);
@@ -641,7 +708,7 @@ AutomationTimeAxisView::paste_one (AutomationLine& line, framepos_t pos, float t
 }
 
 void
-AutomationTimeAxisView::get_selectables (framepos_t start, framepos_t end, double top, double bot, list<Selectable*>& results)
+AutomationTimeAxisView::get_selectables (framepos_t start, framepos_t end, double top, double bot, list<Selectable*>& results, bool /*within*/)
 {
 	if (!_line && !_view) {
 		return;
@@ -799,7 +866,7 @@ AutomationTimeAxisView::what_has_visible_automation (const boost::shared_ptr<Aut
 		
 		boost::shared_ptr<AutomationControl> ac = boost::dynamic_pointer_cast<AutomationControl> (i->second);
 
-		if (ac) {
+		if (ac && ac->alist()) {
 			
 			const XMLNode* gui_node = ac->extra_xml ("GUI");
 			
@@ -840,15 +907,17 @@ AutomationTimeAxisView::lines () const
 string
 AutomationTimeAxisView::state_id() const
 {
-	if (_control) {
+	if (_automatable != _route && _control) {
 		return string_compose ("automation %1", _control->id().to_s());
-	} else {
-		assert (_parameter);
+	} else if (_parameter) {
 		return string_compose ("automation %1 %2/%3/%4", 
 				       _route->id(), 
 				       _parameter.type(),
 				       _parameter.id(),
 				       (int) _parameter.channel());
+	} else {
+		error << "Automation time axis has no state ID" << endmsg;
+		return "";
 	}
 }
 

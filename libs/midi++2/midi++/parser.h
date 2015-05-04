@@ -25,6 +25,7 @@
 
 #include "pbd/signals.h"
 
+#include "midi++/libmidi_visibility.h"
 #include "midi++/types.h"
 
 namespace MIDI {
@@ -33,15 +34,16 @@ class Port;
 class Parser;
 
 typedef PBD::Signal1<void,Parser&>                   ZeroByteSignal;
+typedef PBD::Signal2<void,Parser&,unsigned short>    BankSignal;
 typedef PBD::Signal2<void,Parser&,framecnt_t>        TimestampedSignal;
 typedef PBD::Signal2<void,Parser&, byte>             OneByteSignal;
 typedef PBD::Signal2<void,Parser &, EventTwoBytes *> TwoByteSignal;
 typedef PBD::Signal2<void,Parser &, pitchbend_t>     PitchBendSignal;
 typedef PBD::Signal3<void,Parser &, byte *, size_t>  Signal;
 
-class Parser {
+class LIBMIDIPP_API Parser {
  public:
-	Parser (Port &p);
+	Parser ();
 	~Parser ();
 
 	/* sets the time that will be reported for any MTC or MIDI Clock
@@ -54,7 +56,7 @@ class Parser {
 
 	/* signals that anyone can connect to */
 	
-	OneByteSignal         bank_change;
+	BankSignal            bank_change;
 	TwoByteSignal         note_on;
 	TwoByteSignal         note_off;
 	TwoByteSignal         poly_pressure;
@@ -63,7 +65,7 @@ class Parser {
 	PitchBendSignal       pitchbend;
 	TwoByteSignal         controller;
 
-	OneByteSignal         channel_bank_change[16];
+	BankSignal            channel_bank_change[16];
 	TwoByteSignal         channel_note_on[16];
 	TwoByteSignal         channel_note_off[16];
 	TwoByteSignal         channel_poly_pressure[16];
@@ -105,7 +107,6 @@ class Parser {
 	const char *midi_event_type_name (MIDI::eventType);
 	void trace (bool onoff, std::ostream *o, const std::string &prefix = "");
 	bool tracing() { return trace_stream != 0; }
-	Port &port() { return _port; }
 
 	void set_offline (bool);
 	bool offline() const { return _offline; }
@@ -136,7 +137,6 @@ class Parser {
 	void reset_mtc_state ();
 	
   private:
-	Port&_port;
 	/* tracing */
 	
 	std::ostream *trace_stream;

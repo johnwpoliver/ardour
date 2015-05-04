@@ -61,14 +61,18 @@ class KeyEditor : public ArdourWindow
 	KeyEditorColumns columns;
 	Gtk::Button unbind_button;
 	Gtk::HButtonBox unbind_box;
+	Gtk::HBox reset_box;
+	Gtk::Button reset_button;
+	Gtk::Label reset_label;
 
 	void unbind ();
 
-	bool can_bind;
-	guint last_state;
+	guint last_keyval;
 
 	void action_selected ();
 	void populate ();
+
+	void reset ();
 };
 
 #endif /* __ardour_gtk_key_editor_h__ */

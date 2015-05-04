@@ -24,11 +24,13 @@
 #include "pbd/boost_debug.h"
 
 #include "ardour/amp.h"
+#include "ardour/buffer_set.h"
+#include "ardour/debug.h"
+#include "ardour/io.h"
+#include "ardour/meter.h"
+#include "ardour/panner_shell.h"
 #include "ardour/send.h"
 #include "ardour/session.h"
-#include "ardour/buffer_set.h"
-#include "ardour/meter.h"
-#include "ardour/io.h"
 
 #include "i18n.h"
 
@@ -43,9 +45,9 @@ using namespace PBD;
 using namespace std;
 
 string
-Send::name_and_id_new_send (Session& s, Role r, uint32_t& bitslot)
+Send::name_and_id_new_send (Session& s, Role r, uint32_t& bitslot, bool ignore_bitslot)
 {
-	if (r == Role (0)) {
+	if (ignore_bitslot) {
 		/* this happens during initial construction of sends from XML, 
 		   before they get ::set_state() called. lets not worry about
 		   it.
@@ -63,15 +65,17 @@ Send::name_and_id_new_send (Session& s, Role r, uint32_t& bitslot)
 		return string_compose (_("send %1"), (bitslot = s.next_send_id ()) + 1);
 	default:
 		fatal << string_compose (_("programming error: send created using role %1"), enum_2_string (r)) << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		return string();
 	}
 	
 }
 
-Send::Send (Session& s, boost::shared_ptr<Pannable> p, boost::shared_ptr<MuteMaster> mm, Role r)
-	: Delivery (s, p, mm, name_and_id_new_send (s, r, _bitslot), r)
+Send::Send (Session& s, boost::shared_ptr<Pannable> p, boost::shared_ptr<MuteMaster> mm, Role r, bool ignore_bitslot)
+	: Delivery (s, p, mm, name_and_id_new_send (s, r, _bitslot, ignore_bitslot), r)
 	, _metering (false)
+	, _delay_in (0)
+	, _delay_out (0)
 {
 	if (_role == Listen) {
 		/* we don't need to do this but it keeps things looking clean
@@ -80,12 +84,18 @@ Send::Send (Session& s, boost::shared_ptr<Pannable> p, boost::shared_ptr<MuteMas
 		_bitslot = 0;
 	}
 
-	boost_debug_shared_ptr_mark_interesting (this, "send");
+	//boost_debug_shared_ptr_mark_interesting (this, "send");
 
 	_amp.reset (new Amp (_session));
 	_meter.reset (new PeakMeter (_session, name()));
 
+	_delayline.reset (new DelayLine (_session, name()));
+
 	add_control (_amp->gain_control ());
+
+	if (panner_shell()) {
+		panner_shell()->Changed.connect_same_thread (*this, boost::bind (&Send::panshell_changed, this));
+	}
 }
 
 Send::~Send ()
@@ -110,6 +120,35 @@ Send::deactivate ()
 	_meter->reset ();
 
 	Processor::deactivate ();
+}
+
+void
+Send::set_delay_in(framecnt_t delay)
+{
+	if (!_delayline) return;
+	if (_delay_in == delay) {
+		return;
+	}
+	_delay_in = delay;
+
+	DEBUG_TRACE (DEBUG::LatencyCompensation,
+			string_compose ("Send::set_delay_in(%1) + %2 = %3\n",
+				delay, _delay_out, _delay_out + _delay_in));
+	_delayline.get()->set_delay(_delay_out + _delay_in);
+}
+
+void
+Send::set_delay_out(framecnt_t delay)
+{
+	if (!_delayline) return;
+	if (_delay_out == delay) {
+		return;
+	}
+	_delay_out = delay;
+	DEBUG_TRACE (DEBUG::LatencyCompensation,
+			string_compose ("Send::set_delay_out(%1) + %2 = %3\n",
+				delay, _delay_in, _delay_out + _delay_in));
+	_delayline.get()->set_delay(_delay_out + _delay_in);
 }
 
 void
@@ -140,6 +179,8 @@ Send::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pframe
 	_amp->set_gain_automation_buffer (_session.send_gain_automation_buffer ());
 	_amp->setup_gain_automation (start_frame, end_frame, nframes);
 	_amp->run (sendbufs, start_frame, end_frame, nframes, true);
+
+	_delayline->run (sendbufs, start_frame, end_frame, nframes, true);
 
 	/* deliver to outputs */
 
@@ -270,7 +311,7 @@ Send::set_state_2X (const XMLNode& node, int /* version */)
 }
 
 bool
-Send::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
+Send::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 {
 	/* sends have no impact at all on the channel configuration of the
 	   streams passing through the route. so, out == in.
@@ -284,7 +325,7 @@ Send::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
 bool
 Send::configure_io (ChanCount in, ChanCount out)
 {
-	if (!_amp->configure_io (in, out) || !_meter->configure_io (in, out)) {
+	if (!_amp->configure_io (in, out)) {
 		return false;
 	}
 
@@ -292,9 +333,24 @@ Send::configure_io (ChanCount in, ChanCount out)
 		return false;
 	}
 
+	if (!_meter->configure_io (ChanCount (DataType::AUDIO, pan_outs()), ChanCount (DataType::AUDIO, pan_outs()))) {
+		return false;
+	}
+
+	if (_delayline && !_delayline->configure_io(in, out)) {
+		cerr << "send delayline config failed\n";
+		return false;
+	}
+
 	reset_panner ();
 
 	return true;
+}
+
+void
+Send::panshell_changed ()
+{
+	_meter->configure_io (ChanCount (DataType::AUDIO, pan_outs()), ChanCount (DataType::AUDIO, pan_outs()));
 }
 
 bool

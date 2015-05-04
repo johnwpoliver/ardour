@@ -23,11 +23,18 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <boost/enable_shared_from_this.hpp>
 
 #include "ardour/plugin.h"
 #include "ardour/uri_map.h"
 #include "ardour/worker.h"
 #include "pbd/ringbuffer.h"
+
+#ifndef PATH_MAX
+#define PATH_MAX 1024
+#endif
+
+typedef struct LV2_Evbuf_Impl LV2_Evbuf;
 
 namespace ARDOUR {
 
@@ -41,7 +48,7 @@ const void* lv2plugin_get_port_value(const char* port_symbol,
 class AudioEngine;
 class Session;
 
-class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
+class LIBARDOUR_API LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 {
   public:
 	LV2Plugin (ARDOUR::AudioEngine& engine,
@@ -75,6 +82,7 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 	const void* c_ui_type();
 
 	bool is_external_ui () const;
+	bool is_external_kx () const;
 	bool ui_is_resizable () const;
 
 	const char* port_symbol (uint32_t port) const;
@@ -108,10 +116,10 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 	bool parameter_is_output (uint32_t) const;
 	bool parameter_is_toggled (uint32_t) const;
 
-	boost::shared_ptr<Plugin::ScalePoints>
+	boost::shared_ptr<ScalePoints>
 	get_scale_points(uint32_t port_index) const;
 
-	void set_insert_info(const PluginInsert* insert);
+	void set_insert_id(PBD::ID id);
 
 	int      set_state (const XMLNode& node, int version);
 	bool     save_preset (std::string uri);
@@ -133,36 +141,21 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 	                           uint32_t    format,
 	                           const void* buffer);
 
-	void enable_ui_emmission();
+	void enable_ui_emission();
 	void emit_to_ui(void* controller, UIMessageSink sink);
 
 	Worker* worker() { return _worker; }
 
+	URIMap&       uri_map()       { return _uri_map; }
+	const URIMap& uri_map() const { return _uri_map; }
+
 	int work(uint32_t size, const void* data);
 	int work_response(uint32_t size, const void* data);
 
-	static URIMap _uri_map;
-
-	struct URIDs {
-		uint32_t atom_Chunk;
-		uint32_t atom_Path;
-		uint32_t atom_Sequence;
-		uint32_t atom_eventTransfer;
-		uint32_t log_Error;
-		uint32_t log_Note;
-		uint32_t log_Warning;
-		uint32_t midi_MidiEvent;
-		uint32_t time_Position;
-		uint32_t time_bar;
-		uint32_t time_barBeat;
-		uint32_t time_beatUnit;
-		uint32_t time_beatsPerBar;
-		uint32_t time_beatsPerMinute;
-		uint32_t time_frame;
-		uint32_t time_speed;
-	};
-
-	static URIDs urids;
+	void                       set_property(uint32_t key, const Variant& value);
+	const PropertyDescriptors& get_supported_properties() const { return _property_descriptors; }
+	const ParameterDescriptor& get_property_descriptor(uint32_t id) const;
+	void                       announce_property_values();
 
   private:
 	struct Impl;
@@ -182,6 +175,9 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 	framepos_t    _next_cycle_start;  ///< Expected start frame of next run cycle
 	double        _next_cycle_speed;  ///< Expected start frame of next run cycle
 	PBD::ID       _insert_id;
+	uint32_t      _patch_port_in_index;
+	uint32_t      _patch_port_out_index;
+	URIMap&       _uri_map;
 
 	friend const void* lv2plugin_get_port_value(const char* port_symbol,
 	                                            void*       user_data,
@@ -196,13 +192,17 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 		PORT_EVENT    = 1 << 4,  ///< Old event API event port
 		PORT_SEQUENCE = 1 << 5,  ///< New atom API event port
 		PORT_MIDI     = 1 << 6,  ///< Event port understands MIDI
-		PORT_POSITION = 1 << 7   ///< Event port understands position
+		PORT_POSITION = 1 << 7,  ///< Event port understands position
+		PORT_PATCHMSG = 1 << 8   ///< Event port supports patch:Message
 	} PortFlag;
 
 	typedef unsigned PortFlags;
 
 	std::vector<PortFlags>         _port_flags;
+	std::vector<size_t>            _port_minimumSize;
 	std::map<std::string,uint32_t> _port_indices;
+
+	PropertyDescriptors _property_descriptors;
 
 	/// Message send to/from UI via ports
 	struct UIMessage {
@@ -260,6 +260,8 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 	void allocate_atom_event_buffers ();
 	void run (pframes_t nsamples);
 
+	void load_supported_properties(PropertyDescriptors& descs);
+
 	void latency_compute_run ();
 	std::string do_save_preset (std::string);
 	void do_remove_preset (std::string);
@@ -268,16 +270,16 @@ class LV2Plugin : public ARDOUR::Plugin, public ARDOUR::Workee
 };
 
 
-class LV2PluginInfo : public PluginInfo {
+class LIBARDOUR_API LV2PluginInfo : public PluginInfo , public boost::enable_shared_from_this<ARDOUR::LV2PluginInfo> {
 public:
-	LV2PluginInfo (const void* c_plugin);
+	LV2PluginInfo (const char* plugin_uri);
 	~LV2PluginInfo ();
 
 	static PluginInfoList* discover ();
 
 	PluginPtr load (Session& session);
 
-	const void* _c_plugin;
+	char * _plugin_uri;
 };
 
 typedef boost::shared_ptr<LV2PluginInfo> LV2PluginInfoPtr;

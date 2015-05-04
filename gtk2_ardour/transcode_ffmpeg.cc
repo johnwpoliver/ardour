@@ -23,60 +23,49 @@
 #include <sys/types.h>
 
 #include "pbd/error.h"
-#include "pbd/file_utils.h"
+#include "pbd/convert.h"
 #include "pbd/file_utils.h"
 #include "gui_thread.h"
 
 #include "transcode_ffmpeg.h"
 #include "utils_videotl.h"
+#include "video_tool_paths.h"
 
 #include "i18n.h"
+
+using namespace PBD;
+using namespace VideoUtils;
 
 TranscodeFfmpeg::TranscodeFfmpeg (std::string f)
 	: infile(f)
 {
 	probeok = false;
 	ffexecok = false;
-	ffmpeg_exe = "";
-	ffprobe_exe = "";
 	m_duration = 0;
 	m_avoffset = m_lead_in = m_lead_out = 0;
 	m_width = m_height = 0;
 	m_aspect = m_fps = 0;
+	m_sar = "";
 #if 1 /* tentative debug mode */
 	debug_enable = false;
 #endif
 
-	std::string ff_file_path;
-	if (find_file_in_search_path (PBD::SearchPath(Glib::getenv("PATH")), X_("ffmpeg_harvid"), ff_file_path)) { ffmpeg_exe = ff_file_path; }
-	else if (Glib::file_test(X_("C:\\Program Files\\harvid\\ffmpeg.exe"), Glib::FILE_TEST_EXISTS)) {
-		ffmpeg_exe = X_("C:\\Program Files\\ffmpeg\\ffmpeg.exe");
-	}
-	else if (Glib::file_test(X_("C:\\Program Files\\ffmpeg\\ffmpeg.exe"), Glib::FILE_TEST_EXISTS)) {
-		ffmpeg_exe = X_("C:\\Program Files\\ffmpeg\\ffmpeg.exe");
-	}
-
-	if (find_file_in_search_path (PBD::SearchPath(Glib::getenv("PATH")), X_("ffprobe_harvid"), ff_file_path)) { ffprobe_exe = ff_file_path; }
-	else if (Glib::file_test(X_("C:\\Program Files\\harvid\\ffprobe.exe"), Glib::FILE_TEST_EXISTS)) {
-		ffprobe_exe = X_("C:\\Program Files\\ffmpeg\\ffprobe.exe");
-	}
-	else if (Glib::file_test(X_("C:\\Program Files\\ffmpeg\\ffprobe.exe"), Glib::FILE_TEST_EXISTS)) {
-		ffprobe_exe = X_("C:\\Program Files\\ffmpeg\\ffprobe.exe");
-	}
-
-	if (ffmpeg_exe.empty() || ffprobe_exe.empty()) {
-		PBD::warning << _(
-				"No ffprobe or ffmpeg executables could be found on this system.\n"
-				"Video import and export is not possible until you install those tools.\n"
-				"Ardour requires ffmpeg and ffprobe from ffmpeg.org - version 1.1 or newer.\n"
-				"\n"
-				"The tools are included with the Ardour releases from ardour.org "
-				"and also available with the video-server at http://x42.github.com/harvid/\n"
-				"\n"
-				"Important: the files need to be installed in $PATH and named ffmpeg_harvid and ffprobe_harvid.\n"
-				"If you already have a suitable ffmpeg installation on your system, we recommend creating "
-				"symbolic links from ffmpeg to ffmpeg_harvid and from ffprobe to ffprobe_harvid.\n"
-				) << endmsg;
+	if (!ArdourVideoToolPaths::transcoder_exe(ffmpeg_exe, ffprobe_exe)) {
+		warning << string_compose(
+				_(
+					"No ffprobe or ffmpeg executables could be found on this system.\n"
+					"Video import and export is not possible until you install those tools.\n"
+					"%1 requires ffmpeg and ffprobe from ffmpeg.org - version 1.1 or newer.\n"
+					"\n"
+					"The tools are included with the %1 releases from ardour.org "
+					"and also available with the video-server at http://x42.github.com/harvid/\n"
+					"\n"
+					"Important: the files need to be installed in $PATH and named ffmpeg_harvid and ffprobe_harvid.\n"
+					"If you already have a suitable ffmpeg installation on your system, we recommend creating "
+					"symbolic links from ffmpeg to ffmpeg_harvid and from ffprobe to ffprobe_harvid.\n"
+					"\n"
+					"see also http://manual.ardour.org/video-timeline/setup/"
+				 ), PROGRAM_NAME) << endmsg;
 		return;
 	}
 	ffexecok = true;
@@ -105,14 +94,26 @@ TranscodeFfmpeg::probe ()
 	argp[4] = strdup("-show_streams");
 	argp[5] = strdup(infile.c_str());
 	argp[6] = 0;
-	ffcmd = new SystemExec(ffprobe_exe, argp);
+	ffcmd = new ARDOUR::SystemExec(ffprobe_exe, argp);
 	ffcmd->ReadStdout.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffprobeparse, this, _1 ,_2));
 	ffcmd->Terminated.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffexit, this));
 	if (ffcmd->start(1)) {
 		ffexit();
 		return false;
 	}
+
+	/* wait for ffprobe process to exit */
 	ffcmd->wait();
+
+	/* wait for interposer thread to copy all data.
+	 * SystemExec::Terminated is emitted and ffcmd set to NULL */
+	int timeout = 300; // 1.5 sec
+	while (ffcmd && --timeout > 0) {
+		Glib::usleep(5000);
+	}
+	if (timeout == 0 || ffoutput.empty()) {
+		return false;
+	}
 
 	/* parse */
 
@@ -122,16 +123,17 @@ TranscodeFfmpeg::probe ()
 	m_width = m_height = 0;
 	m_fps = m_aspect = 0;
 	m_duration = 0;
+	m_sar.clear();
 	m_codec.clear();
 	m_audio.clear();
 
 #define PARSE_FRACTIONAL_FPS(VAR) \
 	{ \
 		std::string::size_type pos; \
-		VAR = atof(value.c_str()); \
+		VAR = atof(value); \
 		pos = value.find_first_of('/'); \
 		if (pos != std::string::npos) { \
-			VAR = atof(value.substr(0, pos).c_str()) / atof(value.substr(pos+1).c_str()); \
+			VAR = atof(value.substr(0, pos)) / atof(value.substr(pos+1)); \
 		} \
 	}
 
@@ -149,11 +151,11 @@ TranscodeFfmpeg::probe ()
 					std::string value = kv->substr(kvsep + 1);
 
 					if (key == X_("index")) {
-						m_videoidx = atoi(value.c_str());
+						m_videoidx = atoi(value);
 					} else if (key == X_("width")) {
-						m_width = atoi(value.c_str());
+						m_width = atoi(value);
 					} else if (key == X_("height")) {
-						m_height = atoi(value.c_str());
+						m_height = atoi(value);
 					} else if (key == X_("codec_name")) {
 						if (!m_codec.empty()) m_codec += " ";
 						m_codec += value;
@@ -176,18 +178,25 @@ TranscodeFfmpeg::probe ()
 									h * 3600.0
 								+ m * 60.0
 								+ s * 1.0
-								+ atoi(f) / pow(10, strlen(f))
+								+ atoi(f) / pow((double)10, (int)strlen(f))
 							));
 						}
 					} else if (key == X_("duration_ts") && m_fps == 0 && timebase !=0 ) {
-						m_duration = atof(value.c_str()) * m_fps * timebase;
+						m_duration = atof(value) * m_fps * timebase;
 					} else if (key == X_("duration") && m_fps != 0 && m_duration == 0) {
-						m_duration = atof(value.c_str()) * m_fps;
+						m_duration = atof(value) * m_fps;
+					} else if (key == X_("sample_aspect_ratio")) {
+						std::string::size_type pos;
+						pos = value.find_first_of(':');
+						if (pos != std::string::npos && atof(value.substr(pos+1)) != 0) {
+							m_sar = value;
+							m_sar.replace(pos, 1, "/");
+						}
 					} else if (key == X_("display_aspect_ratio")) {
 						std::string::size_type pos;
 						pos = value.find_first_of(':');
-						if (pos != std::string::npos && atof(value.substr(pos+1).c_str()) != 0) {
-							m_aspect = atof(value.substr(0, pos).c_str()) / atof(value.substr(pos+1).c_str());
+						if (pos != std::string::npos && atof(value.substr(pos+1)) != 0) {
+							m_aspect = atof(value.substr(0, pos)) / atof(value.substr(pos+1));
 						}
 					}
 				}
@@ -197,7 +206,7 @@ TranscodeFfmpeg::probe ()
 				}
 
 			} else if (i->at(5) == X_("codec_type=audio")) { /* new ffprobe */
-				AudioStream as;
+				FFAudioStream as;
 				for (std::vector<std::string>::iterator kv = i->begin(); kv != i->end(); ++kv) {
 					const size_t kvsep = kv->find('=');
 					if(kvsep == std::string::npos) continue;
@@ -205,7 +214,7 @@ TranscodeFfmpeg::probe ()
 					std::string value = kv->substr(kvsep + 1);
 
 					if (key == X_("channels")) {
-						as.channels   = atoi(value.c_str());
+						as.channels   = atoi(value);
 					} else if (key == X_("index")) {
 						as.stream_id  = value;
 					} else if (key == X_("codec_long_name")) {
@@ -229,11 +238,6 @@ TranscodeFfmpeg::probe ()
 	}
 	/* end parse */
 
-
-	int timeout = 500;
-	while (ffcmd && --timeout) usleep (1000); // wait until 'ffprobe' terminated.
-	if (timeout == 0) return false;
-
 #if 0 /* DEBUG */
 	printf("FPS: %f\n", m_fps);
 	printf("Duration: %lu frames\n",(unsigned long)m_duration);
@@ -252,10 +256,10 @@ TranscodeFfmpeg::probe ()
 	return true;
 }
 
-FFSettings
+TranscodeFfmpeg::FFSettings
 TranscodeFfmpeg::default_encoder_settings ()
 {
-	FFSettings ffs;
+	TranscodeFfmpeg::FFSettings ffs;
 	ffs.clear();
 	ffs["-vcodec"] = "mpeg4";
 	ffs["-acodec"] = "ac3";
@@ -264,12 +268,12 @@ TranscodeFfmpeg::default_encoder_settings ()
 	return ffs;
 }
 
-FFSettings
+TranscodeFfmpeg::FFSettings
 TranscodeFfmpeg::default_meta_data ()
 {
-	FFSettings ffm;
+	TranscodeFfmpeg::FFSettings ffm;
 	ffm.clear();
-	ffm["comment"] = "Created with ardour";
+	ffm["comment"] = "Created with " PROGRAM_NAME;
 	return ffm;
 }
 
@@ -299,7 +303,7 @@ TranscodeFfmpeg::format_metadata (std::string key, std::string value)
 }
 
 bool
-TranscodeFfmpeg::encode (std::string outfile, std::string inf_a, std::string inf_v, FFSettings ffs, FFSettings meta, bool map)
+TranscodeFfmpeg::encode (std::string outfile, std::string inf_a, std::string inf_v, TranscodeFfmpeg::FFSettings ffs, TranscodeFfmpeg::FFSettings meta, bool map)
 {
 #define MAX_FFMPEG_ENCODER_ARGS (100)
 	char **argp;
@@ -318,31 +322,45 @@ TranscodeFfmpeg::encode (std::string outfile, std::string inf_a, std::string inf
 	argp[a++] = strdup("-i");
 	argp[a++] = strdup(inf_a.c_str());
 
-	for(FFSettings::const_iterator it = ffs.begin(); it != ffs.end(); ++it) {
+	for(TranscodeFfmpeg::FFSettings::const_iterator it = ffs.begin(); it != ffs.end(); ++it) {
 		argp[a++] = strdup(it->first.c_str());
 		argp[a++] = strdup(it->second.c_str());
 	}
-	for(FFSettings::const_iterator it = meta.begin(); it != meta.end(); ++it) {
+	for(TranscodeFfmpeg::FFSettings::const_iterator it = meta.begin(); it != meta.end(); ++it) {
 		argp[a++] = strdup("-metadata");
 		argp[a++] = format_metadata(it->first.c_str(), it->second.c_str());
 	}
+
+	if (m_fps > 0) {
+		m_lead_in  = rint (m_lead_in * m_fps) / m_fps;
+		m_lead_out = rint (m_lead_out * m_fps) / m_fps;
+	}
+
 	if (m_lead_in != 0 && m_lead_out != 0) {
 		std::ostringstream osstream;
 		argp[a++] = strdup("-vf");
-		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_in << X_(" [pre]; ");
-		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_out << X_(" [post]; ");
+		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_in;
+		if (!m_sar.empty()) osstream << X_(":sar=") << m_sar;
+		osstream << X_(" [pre]; ");
+		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_out;
+		if (!m_sar.empty()) osstream << X_(":sar=") << m_sar;
+		osstream << X_(" [post]; ");
 		osstream << X_("[pre] [in] [post] concat=n=3");
 		argp[a++] = strdup(osstream.str().c_str());
 	} else if (m_lead_in != 0) {
 		std::ostringstream osstream;
 		argp[a++] = strdup("-vf");
-		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_in << X_(" [pre]; ");
+		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_in;
+		if (!m_sar.empty()) osstream << X_(":sar=") << m_sar;
+		osstream << X_(" [pre]; ");
 		osstream << X_("[pre] [in] concat=n=2");
 		argp[a++] = strdup(osstream.str().c_str());
 	} else if (m_lead_out != 0) {
 		std::ostringstream osstream;
 		argp[a++] = strdup("-vf");
-		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_out << X_(" [post]; ");
+		osstream << X_("color=c=black:s=") << m_width << X_("x") << m_height << X_(":d=") << m_lead_out;
+		if (!m_sar.empty()) osstream << X_(":sar=") << m_sar;
+		osstream << X_(" [post]; ");
 		osstream << X_("[in] [post] concat=n=2");
 		argp[a++] = strdup(osstream.str().c_str());
 	}
@@ -371,7 +389,7 @@ TranscodeFfmpeg::encode (std::string outfile, std::string inf_a, std::string inf
 	}
 #endif
 
-	ffcmd = new SystemExec(ffmpeg_exe, argp);
+	ffcmd = new ARDOUR::SystemExec(ffmpeg_exe, argp);
 	ffcmd->ReadStdout.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffmpegparse_v, this, _1 ,_2));
 	ffcmd->Terminated.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffexit, this));
 	if (ffcmd->start(2)) {
@@ -382,7 +400,7 @@ TranscodeFfmpeg::encode (std::string outfile, std::string inf_a, std::string inf
 }
 
 bool
-TranscodeFfmpeg::extract_audio (std::string outfile, ARDOUR::framecnt_t samplerate, unsigned int stream)
+TranscodeFfmpeg::extract_audio (std::string outfile, ARDOUR::framecnt_t /*samplerate*/, unsigned int stream)
 {
 	if (!probeok) return false;
   if (stream >= m_audio.size()) return false;
@@ -419,7 +437,7 @@ TranscodeFfmpeg::extract_audio (std::string outfile, ARDOUR::framecnt_t samplera
 	}
 #endif
 
-	ffcmd = new SystemExec(ffmpeg_exe, argp);
+	ffcmd = new ARDOUR::SystemExec(ffmpeg_exe, argp);
 	ffcmd->ReadStdout.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffmpegparse_a, this, _1 ,_2));
 	ffcmd->Terminated.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffexit, this));
 	if (ffcmd->start(2)) {
@@ -462,7 +480,7 @@ TranscodeFfmpeg::transcode (std::string outfile, const int outw, const int outh,
 	argp[6] = (char*) calloc(10,sizeof(char)); snprintf(argp[6], 10, "%ix%i", width, height);
 	argp[7] = strdup("-y");
 	argp[8] = strdup("-vcodec");
-	argp[9] = strdup("mpeg4");
+	argp[9] = strdup("mjpeg");
 	argp[10] = strdup("-an");
 	argp[11] = strdup("-intra");
 	argp[12] = strdup("-g");
@@ -479,7 +497,7 @@ TranscodeFfmpeg::transcode (std::string outfile, const int outw, const int outh,
 	printf("\n");
 	}
 #endif
-	ffcmd = new SystemExec(ffmpeg_exe, argp);
+	ffcmd = new ARDOUR::SystemExec(ffmpeg_exe, argp);
 	ffcmd->ReadStdout.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffmpegparse_v, this, _1 ,_2));
 	ffcmd->Terminated.connect_same_thread (*this, boost::bind (&TranscodeFfmpeg::ffexit, this));
 	if (ffcmd->start(2)) {
@@ -494,7 +512,11 @@ TranscodeFfmpeg::cancel ()
 {
 	if (!ffcmd || !ffcmd->is_running()) { return;}
 	ffcmd->write_to_stdin("q");
+#ifdef PLATFORM_WINDOWS
+	Sleep(1000);
+#else
 	sleep (1);
+#endif
 	if (ffcmd) {
 	  ffcmd->terminate();
 	}
@@ -528,7 +550,7 @@ TranscodeFfmpeg::ffmpegparse_a (std::string d, size_t /* s */)
 		      h * 3600.0
 		    + m * 60.0
 		    + s * 1.0
-		    + atoi(f) / pow(10, strlen(f))
+		    + atoi(f) / pow((double)10, (int)strlen(f))
 		));
 		p = p * m_fps / 100.0;
 		if (p > m_duration ) { p = m_duration; }
@@ -542,7 +564,7 @@ void
 TranscodeFfmpeg::ffmpegparse_v (std::string d, size_t /* s */)
 {
 	if (strstr(d.c_str(), "ERROR") || strstr(d.c_str(), "Error") || strstr(d.c_str(), "error")) {
-		PBD::warning << "ffmpeg-error: " << d << endmsg;
+		warning << "ffmpeg-error: " << d << endmsg;
 	}
 	if (strncmp(d.c_str(), "frame=",6)) {
 #if 1 /* DEBUG */
@@ -554,7 +576,7 @@ TranscodeFfmpeg::ffmpegparse_v (std::string d, size_t /* s */)
 		Progress(0, 0); /* EMIT SIGNAL */
 		return;
 	}
-	ARDOUR::framecnt_t f = atol(d.substr(6).c_str());
+	ARDOUR::framecnt_t f = atol(d.substr(6));
 	if (f == 0) {
 		Progress(0, 0); /* EMIT SIGNAL */
 	} else {

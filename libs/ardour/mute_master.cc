@@ -31,6 +31,9 @@
 using namespace ARDOUR;
 using namespace std;
 
+const MuteMaster::MutePoint MuteMaster::AllPoints = MuteMaster::MutePoint(
+	PreFader|PostFader|Listen|Main);
+
 MuteMaster::MuteMaster (Session& s, const std::string&)
 	: SessionHandleRef (s)
 	, _mute_point (MutePoint (0))
@@ -87,26 +90,26 @@ MuteMaster::mute_gain_at (MutePoint mp) const
 
         if (Config->get_solo_mute_override()) {
                 if (_soloed) {
-                        gain = 1.0;
+                        gain = GAIN_COEFF_UNITY;
                 } else if (muted_by_self_at (mp)) {
-                        gain = 0.0;
+                        gain = GAIN_COEFF_ZERO;
                 } else {
                         if (muted_by_others_at (mp)) {
                                 gain = Config->get_solo_mute_gain ();
                         } else {
-                                gain = 1.0;
+                                gain = GAIN_COEFF_UNITY;
                         }
                 }
         } else {
                 if (muted_by_self_at (mp)) {
-                        gain = 0.0;
+                        gain = GAIN_COEFF_ZERO;
                 } else if (_soloed) {
-                        gain = 1.0;
+                        gain = GAIN_COEFF_UNITY;
                 } else {
                         if (muted_by_others_at (mp)) {
                                 gain = Config->get_solo_mute_gain ();
                         } else {
-                                gain = 1.0;
+                                gain = GAIN_COEFF_UNITY;
                         }
                 }
         }

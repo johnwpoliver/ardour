@@ -46,6 +46,7 @@ using namespace Gtkmm2ext;
 using namespace std;
 using namespace PBD;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 
 std::vector<std::string> AddRouteDialog::channel_combo_strings;
 
@@ -54,7 +55,7 @@ AddRouteDialog::AddRouteDialog ()
 	, routes_adjustment (1, 1, 128, 1, 4)
 	, routes_spinner (routes_adjustment)
 	, configuration_label (_("Configuration:"))
-	, mode_label (_("Track mode:"))
+	, mode_label (_("Record Mode:"))
 	, instrument_label (_("Instrument:"))
 {
 	set_name ("AddRouteDialog");
@@ -79,11 +80,12 @@ AddRouteDialog::AddRouteDialog ()
 	track_bus_combo.append_text (_("Busses"));
 	track_bus_combo.set_active (0);
 
-	build_instrument_list ();
-	instrument_combo.set_model (instrument_list);
-	instrument_combo.pack_start (instrument_list_columns.name);
-	instrument_combo.set_active (0);
-	instrument_combo.set_button_sensitivity (Gtk::SENSITIVITY_AUTO);
+	insert_at_combo.append_text (_("First"));
+	insert_at_combo.append_text (_("Before Selection"));
+	insert_at_combo.append_text (_("After Selection"));
+	insert_at_combo.append_text (_("Last"));
+
+	insert_at_combo.set_active (1);
 
 	VBox* vbox = manage (new VBox);
 	Gtk::Label* l;
@@ -156,6 +158,12 @@ AddRouteDialog::AddRouteDialog ()
 	table2->attach (route_group_combo, 2, 3, n, n + 1, Gtk::FILL, Gtk::EXPAND | Gtk::FILL, 0, 0);
 	++n;
 
+	/* New route will be inserted at.. */
+	l = manage (new Label (_("Insert:"), Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER, false));
+	table2->attach (*l, 1, 2, n, n + 1, Gtk::FILL, Gtk::EXPAND, 0, 0);
+	table2->attach (insert_at_combo, 2, 3, n, n + 1, Gtk::FILL, Gtk::EXPAND | Gtk::FILL, 0, 0);
+	++n;
+
 	options_box->pack_start (*table2, false, true);
 	vbox->pack_start (*options_box, false, true);
 
@@ -175,6 +183,8 @@ AddRouteDialog::AddRouteDialog ()
 
 	add_button (Stock::CANCEL, RESPONSE_CANCEL);
 	add_button (Stock::ADD, RESPONSE_ACCEPT);
+	set_response_sensitive (RESPONSE_ACCEPT, true);
+	set_default_response (RESPONSE_ACCEPT);
 
 	track_type_chosen ();
 }
@@ -193,18 +203,16 @@ AddRouteDialog::channel_combo_changed ()
 AddRouteDialog::TypeWanted
 AddRouteDialog::type_wanted() const
 {
-	switch (track_bus_combo.get_active_row_number ()) {
-	case 0:
-		return AudioTrack;
-	case 1:
+	std::string str = track_bus_combo.get_active_text();
+	if (str == _("Busses")) {
+		return AudioBus;
+	} else if (str == _("MIDI Tracks")){
 		return MidiTrack;
-	case 2:
+	} else if (str == _("Audio+MIDI Tracks")) {
 		return MixedTrack;
-	default:
-		break;
+	} else {
+		return AudioTrack;
 	}
-
-	return AudioBus;
 }
 
 void
@@ -344,7 +352,7 @@ AddRouteDialog::mode ()
 	} else {
 		fatal << string_compose (X_("programming error: unknown track mode in add route dialog combo = %1"), str)
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 	/* keep gcc happy */
 	return ARDOUR::Normal;
@@ -543,6 +551,21 @@ AddRouteDialog::group_changed ()
 	}
 }
 
+AddRouteDialog::InsertAt
+AddRouteDialog::insert_at ()
+{
+	std::string str = insert_at_combo.get_active_text();
+
+	if (str == _("First")) {
+		return First;
+	} else if (str == _("After Selection")) {
+		return AfterSelection;
+	} else if (str == _("Before Selection")){
+		return BeforeSelection;
+	}
+	return Last;
+}
+
 bool
 AddRouteDialog::channel_separator (const Glib::RefPtr<Gtk::TreeModel> &, const Gtk::TreeModel::iterator &i)
 {
@@ -559,56 +582,8 @@ AddRouteDialog::route_separator (const Glib::RefPtr<Gtk::TreeModel> &, const Gtk
 	return route_group_combo.get_active_text () == "separator";
 }
 
-void
-AddRouteDialog::build_instrument_list ()
-{
-	PluginInfoList all_plugs;
-	PluginManager& manager (PluginManager::instance());
-	TreeModel::Row row;
-
-	all_plugs.insert (all_plugs.end(), manager.ladspa_plugin_info().begin(), manager.ladspa_plugin_info().end());
-#ifdef WINDOWS_VST_SUPPORT
-	all_plugs.insert (all_plugs.end(), manager.windows_vst_plugin_info().begin(), manager.windows_vst_plugin_info().end());
-#endif
-#ifdef LXVST_SUPPORT
-	all_plugs.insert (all_plugs.end(), manager.lxvst_plugin_info().begin(), manager.lxvst_plugin_info().end());
-#endif
-#ifdef AUDIOUNIT_SUPPORT
-	all_plugs.insert (all_plugs.end(), manager.au_plugin_info().begin(), manager.au_plugin_info().end());
-#endif
-#ifdef LV2_SUPPORT
-	all_plugs.insert (all_plugs.end(), manager.lv2_plugin_info().begin(), manager.lv2_plugin_info().end());
-#endif
-
-
-	instrument_list = ListStore::create (instrument_list_columns);
-
-	row = *(instrument_list->append());
-	row[instrument_list_columns.info_ptr] = PluginInfoPtr ();
-	row[instrument_list_columns.name] = _("-none-");
-
-	for (PluginInfoList::const_iterator i = all_plugs.begin(); i != all_plugs.end(); ++i) {
-
-		if (manager.get_status (*i) == PluginManager::Hidden) continue;
-
-		if ((*i)->is_instrument()) {
-			row = *(instrument_list->append());
-			row[instrument_list_columns.name] = (*i)->name;
-			row[instrument_list_columns.info_ptr] = *i;
-		}
-	}
-}
-
 PluginInfoPtr
 AddRouteDialog::requested_instrument ()
 {
-	TreeModel::iterator iter = instrument_combo.get_active ();
-	TreeModel::Row row;
-	
-	if (iter) {
-		row = (*iter);
-		return row[instrument_list_columns.info_ptr];
-	}
-
-	return PluginInfoPtr();
+	return instrument_combo.selected_instrument();
 }

@@ -39,6 +39,10 @@ namespace MIDI {
 	class Parser;
 }
 
+namespace ARDOUR {
+	class MidiPort;
+}
+
 class MidiTracer : public ArdourWindow
 {
   public:
@@ -46,7 +50,6 @@ class MidiTracer : public ArdourWindow
 	~MidiTracer();
 
   private:
-	MIDI::Parser* parser;
 	Gtk::TextView text;
 	Gtk::ScrolledWindow scroller;
 	Gtk::Adjustment line_count_adjustment;
@@ -57,7 +60,6 @@ class MidiTracer : public ArdourWindow
 	
 	bool autoscroll;
 	bool show_hex;
-	bool collect;
 	bool show_delta_time;
 
 	/** Incremented when an update is requested, decremented when one is handled; hence
@@ -89,6 +91,8 @@ class MidiTracer : public ArdourWindow
 	void disconnect ();
 	PBD::ScopedConnection _parser_connection;
 	PBD::ScopedConnection _manager_connection;
+
+	boost::shared_ptr<ARDOUR::MidiPort> traced_port;
 };
 
 #endif /* __ardour_gtk_midi_tracer_h__ */

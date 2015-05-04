@@ -20,7 +20,9 @@
 #ifndef EVORAL_SMF_HPP
 #define EVORAL_SMF_HPP
 
-#include <cassert>
+#include <glibmm/threads.h>
+
+#include "evoral/visibility.h"
 #include "evoral/types.hpp"
 
 struct smf_struct;
@@ -35,7 +37,7 @@ namespace Evoral {
 /** Standard Midi File.
  * Currently only tempo-based time of a given PPQN is supported.
  */
-class SMF {
+class LIBEVORAL_API SMF {
 public:
 	class FileError : public std::exception {
 	public:
@@ -50,11 +52,11 @@ public:
 	SMF() : _smf(0), _smf_track(0), _empty(true) {};
 	virtual ~SMF();
 
+	static bool test(const std::string& path);
 	int  open(const std::string& path, int track=1) THROW_FILE_ERROR;
+	// XXX 19200 = 10 * Timecode::BBT_Time::ticks_per_beat
 	int  create(const std::string& path, int track=1, uint16_t ppqn=19200) THROW_FILE_ERROR;
 	void close() THROW_FILE_ERROR;
-
-	const std::string& file_path() const { return _file_path; };
 
 	void seek_to_start() const;
 	int  seek_to_track(int track);
@@ -67,20 +69,17 @@ public:
 
 	void begin_write();
 	void append_event_delta(uint32_t delta_t, uint32_t size, const uint8_t* buf, event_id_t note_id);
-	void end_write() THROW_FILE_ERROR;
+	void end_write(std::string const &) THROW_FILE_ERROR;
 
 	void flush() {};
 
 	double round_to_file_precision (double val) const;
 
-protected:
-	void set_path (const std::string& p);
-
 private:
-	std::string  _file_path;
 	smf_t*       _smf;
 	smf_track_t* _smf_track;
 	bool         _empty; ///< true iff file contains(non-empty) events
+	mutable Glib::Threads::Mutex _smf_lock;
 };
 
 }; /* namespace Evoral */

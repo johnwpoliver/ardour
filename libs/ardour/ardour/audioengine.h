@@ -1,19 +1,19 @@
 /*
-    Copyright (C) 2002-2004 Paul Davis
+  Copyright (C) 2002-2004 Paul Davis
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
+  This program is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation; either version 2 of the License, or
+  (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+  You should have received a copy of the GNU General Public License
+  along with this program; if not, write to the Free Software
+  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 */
 
@@ -33,326 +33,278 @@
 
 #include <glibmm/threads.h>
 
-#include "pbd/rcu.h"
 #include "pbd/signals.h"
 #include "pbd/stacktrace.h"
 
-#include <jack/weakjack.h>
-#include <jack/jack.h>
-#include <jack/transport.h>
-#include <jack/thread.h>
-
 #include "ardour/ardour.h"
-
 #include "ardour/data_type.h"
 #include "ardour/session_handle.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/chan_count.h"
+#include "ardour/port_manager.h"
 
-#ifdef HAVE_JACK_SESSION
-#include <jack/session.h>
-#endif
+class MTDM;
 
 namespace ARDOUR {
 
 class InternalPort;
 class MidiPort;
+class MIDIDM;
 class Port;
 class Session;
 class ProcessThread;
+class AudioBackend;
+struct AudioBackendInfo;
 
-class AudioEngine : public SessionHandlePtr
+class LIBARDOUR_API AudioEngine : public SessionHandlePtr, public PortManager
 {
-public:
-	typedef std::map<std::string,boost::shared_ptr<Port> > Ports;
+  public:
 
-	AudioEngine (std::string client_name, std::string session_uuid);
+	static AudioEngine* create ();
+
 	virtual ~AudioEngine ();
 
-	jack_client_t* jack() const;
-	bool connected() const { return _jack != 0; }
-
-	bool is_realtime () const;
+	int discover_backends();
+	std::vector<const AudioBackendInfo*> available_backends() const;
+	std::string current_backend_name () const;
+	boost::shared_ptr<AudioBackend> set_default_backend ();
+	boost::shared_ptr<AudioBackend> set_backend (const std::string&, const std::string& arg1, const std::string& arg2);
+	boost::shared_ptr<AudioBackend> current_backend() const { return _backend; }
+	bool setup_required () const;
 
 	ProcessThread* main_thread() const { return _main_thread; }
 
-	std::string client_name() const { return jack_client_name; }
+	/* START BACKEND PROXY API 
+	 *
+	 * See audio_backend.h for full documentation and semantics. These wrappers
+	 * just forward to a backend implementation.
+	 */
 
-	int reconnect_to_jack ();
-	int disconnect_from_jack();
+	int            start (bool for_latency_measurement=false);
+	int            stop (bool for_latency_measurement=false);
+	int            freewheel (bool start_stop);
+	float          get_dsp_load() const ;
+	void           transport_start ();
+	void           transport_stop ();
+	TransportState transport_state ();
+	void           transport_locate (framepos_t pos);
+	framepos_t     transport_frame();
+	framecnt_t     sample_rate () const;
+	pframes_t      samples_per_cycle () const;
+	int            usecs_per_cycle () const;
+	size_t         raw_buffer_size (DataType t);
+	framepos_t     sample_time ();
+	framepos_t     sample_time_at_cycle_start ();
+	pframes_t      samples_since_cycle_start ();
+	bool           get_sync_offset (pframes_t& offset) const;
 
-	int stop (bool forever = false);
-	int start ();
+	int            create_process_thread (boost::function<void()> func);
+	int            join_process_threads ();
+	bool           in_process_thread ();
+	uint32_t       process_thread_count ();
+
+	int            backend_reset_requested();
+	void           request_backend_reset();
+	void           request_device_list_update();
+	void           launch_device_control_app();
+
+	bool           is_realtime() const;
+	bool           connected() const;
+
+	// for the user which hold state_lock to check if reset operation is pending
+	bool           is_reset_requested() const { return g_atomic_int_get(const_cast<gint*>(&_hw_reset_request_count)); }
+
+	int set_device_name (const std::string&);
+	int set_sample_rate (float);
+	int set_buffer_size (uint32_t);
+	int set_interleaved (bool yn);
+	int set_input_channels (uint32_t);
+	int set_output_channels (uint32_t);
+	int set_systemic_input_latency (uint32_t);
+	int set_systemic_output_latency (uint32_t);
+
+	/* END BACKEND PROXY API */
+
+	bool freewheeling() const { return _freewheeling; }
 	bool running() const { return _running; }
 
 	Glib::Threads::Mutex& process_lock() { return _process_lock; }
+	Glib::Threads::RecMutex& state_lock() { return _state_lock; }
 
-	framecnt_t frame_rate () const;
-	pframes_t frames_per_cycle () const;
-
-	size_t raw_buffer_size(DataType t);
-
-	int usecs_per_cycle () const { return _usecs_per_cycle; }
-
-	bool get_sync_offset (pframes_t & offset) const;
-
-	pframes_t frames_since_cycle_start () {
-  	        jack_client_t* _priv_jack = _jack;
-		if (!_running || !_priv_jack) {
-			return 0;
-		}
-		return jack_frames_since_cycle_start (_priv_jack);
+	int request_buffer_size (pframes_t samples) {
+		return set_buffer_size (samples);
 	}
-
-	pframes_t frame_time () {
-  	        jack_client_t* _priv_jack = _jack;
-		if (!_running || !_priv_jack) {
-			return 0;
-		}
-		return jack_frame_time (_priv_jack);
-	}
-
-	pframes_t frame_time_at_cycle_start () {
-  	        jack_client_t* _priv_jack = _jack;
-		if (!_running || !_priv_jack) {
-			return 0;
-		}
-		return jack_last_frame_time (_priv_jack);
-	}
-
-	pframes_t transport_frame () const {
-  	        const jack_client_t* _priv_jack = _jack;
-		if (!_running || !_priv_jack) {
-			return 0;
-		}
-		return jack_get_current_transport_frame (_priv_jack);
-	}
-
-	int request_buffer_size (pframes_t);
 
 	framecnt_t processed_frames() const { return _processed_frames; }
-
-	float get_cpu_load() {
-  	        jack_client_t* _priv_jack = _jack;
-		if (!_running || !_priv_jack) {
-			return 0;
-		}
-		return jack_cpu_load (_priv_jack);
-	}
-
+    
 	void set_session (Session *);
 	void remove_session (); // not a replacement for SessionHandle::session_going_away()
+	Session* session() const { return _session; }
 
-	class PortRegistrationFailure : public std::exception {
-	public:
-		PortRegistrationFailure (std::string const & why = "")
-			: reason (why) {}
-
-		~PortRegistrationFailure () throw () {}
-
-		virtual const char *what() const throw () { return reason.c_str(); }
-
-	private:
-		std::string reason;
-	};
+	void reconnect_session_routes (bool reconnect_inputs = true, bool reconnect_outputs = true);
 
 	class NoBackendAvailable : public std::exception {
-	public:
+	    public:
 		virtual const char *what() const throw() { return "could not connect to engine backend"; }
 	};
-
-	boost::shared_ptr<Port> register_input_port (DataType, const std::string& portname);
-	boost::shared_ptr<Port> register_output_port (DataType, const std::string& portname);
-	int unregister_port (boost::shared_ptr<Port>);
-
-	bool port_is_physical (const std::string&) const;
-	void request_jack_monitors_input (const std::string&, bool) const;
-
+    
 	void split_cycle (pframes_t offset);
-
-	int connect (const std::string& source, const std::string& destination);
-	int disconnect (const std::string& source, const std::string& destination);
-	int disconnect (boost::shared_ptr<Port>);
-
-	const char ** get_ports (const std::string& port_name_pattern, const std::string& type_name_pattern, uint32_t flags);
-
-	bool can_request_hardware_monitoring ();
-
-	ChanCount n_physical_outputs () const;
-	ChanCount n_physical_inputs () const;
-
-	void get_physical_outputs (DataType type, std::vector<std::string>&);
-	void get_physical_inputs (DataType type, std::vector<std::string>&);
-
-	boost::shared_ptr<Port> get_port_by_name (const std::string &);
-	void port_renamed (const std::string&, const std::string&);
-
-	enum TransportState {
-		TransportStopped = JackTransportStopped,
-		TransportRolling = JackTransportRolling,
-		TransportLooping = JackTransportLooping,
-		TransportStarting = JackTransportStarting
-	};
-
-	void transport_start ();
-	void transport_stop ();
-	void transport_locate (framepos_t);
-	TransportState transport_state ();
-
+    
 	int  reset_timebase ();
-
-        void update_latencies ();
-
-	/* start/stop freewheeling */
-
-	int freewheel (bool onoff);
-	bool freewheeling() const { return _freewheeling; }
-
+    
+	void update_latencies ();
+    
 	/* this signal is sent for every process() cycle while freewheeling.
-_	   the regular process() call to session->process() is not made.
+	   (the regular process() call to session->process() is not made)
 	*/
-
+    
 	PBD::Signal1<int, pframes_t> Freewheel;
-
+    
 	PBD::Signal0<void> Xrun;
 
-	/* this signal is if JACK notifies us of a graph order event */
-
-	PBD::Signal0<void> GraphReordered;
-
-#ifdef HAVE_JACK_SESSION
-	PBD::Signal1<void,jack_session_event_t *> JackSessionEvent;
-#endif
-
-
-	/* this signal is emitted if the sample rate changes */
-
+	/** this signal is emitted if the sample rate changes */
 	PBD::Signal1<void, framecnt_t> SampleRateChanged;
 
-	/* this signal is sent if JACK ever disconnects us */
+	/** this signal is emitted if the buffer size changes */
+	PBD::Signal1<void, pframes_t> BufferSizeChanged;
 
+	/** this signal is emitted if the device cannot operate properly */
+	PBD::Signal0<void> DeviceError;
+
+	/* this signal is emitted if the device list changed */
+    
+	PBD::Signal0<void> DeviceListChanged;
+    
+	/* this signal is sent if the backend ever disconnects us */
+    
 	PBD::Signal1<void,const char*> Halted;
-
+    
 	/* these two are emitted when the engine itself is
 	   started and stopped
 	*/
-
+    
 	PBD::Signal0<void> Running;
 	PBD::Signal0<void> Stopped;
 
-	/** Emitted if a JACK port is registered or unregistered */
-	PBD::Signal0<void> PortRegisteredOrUnregistered;
-
-	/** Emitted if a JACK port is connected or disconnected.
-	 *  The Port parameters are the ports being connected / disconnected, or 0 if they are not known to Ardour.
-	 *  The std::string parameters are the (long) port names.
-	 *  The bool parameter is true if ports were connected, or false for disconnected.
+	/* these two are emitted when a device reset is initiated/finished
 	 */
-	PBD::Signal5<void, boost::weak_ptr<Port>, std::string, boost::weak_ptr<Port>, std::string, bool> PortConnectedOrDisconnected;
-
-	std::string make_port_name_relative (std::string) const;
-	std::string make_port_name_non_relative (std::string) const;
-	bool port_is_mine (const std::string&) const;
+    
+	PBD::Signal0<void> DeviceResetStarted;
+	PBD::Signal0<void> DeviceResetFinished;
 
 	static AudioEngine* instance() { return _instance; }
 	static void destroy();
 	void died ();
+    
+	/* The backend will cause these at the appropriate time(s)
+	 */
+	int  process_callback (pframes_t nframes);
+	int  buffer_size_change (pframes_t nframes);
+	int  sample_rate_change (pframes_t nframes);
+	void freewheel_callback (bool);
+	void timebase_callback (TransportState state, pframes_t nframes, framepos_t pos, int new_position);
+	int  sync_callback (TransportState state, framepos_t position);
+	int  port_registration_callback ();
+	void latency_callback (bool for_playback);
+	void halted_callback (const char* reason);
 
-	int create_process_thread (boost::function<void()>, pthread_t*, size_t stacksize);
+	/* sets up the process callback thread */
+	static void thread_init_callback (void *);
 
-private:
+	/* latency measurement */
+
+	MTDM* mtdm() { return _mtdm; }
+	MIDIDM* mididm() { return _mididm; }
+
+	int  prepare_for_latency_measurement ();
+	int  start_latency_detection (bool);
+	void stop_latency_detection ();
+	void set_latency_input_port (const std::string&);
+	void set_latency_output_port (const std::string&);
+	uint32_t latency_signal_delay () const { return _latency_signal_latency; }
+
+	enum LatencyMeasurement {
+		MeasureNone,
+		MeasureAudio,
+		MeasureMIDI
+	};
+
+	LatencyMeasurement measuring_latency () const { return _measuring_latency; }
+
+	/* These two are used only in builds where SILENCE_AFTER_SECONDS was
+	 * set. BecameSilent will be emitted when the audioengine goes silent.
+	 * reset_silence_countdown() can be used to reset the silence
+	 * countdown, whose duration will be reduced to half of its previous
+	 * value.
+	 */
+	
+	PBD::Signal0<void> BecameSilent;
+	void reset_silence_countdown ();
+	
+  private:
+	AudioEngine ();
+
 	static AudioEngine*       _instance;
 
-	jack_client_t* volatile   _jack; /* could be reset to null by SIGPIPE or another thread */
-	std::string                jack_client_name;
-	Glib::Threads::Mutex      _process_lock;
-        Glib::Threads::Cond        session_removed;
+	Glib::Threads::Mutex	   _process_lock;
+	Glib::Threads::RecMutex    _state_lock;
+	Glib::Threads::Cond        session_removed;
 	bool                       session_remove_pending;
-        frameoffset_t              session_removal_countdown;
-        gain_t                     session_removal_gain;
-        gain_t                     session_removal_gain_step;
+	frameoffset_t              session_removal_countdown;
+	gain_t                     session_removal_gain;
+	gain_t                     session_removal_gain_step;
 	bool                      _running;
-	bool                      _has_run;
-	mutable framecnt_t        _buffer_size;
-	std::map<DataType,size_t> _raw_buffer_sizes;
-	mutable framecnt_t        _frame_rate;
+	bool                      _freewheeling;
 	/// number of frames between each check for changes in monitor input
 	framecnt_t                 monitor_check_interval;
 	/// time of the last monitor check in frames
 	framecnt_t                 last_monitor_check;
 	/// the number of frames processed since start() was called
 	framecnt_t                _processed_frames;
-	bool                      _freewheeling;
-	bool                      _pre_freewheel_mmc_enabled;
-	int                       _usecs_per_cycle;
-	bool                       port_remove_in_progress;
-        Glib::Threads::Thread*     m_meter_thread;
+	Glib::Threads::Thread*     m_meter_thread;
 	ProcessThread*            _main_thread;
+	MTDM*                     _mtdm;
+	MIDIDM*                   _mididm;
+	LatencyMeasurement        _measuring_latency;
+	PortEngine::PortHandle    _latency_input_port;
+	PortEngine::PortHandle    _latency_output_port;
+	framecnt_t                _latency_flush_frames;
+	std::string               _latency_input_name;
+	std::string               _latency_output_name;
+	framecnt_t                _latency_signal_latency;
+	bool                      _stopped_for_latency;
+	bool                      _started_for_latency;
+	bool                      _in_destructor;
 
-	SerializedRCUManager<Ports> ports;
+	Glib::Threads::Thread*     _hw_reset_event_thread;
+	gint                       _hw_reset_request_count;
+	Glib::Threads::Cond        _hw_reset_condition;
+	Glib::Threads::Mutex       _reset_request_lock;
+	gint                       _stop_hw_reset_processing;
+	Glib::Threads::Thread*     _hw_devicelist_update_thread;
+	gint                       _hw_devicelist_update_count;
+	Glib::Threads::Cond        _hw_devicelist_update_condition;
+	Glib::Threads::Mutex       _devicelist_update_lock;
+	gint                       _stop_hw_devicelist_processing;
 
-	boost::shared_ptr<Port> register_port (DataType type, const std::string& portname, bool input);
+	void start_hw_event_processing();
+	void stop_hw_event_processing();
+	void do_reset_backend();
+	void do_devicelist_update();
 
-	int    process_callback (pframes_t nframes);
-	void*  process_thread ();
-	void   remove_all_ports ();
+	typedef std::map<std::string,AudioBackendInfo*> BackendMap;
+	BackendMap _backends;
+	AudioBackendInfo* backend_discover (const std::string&);
+	void drop_backend ();
 
-	ChanCount n_physical (unsigned long) const;
-	void get_physical (DataType, unsigned long, std::vector<std::string> &);
+#ifdef SILENCE_AFTER
+	framecnt_t _silence_countdown;
+	uint32_t   _silence_hit_cnt;
+#endif	
 
-	void port_registration_failure (const std::string& portname);
-
-	static int  _xrun_callback (void *arg);
-#ifdef HAVE_JACK_SESSION
-	static void _session_callback (jack_session_event_t *event, void *arg);
-#endif
-	static int  _graph_order_callback (void *arg);
-	static void* _process_thread (void *arg);
-	static int  _sample_rate_callback (pframes_t nframes, void *arg);
-	static int  _bufsize_callback (pframes_t nframes, void *arg);
-	static void _jack_timebase_callback (jack_transport_state_t, pframes_t, jack_position_t*, int, void*);
-	static int  _jack_sync_callback (jack_transport_state_t, jack_position_t*, void *arg);
-	static void _freewheel_callback (int , void *arg);
-	static void _registration_callback (jack_port_id_t, int, void *);
-	static void _connect_callback (jack_port_id_t, jack_port_id_t, int, void *);
-
-	void jack_timebase_callback (jack_transport_state_t, pframes_t, jack_position_t*, int);
-	int  jack_sync_callback (jack_transport_state_t, jack_position_t*);
-	int  jack_bufsize_callback (pframes_t);
-	int  jack_sample_rate_callback (pframes_t);
-	void freewheel_callback (int);
-        void connect_callback (jack_port_id_t, jack_port_id_t, int);
-
-	void set_jack_callbacks ();
-
-	static void _latency_callback (jack_latency_callback_mode_t, void*);
-	void jack_latency_callback (jack_latency_callback_mode_t);
-
-	int connect_to_jack (std::string client_name, std::string session_uuid);
-
-	static void halted (void *);
-	static void halted_info (jack_status_t,const char*,void *);
-
-	void meter_thread ();
-	void start_metering_thread ();
-	void stop_metering_thread ();
-
-	static gint      m_meter_exit;
-
-	struct ThreadData {
-		AudioEngine* engine;
-		boost::function<void()> f;
-		size_t stacksize;
-
-		ThreadData (AudioEngine* ae, boost::function<void()> fp, size_t stacksz)
-		: engine (ae) , f (fp) , stacksize (stacksz) {}
-	};
-
-	static void* _start_process_thread (void*);
-        void parameter_changed (const std::string&);
-        PBD::ScopedConnection config_connection;
 };
-
+	
 } // namespace ARDOUR
 
 #endif /* __ardour_audioengine_h__ */

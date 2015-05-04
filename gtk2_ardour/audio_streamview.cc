@@ -34,19 +34,18 @@
 #include "ardour/rc_configuration.h"
 #include "ardour/session.h"
 
+#include "canvas/rectangle.h"
+
 #include "audio_streamview.h"
 #include "audio_region_view.h"
 #include "tape_region_view.h"
 #include "audio_time_axis.h"
-#include "canvas-waveview.h"
-#include "canvas-simplerect.h"
 #include "region_selection.h"
 #include "selection.h"
 #include "public_editor.h"
 #include "ardour_ui.h"
 #include "rgb_macros.h"
 #include "gui_thread.h"
-#include "utils.h"
 
 #include "i18n.h"
 
@@ -98,27 +97,27 @@ AudioStreamView::create_region_view (boost::shared_ptr<Region> r, bool wait_for_
 	case Normal:
 		if (recording) {
 			region_view = new AudioRegionView (_canvas_group, _trackview, region,
-					_samples_per_unit, region_color, recording, TimeAxisViewItem::Visibility(
-							TimeAxisViewItem::ShowFrame |
-							TimeAxisViewItem::HideFrameRight |
-							TimeAxisViewItem::HideFrameLeft |
-							TimeAxisViewItem::HideFrameTB));
+							   _samples_per_pixel, region_color, recording, TimeAxisViewItem::Visibility(
+								   TimeAxisViewItem::ShowFrame |
+								   TimeAxisViewItem::HideFrameRight |
+								   TimeAxisViewItem::HideFrameLeft |
+								   TimeAxisViewItem::HideFrameTB));
 		} else {
 			region_view = new AudioRegionView (_canvas_group, _trackview, region,
-					_samples_per_unit, region_color);
+					_samples_per_pixel, region_color);
 		}
 		break;
 	case Destructive:
 		region_view = new TapeAudioRegionView (_canvas_group, _trackview, region,
-				_samples_per_unit, region_color);
+						       _samples_per_pixel, region_color);
 		break;
 	default:
-		fatal << string_compose (_("programming error: %1"), "illegal track mode in ::add_region_view_internal") << endmsg;
-		/*NOTREACHED*/
+		fatal << string_compose (_("programming error: %1"), "illegal track mode in ::create_region_view()") << endmsg;
+		abort(); /*NOTREACHED*/
 
 	}
 
-	region_view->init (region_color, wait_for_waves);
+	region_view->init (wait_for_waves);
 	region_view->set_amplitude_above_axis(_amplitude_above_axis);
 	region_view->set_height (child_height ());
 
@@ -142,34 +141,7 @@ AudioStreamView::add_region_view_internal (boost::shared_ptr<Region> r, bool wai
 		return 0;
 	}
 
-//	if(!recording){
-//		for (list<RegionView *>::iterator i = region_views.begin(); i != region_views.end(); ++i) {
-//			if ((*i)->region() == r) {
-//				cerr << "audio_streamview in add_region_view_internal region found" << endl;
-				/* great. we already have a AudioRegionView for this Region. use it again. */
-
-//				(*i)->set_valid (true);
-
-				// this might not be necessary
-//				AudioRegionView* const arv = dynamic_cast<AudioRegionView*>(*i);
-
-//				if (arv) {
-//					arv->set_waveform_scale (_waveform_scale);
-//					arv->set_waveform_shape (_waveform_shape);
-//				}
-
-//				return NULL;
-//			}
-//		}
-//	}
-
 	region_views.push_front (region_view);
-
-        if (_trackview.editor().internal_editing()) {
-                region_view->hide_rect ();
-        } else {
-                region_view->show_rect ();
-        }
 
 	/* catch region going away */
 
@@ -214,7 +186,7 @@ AudioStreamView::setup_rec_box ()
 		if (!rec_active &&
 		    _trackview.session()->record_status() == Session::Recording &&
 		    _trackview.track()->record_enabled()) {
-			if (_trackview.audio_track()->mode() == Normal && Config->get_show_waveforms_while_recording() && rec_regions.size() == rec_rects.size()) {
+			if (_trackview.audio_track()->mode() == Normal && ARDOUR_UI::config()->get_show_waveforms_while_recording() && rec_regions.size() == rec_rects.size()) {
 
 				/* add a new region, but don't bother if they set show-waveforms-while-recording mid-record */
 
@@ -259,53 +231,11 @@ AudioStreamView::setup_rec_box ()
 
 			/* start a new rec box */
 
-			boost::shared_ptr<AudioTrack> at;
-
-			at = _trackview.audio_track(); /* we know what it is already */
+			boost::shared_ptr<AudioTrack> at = _trackview.audio_track();
 			framepos_t const frame_pos = at->current_capture_start ();
-			gdouble xstart = _trackview.editor().frame_to_pixel (frame_pos);
-			gdouble xend;
-			uint32_t fill_color;
+			double     const width     = ((at->mode() == Destructive) ? 2 : 0);
 
-			switch (_trackview.audio_track()->mode()) {
-			case Normal:
-			case NonLayered:
-				xend = xstart;
-				fill_color = ARDOUR_UI::config()->canvasvar_RecordingRect.get();
-				break;
-
-			case Destructive:
-				xend = xstart + 2;
-				fill_color = ARDOUR_UI::config()->canvasvar_RecordingRect.get();
-				/* make the recording rect translucent to allow
-				   the user to see the peak data coming in, etc.
-				*/
-				fill_color = UINT_RGBA_CHANGE_A (fill_color, 120);
-				break;
-			}
-
-			ArdourCanvas::SimpleRect * rec_rect = new Gnome::Canvas::SimpleRect (*_canvas_group);
-			rec_rect->property_x1() = xstart;
-			rec_rect->property_y1() = 1.0;
-			rec_rect->property_x2() = xend;
-			rec_rect->property_y2() = child_height ();
-			rec_rect->property_outline_what() = 0x0;
-			rec_rect->property_outline_color_rgba() = ARDOUR_UI::config()->canvasvar_TimeAxisFrame.get();
-			rec_rect->property_fill_color_rgba() = fill_color;
-			rec_rect->lower_to_bottom();
-
-			RecBoxInfo recbox;
-			recbox.rectangle = rec_rect;
-			recbox.start = _trackview.session()->transport_frame();
-			recbox.length = 0;
-
-			rec_rects.push_back (recbox);
-
-			screen_update_connection.disconnect();
-			screen_update_connection = ARDOUR_UI::instance()->SuperRapidScreenUpdate.connect (
-					sigc::mem_fun (*this, &AudioStreamView::update_rec_box));
-			rec_updating = true;
-			rec_active = true;
+			create_rec_box(frame_pos, width);
 
 		} else if (rec_active &&
 			   (_trackview.session()->record_status() != Session::Recording ||
@@ -384,7 +314,7 @@ AudioStreamView::rec_peak_range_ready (framepos_t start, framecnt_t cnt, boost::
 void
 AudioStreamView::update_rec_regions (framepos_t start, framecnt_t cnt)
 {
-	if (!Config->get_show_waveforms_while_recording ()) {
+	if (!ARDOUR_UI::config()->get_show_waveforms_while_recording ()) {
 		return;
 	}
 
@@ -397,7 +327,7 @@ AudioStreamView::update_rec_regions (framepos_t start, framecnt_t cnt)
 
 		assert (n < rec_rects.size());
 
-		if (!canvas_item_visible (rec_rects[n].rectangle)) {
+		if (!rec_rects[n].rectangle->visible()) {
 			/* rect already hidden, this region is done */
 			iter = tmp;
 			continue;
@@ -434,9 +364,9 @@ AudioStreamView::update_rec_regions (framepos_t start, framecnt_t cnt)
 					check_record_layers (region, (region->position() - region->start() + start + cnt));
 
 					/* also update rect */
-					ArdourCanvas::SimpleRect * rect = rec_rects[n].rectangle;
-					gdouble xend = _trackview.editor().frame_to_pixel (region->position() + region->length());
-					rect->property_x2() = xend;
+					ArdourCanvas::Rectangle * rect = rec_rects[n].rectangle;
+					gdouble xend = _trackview.editor().sample_to_pixel (region->position() + region->length());
+					rect->set_x1 (xend);
 				}
 
 			} else {
@@ -529,15 +459,15 @@ AudioStreamView::color_handler ()
 {
 	//case cAudioTrackBase:
 	if (_trackview.is_track()) {
-		canvas_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_AudioTrackBase.get();
+		canvas_rect->set_fill_color (ARDOUR_UI::config()->color_mod ("audio track base", "audio track base"));
 	}
 
 	//case cAudioBusBase:
 	if (!_trackview.is_track()) {
 		if (Profile->get_sae() && _trackview.route()->is_master()) {
-			canvas_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_AudioMasterBusBase.get();
+			canvas_rect->set_fill_color (ARDOUR_UI::config()->color ("audio master bus base"));
 		} else {
-			canvas_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_AudioBusBase.get();
+			canvas_rect->set_fill_color (ARDOUR_UI::config()->color_mod ("audio bus base", "audio bus base"));
 		}
 	}
 }

@@ -23,6 +23,8 @@
 
 #include <vector>
 
+#include "evoral/types.hpp"
+
 #include "ardour/ardour.h"
 #include "ardour/region.h"
 
@@ -30,13 +32,8 @@ class XMLNode;
 
 namespace ARDOUR {
 	namespace Properties {
-		/* this is pseudo-property: nothing has this as an actual
-		   property, but it allows us to signal changes to the
-		   MidiModel used by the MidiRegion
-		*/
-		extern PBD::PropertyDescriptor<void*> midi_data;
-		extern PBD::PropertyDescriptor<Evoral::MusicalTime> start_beats;
-		extern PBD::PropertyDescriptor<Evoral::MusicalTime> length_beats;
+		LIBARDOUR_API extern PBD::PropertyDescriptor<Evoral::Beats> start_beats;
+		LIBARDOUR_API extern PBD::PropertyDescriptor<Evoral::Beats> length_beats;
 	}
 }
 
@@ -46,16 +43,18 @@ template<typename Time> class EventSink;
 
 namespace ARDOUR {
 
-class Route;
-class Playlist;
-class Session;
+class MidiChannelFilter;
 class MidiFilter;
 class MidiModel;
 class MidiSource;
 class MidiStateTracker;
+class Playlist;
+class Route;
+class Session;
+
 template<typename T> class MidiRingBuffer;
 
-class MidiRegion : public Region
+class LIBARDOUR_API MidiRegion : public Region
 {
   public:
 	static void make_property_quarks ();
@@ -63,6 +62,7 @@ class MidiRegion : public Region
 	~MidiRegion();
 
 	boost::shared_ptr<MidiRegion> clone (std::string path = std::string()) const;
+	boost::shared_ptr<MidiRegion> clone (boost::shared_ptr<MidiSource>) const;
 
 	boost::shared_ptr<MidiSource> midi_source (uint32_t n=0) const;
 
@@ -75,7 +75,8 @@ class MidiRegion : public Region
 	                    framecnt_t dur,
 	                    uint32_t  chan_n = 0,
 	                    NoteMode  mode = Sustained,
-	                    MidiStateTracker* tracker = 0) const;
+	                    MidiStateTracker* tracker = 0,
+	                    MidiChannelFilter* filter = 0) const;
 
 	framecnt_t master_read_at (MidiRingBuffer<framepos_t>& dst,
 	                           framepos_t position,
@@ -110,8 +111,8 @@ class MidiRegion : public Region
 
   private:
 	friend class RegionFactory;
-	PBD::Property<Evoral::MusicalTime> _start_beats;
-	PBD::Property<Evoral::MusicalTime> _length_beats;
+	PBD::Property<Evoral::Beats> _start_beats;
+	PBD::Property<Evoral::Beats> _length_beats;
 
 	MidiRegion (const SourceList&);
 	MidiRegion (boost::shared_ptr<const MidiRegion>);
@@ -122,7 +123,8 @@ class MidiRegion : public Region
 	                     framecnt_t dur,
 	                     uint32_t chan_n = 0,
 	                     NoteMode mode = Sustained,
-	                     MidiStateTracker* tracker = 0) const;
+	                     MidiStateTracker* tracker = 0,
+	                     MidiChannelFilter* filter = 0) const;
 
 	void register_properties ();
 	void post_set (const PBD::PropertyChange&);
@@ -137,7 +139,6 @@ class MidiRegion : public Region
 
 	void model_changed ();
 	void model_automation_state_changed (Evoral::Parameter const &);
-	void model_contents_changed ();
 
 	void set_start_beats_from_start_frames ();
 	void update_after_tempo_map_change ();

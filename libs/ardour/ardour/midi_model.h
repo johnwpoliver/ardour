@@ -21,17 +21,22 @@
 #ifndef __ardour_midi_model_h__
 #define __ardour_midi_model_h__
 
-#include <queue>
 #include <deque>
+#include <queue>
 #include <utility>
+
 #include <boost/utility.hpp>
 #include <glibmm/threads.h>
+
 #include "pbd/command.h"
-#include "ardour/types.h"
-#include "ardour/midi_buffer.h"
-#include "ardour/midi_ring_buffer.h"
+
 #include "ardour/automatable_sequence.h"
+#include "ardour/libardour_visibility.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
+#include "ardour/types.h"
+#include "ardour/variant.h"
+
 #include "evoral/Note.hpp"
 #include "evoral/Sequence.hpp"
 
@@ -47,16 +52,16 @@ class MidiSource;
  * Because of this MIDI controllers and automatable controllers/widgets/etc
  * are easily interchangeable.
  */
-class MidiModel : public AutomatableSequence<Evoral::MusicalTime> {
+class LIBARDOUR_API MidiModel : public AutomatableSequence<Evoral::Beats> {
 public:
-	typedef Evoral::MusicalTime TimeType;
+	typedef Evoral::Beats TimeType;
 
 	MidiModel (boost::shared_ptr<MidiSource>);
 
 	NoteMode note_mode() const { return (percussive() ? Percussive : Sustained); }
 	void set_note_mode(NoteMode mode) { set_percussive(mode == Percussive); };
 
-	class DiffCommand : public Command {
+	class LIBARDOUR_API DiffCommand : public Command {
 	public:
 
 		DiffCommand (boost::shared_ptr<MidiModel> m, const std::string& name);
@@ -77,7 +82,7 @@ public:
 
 	};
 
-	class NoteDiffCommand : public DiffCommand {
+	class LIBARDOUR_API NoteDiffCommand : public DiffCommand {
 	public:
 
 		NoteDiffCommand (boost::shared_ptr<MidiModel> m, const std::string& name) : DiffCommand (m, name) {}
@@ -101,8 +106,15 @@ public:
 		void remove (const NotePtr note);
 		void side_effect_remove (const NotePtr note);
 
-		void change (const NotePtr note, Property prop, uint8_t new_value);
-		void change (const NotePtr note, Property prop, TimeType new_time);
+		void change (const NotePtr note, Property prop, uint8_t new_value) {
+			change(note, prop, Variant(new_value));
+		}
+
+		void change (const NotePtr note, Property prop, TimeType new_time) {
+			change(note, prop, Variant(new_time));
+		}
+
+		void change (const NotePtr note, Property prop, const Variant& new_value);
 
 		bool adds_or_removes() const {
 			return !_added_notes.empty() || !_removed_notes.empty();
@@ -110,28 +122,29 @@ public:
 
 		NoteDiffCommand& operator+= (const NoteDiffCommand& other);
 
-	private:
+		static Variant get_value (const NotePtr note, Property prop);
+
+		static Variant::Type value_type (Property prop);
+
 		struct NoteChange {
 			NoteDiffCommand::Property property;
 			NotePtr note;
-		        uint32_t note_id; 
-		    
-			union {
-				uint8_t  old_value;
-				TimeType old_time;
-			};
-			union {
-				uint8_t  new_value;
-				TimeType new_time;
-			};
+			uint32_t note_id;
+			Variant old_value;
+			Variant new_value;
 		};
 
-		typedef std::list<NoteChange> ChangeList;
-		ChangeList _changes;
-
+		typedef std::list<NoteChange>                                    ChangeList;
 		typedef std::list< boost::shared_ptr< Evoral::Note<TimeType> > > NoteList;
-		NoteList _added_notes;
-		NoteList _removed_notes;
+
+		const ChangeList& changes()       const { return _changes; }
+		const NoteList&   added_notes()   const { return _added_notes; }
+		const NoteList&   removed_notes() const { return _removed_notes; }
+
+	private:
+		ChangeList _changes;
+		NoteList   _added_notes;
+		NoteList   _removed_notes;
 
 		std::set<NotePtr> side_effect_removals;
 
@@ -143,7 +156,7 @@ public:
 	};
 
 	/* Currently this class only supports changes of sys-ex time, but could be expanded */
-	class SysExDiffCommand : public DiffCommand {
+	class LIBARDOUR_API SysExDiffCommand : public DiffCommand {
 	public:
 		SysExDiffCommand (boost::shared_ptr<MidiModel> m, const XMLNode& node);
 
@@ -178,7 +191,7 @@ public:
 		Change unmarshal_change (XMLNode *);
 	};
 
-	class PatchChangeDiffCommand : public DiffCommand {
+	class LIBARDOUR_API PatchChangeDiffCommand : public DiffCommand {
 	public:
 		PatchChangeDiffCommand (boost::shared_ptr<MidiModel>, const std::string &);
 		PatchChangeDiffCommand (boost::shared_ptr<MidiModel>, const XMLNode &);
@@ -207,19 +220,21 @@ public:
 		struct Change {
 			PatchChangePtr patch;
 			Property       property;
-		        gint           patch_id;
+			gint           patch_id;
+			TimeType       old_time;
 			union {
-				TimeType   old_time;
 				uint8_t    old_channel;
 				int        old_bank;
 				uint8_t    old_program;
 			};
+			TimeType       new_time;
 			union {
 				uint8_t    new_channel;
-				TimeType   new_time;
 				uint8_t    new_program;
 				int        new_bank;
 			};
+
+		    Change() : patch_id (-1) {}
 		};
 
 		typedef std::list<Change> ChangeList;
@@ -241,10 +256,15 @@ public:
 	void apply_command (Session& session, Command* cmd);
 	void apply_command_as_subcommand (Session& session, Command* cmd);
 
-	bool sync_to_source ();
-	bool write_to(boost::shared_ptr<MidiSource> source);
-	bool write_section_to (boost::shared_ptr<MidiSource> source, Evoral::MusicalTime begin = Evoral::MinMusicalTime,
-	Evoral::MusicalTime end = Evoral::MaxMusicalTime);
+	bool sync_to_source (const Glib::Threads::Mutex::Lock& source_lock);
+
+	bool write_to(boost::shared_ptr<MidiSource>     source,
+	              const Glib::Threads::Mutex::Lock& source_lock);
+
+	bool write_section_to(boost::shared_ptr<MidiSource>     source,
+	                      const Glib::Threads::Mutex::Lock& source_lock,
+	                      Evoral::Beats                     begin = Evoral::MinBeats,
+	                      Evoral::Beats                     end   = Evoral::MaxBeats);
 
 	// MidiModel doesn't use the normal AutomationList serialisation code
 	// since controller data is stored in the .mid
@@ -269,6 +289,8 @@ public:
 	void insert_silence_at_start (TimeType);
 	void transpose (TimeType, TimeType, int);
 
+	std::set<WeakNotePtr>& active_notes() { return _active_notes; }
+
 protected:
 	int resolve_overlaps_unlocked (const NotePtr, void* arg = 0);
 
@@ -286,7 +308,6 @@ private:
 
 public:
 	WriteLock edit_lock();
-	WriteLock write_lock();
 
 private:
 	friend class DeltaCommand;
@@ -303,11 +324,11 @@ private:
 	// We cannot use a boost::shared_ptr here to avoid a retain cycle
 	boost::weak_ptr<MidiSource> _midi_source;
 	InsertMergePolicy _insert_merge_policy;
+
+	std::set<WeakNotePtr> _active_notes;
 };
 
 } /* namespace ARDOUR */
-
-/* This is a very long comment and stuff oh my god it's so long what are we going to do oh no oh no*/
 
 #endif /* __ardour_midi_model_h__ */
 

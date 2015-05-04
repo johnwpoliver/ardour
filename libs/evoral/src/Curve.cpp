@@ -22,6 +22,7 @@
 #include <climits>
 #include <cfloat>
 #include <cmath>
+#include <vector>
 
 #include <glibmm/threads.h>
 
@@ -56,8 +57,8 @@ Curve::solve ()
 		   (www.korf.co.uk/spline.pdf) for more details.
 		*/
 
-		double x[npoints];
-		double y[npoints];
+		vector<double> x(npoints);
+		vector<double> y(npoints);
 		uint32_t i;
 		ControlList::EventList::const_iterator xx;
 
@@ -170,7 +171,7 @@ Curve::solve ()
 bool
 Curve::rt_safe_get_vector (double x0, double x1, float *vec, int32_t veclen)
 {
-	Glib::Threads::Mutex::Lock lm(_list.lock(), Glib::Threads::TRY_LOCK);
+	Glib::Threads::RWLock::ReaderLock lm(_list.lock(), Glib::Threads::TRY_LOCK);
 
 	if (!lm.locked()) {
 		return false;
@@ -183,7 +184,7 @@ Curve::rt_safe_get_vector (double x0, double x1, float *vec, int32_t veclen)
 void
 Curve::get_vector (double x0, double x1, float *vec, int32_t veclen)
 {
-	Glib::Threads::Mutex::Lock lm(_list.lock());
+	Glib::Threads::RWLock::ReaderLock lm(_list.lock());
 	_get_vector (x0, x1, vec, veclen);
 }
 
@@ -301,14 +302,11 @@ Curve::_get_vector (double x0, double x1, float *vec, int32_t veclen)
 		if (veclen > 1) {
 			dx_num = hx - lx;
 			dx_den = veclen - 1;
-		}
-
-		if (veclen > 1) {
 			for (int i = 0; i < veclen; ++i) {
 				vec[i] = (lx * (m_num / m_den) + m_num * i * dx_num / (m_den * dx_den)) + c;
 			}
 		} else {
-			vec[0] = lx;
+			vec[0] = lx * (m_num / m_den) + c;
 		}
 
 		return;
@@ -402,15 +400,13 @@ Curve::multipoint_eval (double x)
 		double tdelta = x - before->when;
 		double trange = after->when - before->when;
 
-		return before->value + (vdelta * (tdelta / trange));
-
-#if 0
-		double x2 = x * x;
-		ControlEvent* ev = *range.second;
-
-		return = ev->coeff[0] + (ev->coeff[1] * x) + (ev->coeff[2] * x2) + (ev->coeff[3] * x2 * x);
-#endif
-
+		if (_list.interpolation() == ControlList::Curved && after->coeff) {
+				ControlEvent* ev = after;
+				double x2 = x * x;
+				return ev->coeff[0] + (ev->coeff[1] * x) + (ev->coeff[2] * x2) + (ev->coeff[3] * x2 * x);
+		} else {
+			return before->value + (vdelta * (tdelta / trange));
+		}
 	}
 
 	/* x is a control point in the data */

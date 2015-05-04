@@ -23,6 +23,8 @@
 
 #include <sys/time.h>
 
+#include <glibmm/convert.h>
+
 #include "midi++/port.h"
 
 #include "pbd/compose.h"
@@ -53,10 +55,24 @@
 #include "jog.h"
 #include "meter.h"
 
-using namespace Mackie;
 using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
+using namespace ArdourSurface;
+using namespace Mackie;
+
+#ifndef timeradd /// only avail with __USE_BSD
+#define timeradd(a,b,result)                         \
+  do {                                               \
+    (result)->tv_sec = (a)->tv_sec + (b)->tv_sec;    \
+    (result)->tv_usec = (a)->tv_usec + (b)->tv_usec; \
+    if ((result)->tv_usec >= 1000000)                \
+    {                                                \
+      ++(result)->tv_sec;                            \
+      (result)->tv_usec -= 1000000;                  \
+    }                                                \
+  } while (0)
+#endif
 
 #define ui_context() MackieControlProtocol::instance() /* a UICallback-derived object that specifies the event loop for signal handling */
 
@@ -177,7 +193,7 @@ Strip::set_route (boost::shared_ptr<Route> r, bool /*with_messages*/)
 
 	boost::shared_ptr<Pannable> pannable = _route->pannable();
 
-	if (pannable && pannable->panner()) {
+	if (pannable && _route->panner()) {
 		pannable->pan_azimuth_control->Changed.connect(route_connections, MISSING_INVALIDATOR, boost::bind (&Strip::notify_panner_azi_changed, this, false), ui_context());
 		pannable->pan_width_control->Changed.connect(route_connections, MISSING_INVALIDATOR, boost::bind (&Strip::notify_panner_width_changed, this, false), ui_context());
 	}
@@ -211,7 +227,7 @@ Strip::set_route (boost::shared_ptr<Route> r, bool /*with_messages*/)
 	possible_pot_parameters.clear();
 
 	if (pannable) {
-		boost::shared_ptr<Panner> panner = pannable->panner();
+		boost::shared_ptr<Panner> panner = _route->panner();
 		if (panner) {
 			set<Evoral::Parameter> automatable = panner->what_can_be_automated ();
 			set<Evoral::Parameter>::iterator a;
@@ -291,7 +307,7 @@ Strip::notify_gain_changed (bool force_update)
 		
 		Control* control;
 
-		if (_surface->mcp().flip_mode()) {
+		if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 			control = _vpot;
 		} else {
 			control = _fader;
@@ -304,7 +320,7 @@ Strip::notify_gain_changed (bool force_update)
 
 		if (force_update || normalized_position != _last_gain_position_written) {
 			
-			if (_surface->mcp().flip_mode()) {
+			if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 				if (!control->in_use()) {
 					_surface->write (_vpot->set (normalized_position, true, Pot::wrap));
 				}
@@ -338,7 +354,7 @@ Strip::notify_property_changed (const PropertyChange& what_changed)
 		} else {
 			line1 = PBD::short_version (fullname, 6);
 		}
-
+		
 		_surface->write (display (0, line1));
 	}
 }
@@ -352,7 +368,7 @@ Strip::notify_panner_azi_changed (bool force_update)
 
 		boost::shared_ptr<Pannable> pannable = _route->pannable();
 
-		if (!pannable || !pannable->panner()) {
+		if (!pannable || !_route->panner()) {
 			_surface->write (_vpot->zero());
 			return;
 		}
@@ -391,7 +407,7 @@ Strip::notify_panner_width_changed (bool force_update)
 
 		boost::shared_ptr<Pannable> pannable = _route->pannable();
 
-		if (!pannable || !pannable->panner()) {
+		if (!pannable || !_route->panner()) {
 			_surface->write (_vpot->zero());
 			return;
 		}
@@ -407,7 +423,7 @@ Strip::notify_panner_width_changed (bool force_update)
 		
 		if (force_update || pos != _last_pan_azi_position_written) {
 			
-			if (_surface->mcp().flip_mode()) {
+			if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 
 				if (control == _fader) {
 					if (!control->in_use()) {
@@ -606,8 +622,8 @@ Strip::do_parameter_display (AutomationType type, float val)
 	case PanAzimuthAutomation:
 		if (_route) {
 			boost::shared_ptr<Pannable> p = _route->pannable();
-			if (p && p->panner()) {
-				string str = p->panner()->value_as_string (p->pan_azimuth_control);
+			if (p && _route->panner()) {
+				string str =_route->panner()->value_as_string (p->pan_azimuth_control);
 				_surface->write (display (1, str));
 			}
 		}
@@ -627,12 +643,21 @@ Strip::do_parameter_display (AutomationType type, float val)
 }
 
 void
+Strip::handle_fader_touch (Fader& fader, bool touch_on)
+{
+	if (touch_on) {
+		fader.start_touch (_surface->mcp().transport_frame());
+	} else {
+		fader.stop_touch (_surface->mcp().transport_frame(), false);
+	}
+}
+
+void
 Strip::handle_fader (Fader& fader, float position)
 {
 	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("fader to %1\n", position));
 
 	fader.set_value (position);
-	fader.start_touch (_surface->mcp().transport_frame());
 	queue_display_reset (2000);
 
 	// must echo bytes back to slider now, because
@@ -694,7 +719,7 @@ void
 Strip::update_meter ()
 {
 	if (_meter && _transport_is_rolling && _metering_active) {
-		float dB = const_cast<PeakMeter&> (_route->peak_meter()).peak_power (0);
+		float dB = const_cast<PeakMeter&> (_route->peak_meter()).meter_level (0, MeterPeak);
 		_meter->send_update (*_surface, dB);
 	}
 }
@@ -733,10 +758,16 @@ Strip::display (uint32_t line_number, const std::string& line)
 	// offset (0 to 0x37 first line, 0x38 to 0x6f for second line)
 	retval << (_index * 7 + (line_number * 0x38));
 	
-	// ascii data to display
-	retval << line;
+	// ascii data to display. @param line is UTF-8
+	string ascii = Glib::convert_with_fallback (line, "UTF-8", "ISO-8859-1", "_");
+	string::size_type len = ascii.length();
+	if (len > 6) {
+		ascii = ascii.substr (0, 6);
+		len = 6;
+	}
+	retval << ascii;
 	// pad with " " out to 6 chars
-	for (int i = line.length(); i < 6; ++i) {
+	for (int i = len; i < 6; ++i) {
 		retval << ' ';
 	}
 	
@@ -944,7 +975,7 @@ Strip::next_pot_mode ()
 {
 	vector<Evoral::Parameter>::iterator i;
 
-	if (_surface->mcp().flip_mode()) {
+	if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 		/* do not change vpot mode while in flipped mode */
 		DEBUG_TRACE (DEBUG::MackieControl, "not stepping pot mode - in flip mode\n");
 		_surface->write (display (1, "Flip"));
@@ -997,7 +1028,7 @@ Strip::set_vpot_parameter (Evoral::Parameter p)
 	case PanAzimuthAutomation:
 		pannable = _route->pannable ();
 		if (pannable) {
-			if (_surface->mcp().flip_mode()) {
+			if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 				/* gain to vpot, pan azi to fader */
 				_vpot->set_control (_route->gain_control());
 				control_by_parameter[GainAutomation] = _vpot;
@@ -1025,7 +1056,7 @@ Strip::set_vpot_parameter (Evoral::Parameter p)
 	case PanWidthAutomation:
 		pannable = _route->pannable ();
 		if (pannable) {
-			if (_surface->mcp().flip_mode()) {
+			if (_surface->mcp().flip_mode() != MackieControlProtocol::Normal) {
 				/* gain to vpot, pan width to fader */
 				_vpot->set_control (_route->gain_control());
 				control_by_parameter[GainAutomation] = _vpot;

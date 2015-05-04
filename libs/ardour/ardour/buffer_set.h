@@ -27,9 +27,10 @@
 #include <vector>
 #include "ardour/chan_count.h"
 #include "ardour/data_type.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 
-#if defined VST_SUPPORT || defined LXVST_SUPPORT
+#if defined WINDOWS_VST_SUPPORT || defined LXVST_SUPPORT
 #include "evoral/MIDIEvent.hpp"
 struct _VstEvents;
 typedef struct _VstEvents VstEvents;
@@ -61,7 +62,7 @@ class PortSet;
  * others the form of their output (eg what they did to the BufferSet).
  * Setting the use counts is realtime safe.
  */
-class BufferSet
+class LIBARDOUR_API BufferSet
 {
 public:
 	BufferSet();
@@ -70,7 +71,7 @@ public:
 	void clear();
 
 	void attach_buffers (PortSet& ports);
-	void get_jack_port_addresses (PortSet &, framecnt_t);
+	void get_backend_port_addresses (PortSet &, framecnt_t);
 
 	/* the capacity here is a size_t and has a different interpretation depending
 	   on the DataType of the buffers. for audio, its a frame count. for MIDI
@@ -86,7 +87,6 @@ public:
 	const ChanCount& count() const { return _count; }
 	ChanCount&       count()       { return _count; }
 
-	void set_is_silent(bool yn);
 	void silence (framecnt_t nframes, framecnt_t offset);
 	bool is_mirror() const { return _is_mirror; }
 
@@ -120,11 +120,17 @@ public:
 	 */
 	LV2_Evbuf* get_lv2_midi(bool input, size_t i, bool old_api);
 
+	/** ensure minimum size of LV2 Atom port buffer */
+	void ensure_lv2_bufsize(bool input, size_t i, size_t buffer_capacity);
+
 	/** Flush modified LV2 event output buffers back to Ardour buffers */
 	void flush_lv2_midi(bool input, size_t i);
+
+	/** Forward plugin MIDI output to to Ardour buffers */
+	void forward_lv2_midi(LV2_Evbuf*, size_t, bool purge_ardour_buffer = true);
 #endif
 
-#if defined VST_SUPPORT || defined LXVST_SUPPORT
+#if defined WINDOWS_VST_SUPPORT || defined LXVST_SUPPORT
 	VstEvents* get_vst_midi (size_t);
 #endif
 
@@ -183,7 +189,7 @@ private:
 	LV2Buffers _lv2_buffers;
 #endif
 
-#if defined VST_SUPPORT || defined LXVST_SUPPORT
+#if defined WINDOWS_VST_SUPPORT || defined LXVST_SUPPORT
 	class VSTBuffer {
 	public:
 		VSTBuffer (size_t);

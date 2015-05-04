@@ -21,15 +21,16 @@
 #ifndef __ardour_midi_port_h__
 #define __ardour_midi_port_h__
 
+#include "midi++/parser.h"
+
 #include "ardour/port.h"
-#include "ardour/midi_buffer.h"
-#include "ardour/midi_state_tracker.h"
 
 namespace ARDOUR {
 
+class MidiBuffer;
 class MidiEngine;
 
-class MidiPort : public Port {
+class LIBARDOUR_API MidiPort : public Port {
    public:
 	~MidiPort();
 
@@ -45,29 +46,47 @@ class MidiPort : public Port {
 	void transport_stopped ();
 	void realtime_locate ();
 	void reset ();
-        void require_resolve ();
+	void require_resolve ();
 
 	bool input_active() const { return _input_active; }
 	void set_input_active (bool yn);
 
-	Buffer& get_buffer (pframes_t nframes) {
-		return get_midi_buffer (nframes);
-	}
+	Buffer& get_buffer (pframes_t nframes);
 
 	MidiBuffer& get_midi_buffer (pframes_t nframes);
 
-  protected:
-	friend class AudioEngine;
+	void set_always_parse (bool yn);
+	void set_trace_on (bool yn);
+	
+	MIDI::Parser& self_parser() { return _self_parser; }
 
-	MidiPort (const std::string& name, Flags);
+  protected:
+	friend class PortManager;
+
+	MidiPort (const std::string& name, PortFlags);
 
   private:
 	MidiBuffer* _buffer;
 	bool        _has_been_mixed_down;
 	bool        _resolve_required;
 	bool        _input_active;
+	bool        _always_parse;
+	bool        _trace_on;
+	
+    /* Naming this is tricky. AsyncMIDIPort inherits (for now, aug 2013) from
+     * both MIDI::Port, which has _parser, and this (ARDOUR::MidiPort). We
+     * need parsing support in this object, independently of what the
+     * MIDI::Port/AsyncMIDIPort stuff does. Rather than risk errors coming
+     * from not explicitly naming which _parser we want, we will call this
+     * _self_parser for now.
+     *
+     * Ultimately, MIDI::Port should probably go away or be fully integrated
+     * into this object, somehow.
+     */
 
-	void resolve_notes (void* jack_buffer, MidiBuffer::TimeType when);
+	MIDI::Parser _self_parser;
+
+	void resolve_notes (void* buffer, framepos_t when);
 };
 
 } // namespace ARDOUR

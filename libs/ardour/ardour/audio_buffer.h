@@ -27,23 +27,13 @@
 namespace ARDOUR {
 
 /** Buffer containing audio data. */
-class AudioBuffer : public Buffer
+class LIBARDOUR_API AudioBuffer : public Buffer
 {
 public:
 	AudioBuffer(size_t capacity);
 	~AudioBuffer();
 
-	void silence (framecnt_t len, framecnt_t offset = 0) {
-		if (!_silent) {
-			assert(_capacity > 0);
-			assert(offset + len <= _capacity);
-			memset(_data + offset, 0, sizeof (Sample) * len);
-			if (len == _capacity) {
-				_silent = true;
-			}
-		}
-		_written = true;
-	}
+	void silence (framecnt_t len, framecnt_t offset = 0);
 
 	/** Read @a len frames @a src starting at @a src_offset into self starting at @ dst_offset*/
 	void read_from (const Sample* src, framecnt_t len, framecnt_t dst_offset = 0, framecnt_t src_offset = 0) {
@@ -72,7 +62,7 @@ public:
 		assert(&src != this);
 		assert(_capacity > 0);
 		assert(src.type() == DataType::AUDIO);
-		assert(len <= _capacity);
+		assert(dst_offset + len <= _capacity);
 		assert( src_offset <= ((framecnt_t) src.capacity()-len));
 		memcpy(_data + dst_offset, ((const AudioBuffer&)src).data() + src_offset, sizeof(Sample) * len);
 		if (dst_offset == 0 && src_offset == 0 && len == _capacity) {
@@ -183,7 +173,6 @@ public:
 	void set_data (Sample* data, size_t size) {
 		assert(!_owns_data); // prevent leaks
 		_capacity = size;
-		_size = size;
 		_data = data;
 		_silent = false;
 		_written = false;
@@ -195,8 +184,6 @@ public:
 	 */
 	void resize (size_t nframes);
 
-	bool empty() const { return _size == 0; }
-
 	const Sample* data (framecnt_t offset = 0) const {
 		assert(offset <= _capacity);
 		return _data + offset;
@@ -204,10 +191,11 @@ public:
 
 	Sample* data (framecnt_t offset = 0) {
 		assert(offset <= _capacity);
+		_silent = false;
 		return _data + offset;
 	}
 
-    bool check_silence (pframes_t, pframes_t&) const;
+	bool check_silence (pframes_t, pframes_t&) const;
 
 	void prepare () { _written = false; _silent = false; }
 	bool written() const { return _written; }

@@ -1,10 +1,10 @@
 #include "SequenceTest.hpp"
-#include "evoral/MIDIParameters.hpp"
 #include <cassert>
 
 CPPUNIT_TEST_SUITE_REGISTRATION(SequenceTest);
 
 using namespace std;
+using namespace Evoral;
 
 void
 SequenceTest::createTest ()
@@ -23,14 +23,14 @@ SequenceTest::preserveEventOrderingTest ()
 	seq->start_write();
 
 	for (Notes::const_iterator i = test_notes.begin(); i != test_notes.end(); ++i) {
-		uint8_t buffer[2];
+		uint8_t buffer[3];
 		Event<Time>* event = new Event<Time>(
 				DummyTypeMap::CONTROL, (*i)->on_event().time(), 3, buffer, true
 		);
 
 		event->buffer()[0] = MIDI_CMD_CONTROL;
-		event->buffer()[1] = event->time() / 1000;
-		event->buffer()[2] = event->time() / 1000;
+		event->buffer()[1] = event->time().to_double() / 1000;
+		event->buffer()[2] = event->time().to_double() / 1000;
 
 		boost::shared_ptr<Event<Time> > event_ptr(event);
 
@@ -75,7 +75,7 @@ SequenceTest::iteratorSeekTest ()
 	}
 
 	bool on = true;
-	for (Sequence<Time>::const_iterator i = seq->begin(600); i != seq->end(); ++i) {
+	for (Sequence<Time>::const_iterator i = seq->begin(Evoral::Beats(600)); i != seq->end(); ++i) {
 		if (on) {
 			CPPUNIT_ASSERT(((const MIDIEvent<Time>&)*i).is_note_on());
 			CPPUNIT_ASSERT_EQUAL(i->time(), Time((num_notes + 6) * 100));
@@ -102,11 +102,11 @@ SequenceTest::controlInterpolationTest ()
 	static const uint64_t delay   = 1000;
 	static const uint32_t cc_type = 1;
 
-	boost::shared_ptr<Control> c = seq->control(MIDI::ContinuousController(cc_type, 1, 1), true);
+	boost::shared_ptr<Control> c = seq->control(Parameter(cc_type, 1, 1), true);
 	CPPUNIT_ASSERT(c);
 
-	double min, max, normal;
-	MIDI::controller_range(min, max, normal);
+	double min = 0.0;
+	double max = 127.0;
 
 	// Make a ramp like /\ from min to max and back to min
 	c->set_double(min, 0, true);
@@ -136,7 +136,7 @@ SequenceTest::controlInterpolationTest ()
 		sink.write(i->time(), i->event_type(), i->size(), i->buffer());
 	}
 	CPPUNIT_ASSERT(sink.events.size() == 128 * 2 - 1);
-	Time    last_time  = 0;
+	Time    last_time(0);
 	int16_t last_value = -1;
 	bool    ascending  = true;
 	for (CCTestSink<Time>::Events::const_iterator i = sink.events.begin();

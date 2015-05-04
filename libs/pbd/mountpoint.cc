@@ -17,7 +17,7 @@
 
     $Id$
 */
-
+#ifndef  COMPILER_MSVC
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -94,6 +94,19 @@ mountpoint (string path)
 	return best;
 }
 
+#elif defined(PLATFORM_WINDOWS)
+#include <assert.h>
+string
+mountpoint (string path)
+{
+	/* this function is currently only called from 'old_peak_path()'
+	 * via find_broken_peakfile() - only relevant for loading pre
+	 * libsndfile Ardour 2.0 sessions.
+	 */
+	assert(0);
+	return ""; // TODO ... if needed
+}
+
 #else // !HAVE_GETMNTENT
 
 #include <sys/param.h>
@@ -164,3 +177,7 @@ main (int argc, char *argv[])
 }
 
 #endif // TEST_MOUNTPOINT
+
+#else  // COMPILER_MSVC
+	const char* pbd_mountpoint = "pbd/msvc/mountpoint.cc takes precedence over this file";
+#endif // COMPILER_MSVC

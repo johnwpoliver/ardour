@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 #include "ardour_ui.h"
 #include "audio_clock.h"
@@ -30,24 +31,24 @@
 
 using std::min;
 using std::string;
+using namespace ARDOUR_UI_UTILS;
 
 BigClockWindow::BigClockWindow (AudioClock& c) 
 	: ArdourWindow (_("Big Clock"))
 	, clock (c)
-	, resize_in_progress (false)
-	, original_height (0)
-	, original_width (0)
-	, original_font_size (0)
 {
 	ARDOUR_UI::Clock.connect (sigc::mem_fun (clock, &AudioClock::set));
 
 	clock.set_corner_radius (0.0);
-	clock.mode_changed.connect (sigc::mem_fun (*this, &BigClockWindow::reset_aspect_ratio));
 
 	set_keep_above (true);
 	set_border_width (0);
 	add (clock);
 	clock.show_all ();
+
+	clock.size_request (default_size);
+
+	clock.signal_size_allocate().connect (sigc::mem_fun (*this, &BigClockWindow::clock_size_reallocated));
 }
 
 void
@@ -67,92 +68,27 @@ BigClockWindow::on_key_press_event (GdkEventKey* ev)
 void
 BigClockWindow::on_realize ()
 {
-	int x, y, w, d, h;
-
 	ArdourWindow::on_realize ();
+	/* (try to) ensure that resizing is possible and the window can be moved (and closed) */
+	get_window()->set_decorations (Gdk::DECOR_BORDER | Gdk::DECOR_RESIZEH | Gdk::DECOR_TITLE | Gdk::DECOR_MENU);
 
-	get_window()->set_decorations (Gdk::DECOR_BORDER|Gdk::DECOR_RESIZEH);
-	get_window()->get_geometry (x, y, w, h, d);
-
-	reset_aspect_ratio ();
-
-	original_height = h;
-	original_width = w;
-
-	Pango::FontDescription fd (clock.get_style()->get_font());
-	original_font_size = fd.get_size ();
-
-	if (!fd.get_size_is_absolute ()) {
-		original_font_size /= PANGO_SCALE;
-	}
-}
-
-void
-BigClockWindow::on_size_allocate (Gtk::Allocation& alloc)
-{
-	ArdourWindow::on_size_allocate (alloc);
-
-	if (!resize_in_progress) {
-		Glib::signal_idle().connect (sigc::bind (sigc::mem_fun (*this, &BigClockWindow::text_resizer), 0, 0));
-		resize_in_progress = true;
-	}
-}
-
-void
-BigClockWindow::reset_aspect_ratio ()
-{
-	Gtk::Requisition req;
-
-	clock.size_request (req);
-
-	float aspect = req.width/(float)req.height;
+	/* try to force a fixed aspect ratio so that we don't distort the font */
+	float aspect = default_size.width/(float)default_size.height;
 	Gdk::Geometry geom;
 
 	geom.min_aspect = aspect;
 	geom.max_aspect = aspect;
-	
-	set_geometry_hints (clock, geom, Gdk::HINT_ASPECT);
+	geom.min_width = -1; /* use requisition */
+	geom.min_height = -1; /* use requisition */
+
+	get_window()->set_geometry_hints (geom, Gdk::WindowHints (Gdk::HINT_ASPECT|Gdk::HINT_MIN_SIZE));
 }
 
-bool
-BigClockWindow::text_resizer (int, int)
+void
+BigClockWindow::clock_size_reallocated (Gtk::Allocation& alloc)
 {
-	resize_in_progress = false;
-
-	Glib::RefPtr<Gdk::Window> win = get_window();
-	Pango::FontDescription fd (clock.get_style()->get_font());
-	int current_size = fd.get_size ();
-	int x, y, w, h, d;
-
-	if (!fd.get_size_is_absolute ()) {
-		current_size /= PANGO_SCALE;
-	}
-
-	win->get_geometry (x, y, w, h, d);
-
-	double scale  = min (((double) w / (double) original_width),
-	                     ((double) h / (double) original_height));
-
-	int size = (int) lrintf (original_font_size * scale);
-
-	if (size != current_size) {
-
-		string family = fd.get_family();
-		char buf[family.length()+16];
-		snprintf (buf, family.length()+16, "%s %d", family.c_str(), size);
-
-		try {
-			Pango::FontDescription fd (buf);
-			Glib::RefPtr<Gtk::RcStyle> rcstyle = clock.get_modifier_style ();
-			rcstyle->set_font (fd);
-			clock.modify_style (rcstyle);
-		}
-
-		catch (...) {
-			/* oh well, do nothing */
-		}
-	}
-
-	return false;
+	clock.set_scale ((double) alloc.get_width() / default_size.width,
+			 (double)  alloc.get_height() / default_size.height);
 }
+
 

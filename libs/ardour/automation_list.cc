@@ -25,6 +25,7 @@
 #include <algorithm>
 #include "ardour/automation_list.h"
 #include "ardour/event_type_map.h"
+#include "ardour/parameter_descriptor.h"
 #include "evoral/Curve.hpp"
 #include "pbd/stacktrace.h"
 #include "pbd/enumwriter.h"
@@ -47,8 +48,21 @@ static void dumpit (const AutomationList& al, string prefix = "")
 	cerr << "\n";
 }
 #endif
-AutomationList::AutomationList (Evoral::Parameter id)
-	: ControlList(id)
+AutomationList::AutomationList (const Evoral::Parameter& id, const Evoral::ParameterDescriptor& desc)
+	: ControlList(id, desc)
+{
+	_state = Off;
+	_style = Absolute;
+	g_atomic_int_set (&_touching, 0);
+
+	create_curve_if_necessary();
+
+	assert(_parameter.type() != NullAutomation);
+	AutomationListCreated(this);
+}
+
+AutomationList::AutomationList (const Evoral::Parameter& id)
+	: ControlList(id, ARDOUR::ParameterDescriptor(id))
 {
 	_state = Off;
 	_style = Absolute;
@@ -91,7 +105,7 @@ AutomationList::AutomationList (const AutomationList& other, double start, doubl
  * in or below the AutomationList node.  It is used if @param id is non-null.
  */
 AutomationList::AutomationList (const XMLNode& node, Evoral::Parameter id)
-	: ControlList(id)
+	: ControlList(id, ARDOUR::ParameterDescriptor(id))
 {
 	g_atomic_int_set (&_touching, 0);
 	_state = Off;
@@ -114,9 +128,10 @@ AutomationList::~AutomationList()
 }
 
 boost::shared_ptr<Evoral::ControlList>
-AutomationList::create(Evoral::Parameter id)
+AutomationList::create(const Evoral::Parameter&           id,
+                       const Evoral::ParameterDescriptor& desc)
 {
-	return boost::shared_ptr<Evoral::ControlList>(new AutomationList(id));
+	return boost::shared_ptr<Evoral::ControlList>(new AutomationList(id, desc));
 }
 
 void
@@ -124,6 +139,7 @@ AutomationList::create_curve_if_necessary()
 {
 	switch (_parameter.type()) {
 	case GainAutomation:
+	case TrimAutomation:
 	case PanAzimuthAutomation:
 	case PanElevationAutomation:
 	case PanWidthAutomation:
@@ -137,26 +153,16 @@ AutomationList::create_curve_if_necessary()
 	}
 }
 
-bool
-AutomationList::operator== (const AutomationList& other)
-{
-	return _events == other._events;
-}
-
 AutomationList&
 AutomationList::operator= (const AutomationList& other)
 {
 	if (this != &other) {
 
-		_events.clear ();
 
-		for (const_iterator i = other._events.begin(); i != other._events.end(); ++i) {
-			_events.push_back (new Evoral::ControlEvent (**i));
-		}
-
-		_min_yval = other._min_yval;
-		_max_yval = other._max_yval;
-		_default_value = other._default_value;
+		ControlList::operator= (other);
+		_state = other._state;
+		_style = other._style;
+		_touching = other._touching;
 
 		mark_dirty ();
 		maybe_signal_changed ();
@@ -248,7 +254,7 @@ AutomationList::state (bool full)
 {
 	XMLNode* root = new XMLNode (X_("AutomationList"));
 	char buf[64];
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	root->add_property ("automation-id", EventTypeMap::instance().to_symbol(_parameter));
 
@@ -346,8 +352,6 @@ AutomationList::deserialize_events (const XMLNode& node)
 		fast_simple_add (x, y);
 	}
 
-	thin ();
-
 	if (!ok) {
 		clear ();
 		error << _("automation list: cannot load coordinates from XML, all points ignored") << endmsg;
@@ -364,7 +368,7 @@ AutomationList::deserialize_events (const XMLNode& node)
 int
 AutomationList::set_state (const XMLNode& node, int version)
 {
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 	XMLNodeList nlist = node.children();
 	XMLNode* nsos;
 	XMLNodeIterator niter;
@@ -410,9 +414,7 @@ AutomationList::set_state (const XMLNode& node, int version)
 			fast_simple_add (x, y);
 		}
 
-		thin ();
-
-                thaw ();
+		thaw ();
 
 		return 0;
 	}
@@ -428,7 +430,7 @@ AutomationList::set_state (const XMLNode& node, int version)
 	}
 
 	if ((prop = node.property (X_("automation-id"))) != 0){
-		_parameter = EventTypeMap::instance().new_parameter(prop->value());
+		_parameter = EventTypeMap::instance().from_symbol(prop->value());
 	} else {
 		warning << "Legacy session: automation list has no automation-id property." << endmsg;
 	}

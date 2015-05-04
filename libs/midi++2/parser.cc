@@ -104,8 +104,7 @@ Parser::midi_event_type_name (eventType t)
 	}
 }
 
-Parser::Parser (Port &p) 
-	: _port(p)
+Parser::Parser () 
 {
 	trace_stream = 0;
 	trace_prefix = "";
@@ -133,11 +132,11 @@ Parser::Parser (Port &p)
 Parser::~Parser ()
 
 {
-	delete msgbuf;
+	free (msgbuf);
 }
 
 void
-Parser::trace_event (Parser &, byte *msg, size_t len)
+Parser::trace_event (Parser &, MIDI::byte *msg, size_t len)
 {
 	eventType type;
 	ostream *o;
@@ -659,7 +658,7 @@ Parser::system_msg (unsigned char inbyte)
 }
 
 void 
-Parser::signal (byte *msg, size_t len)
+Parser::signal (MIDI::byte *msg, size_t len)
 {
 	channel_t chan = msg[0]&0xF;
 	int chan_i = chan;
@@ -762,7 +761,7 @@ Parser::signal (byte *msg, size_t len)
 }
 
 bool
-Parser::possible_mmc (byte *msg, size_t msglen)
+Parser::possible_mmc (MIDI::byte *msg, size_t msglen)
 {
 	if (!MachineControl::is_mmc (msg, msglen)) {
 		return false;

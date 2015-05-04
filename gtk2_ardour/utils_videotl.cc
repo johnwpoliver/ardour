@@ -29,15 +29,23 @@
 #include "video_image_frame.h"
 #include "utils_videotl.h"
 
+#ifdef WAF_BUILD
+#include "gtk2ardour-version.h"
+#endif
+
+#ifndef ARDOUR_CURL_TIMEOUT
+#define ARDOUR_CURL_TIMEOUT (60)
+#endif
 #include "i18n.h"
 
 using namespace Gtk;
 using namespace std;
 using namespace PBD;
 using namespace ARDOUR;
+using namespace VideoUtils;
 
 bool
-confirm_video_outfn (std::string outfn, std::string docroot)
+VideoUtils::confirm_video_outfn (std::string outfn, std::string docroot)
 {
 	/* replace docroot's '/' to G_DIR_SEPARATOR for the comparison */
 	size_t look_here = 0;
@@ -77,7 +85,7 @@ confirm_video_outfn (std::string outfn, std::string docroot)
 }
 
 std::string
-video_dest_dir (const std::string sessiondir, const std::string docroot)
+VideoUtils::video_dest_dir (const std::string sessiondir, const std::string docroot)
 {
 	std::string dir = docroot;
 	if (dir.empty() || !dir.compare(0, dir.length(), sessiondir, 0, dir.length())) {
@@ -92,16 +100,20 @@ video_dest_dir (const std::string sessiondir, const std::string docroot)
 }
 
 std::string
-video_get_docroot (ARDOUR::RCConfiguration* config)
+VideoUtils::video_get_docroot (ARDOUR::RCConfiguration* config)
 {
 	if (config->get_video_advanced_setup()) {
 		return config->get_video_server_docroot();
 	}
+#ifndef PLATFORM_WINDOWS
 	return X_("/");
+#else
+	return X_("C:\\");
+#endif
 }
 
 std::string
-video_get_server_url (ARDOUR::RCConfiguration* config)
+VideoUtils::video_get_server_url (ARDOUR::RCConfiguration* config)
 {
 	if (config->get_video_advanced_setup()) {
 		return config->get_video_server_url();
@@ -111,7 +123,7 @@ video_get_server_url (ARDOUR::RCConfiguration* config)
 
 
 std::string
-strip_file_extension (const std::string infile)
+VideoUtils::strip_file_extension (const std::string infile)
 {
 	std::string rv;
 	char *ext, *bn = strdup(infile.c_str());
@@ -126,7 +138,7 @@ strip_file_extension (const std::string infile)
 }
 
 std::string
-get_file_extension (const std::string infile)
+VideoUtils::get_file_extension (const std::string infile)
 {
 	std::string rv = "";
 	char *ext, *bn = strdup(infile.c_str());
@@ -140,15 +152,22 @@ get_file_extension (const std::string infile)
 }
 
 std::string
-video_dest_file (const std::string dir, const std::string infile)
+VideoUtils::video_dest_file (const std::string dir, const std::string infile)
 {
-	return dir + "a3_" + strip_file_extension(Glib::path_get_basename(infile)) + ".avi";
+	return Glib::build_filename(dir, strip_file_extension(Glib::path_get_basename(infile)) + ".avi");
 }
 
 std::string
-video_map_path (std::string server_docroot, std::string filepath)
+VideoUtils::video_map_path (std::string server_docroot, std::string filepath)
 {
 	std::string rv = filepath;
+
+	/* strip docroot */
+	if (server_docroot.length() > 0) {
+		if (rv.compare(0, server_docroot.length(), server_docroot) == 0 ) {
+			rv = rv.substr(server_docroot.length());
+		}
+	}
 
 	/* replace all G_DIR_SEPARATOR with '/' */
 	size_t look_here = 0;
@@ -156,13 +175,6 @@ video_map_path (std::string server_docroot, std::string filepath)
 	while((found_here = rv.find(G_DIR_SEPARATOR, look_here)) != string::npos) {
 		rv.replace(found_here, 1, "/");
 		look_here = found_here + 1;
-	}
-
-	/* strip docroot */
-	if (server_docroot.length() > 0) {
-		if (rv.compare(0, server_docroot.length(), server_docroot) == 0 ) {
-			rv = rv.substr(server_docroot.length());
-		}
 	}
 
 	CURL *curl;
@@ -179,7 +191,7 @@ video_map_path (std::string server_docroot, std::string filepath)
 }
 
 void
-ParseCSV (const std::string &csv, std::vector<std::vector<std::string> > &lines)
+VideoUtils::ParseCSV (const std::string &csv, std::vector<std::vector<std::string> > &lines)
 {
 	bool inQuote(false);
 	bool newLine(false);
@@ -236,7 +248,7 @@ ParseCSV (const std::string &csv, std::vector<std::vector<std::string> > &lines)
 }
 
 bool
-video_query_info (
+VideoUtils::video_query_info (
 		std::string video_server_url,
 		std::string filepath,
 		double &video_file_fps,
@@ -247,52 +259,32 @@ video_query_info (
 {
 	char url[2048];
 
-	snprintf(url, sizeof(url), "%s%sinfo/?file=%s&format=plain"
+	snprintf(url, sizeof(url), "%s%sinfo/?file=%s&format=csv"
 			, video_server_url.c_str()
 			, (video_server_url.length()>0 && video_server_url.at(video_server_url.length()-1) == '/')?"":"/"
 			, filepath.c_str());
-	char *res = curl_http_get(url, NULL);
-	int pid=0;
-	if (res) {
-		char *pch, *pst;
-		int version;
-		pch = strtok_r(res, "\n", &pst);
-		while (pch) {
-#if 0 /* DEBUG */
-			printf("VideoFileInfo [%i] -> '%s'\n", pid, pch);
-#endif
-			switch (pid) {
-				case 0:
-				  version = atoi(pch);
-					if (version != 1) break;
-				case 1:
-				  video_file_fps = atof(pch);
-					break;
-				case 2:
-					video_duration = atoll(pch);
-					break;
-				case 3:
-					video_start_offset = atof(pch);
-					break;
-				case 4:
-					video_aspect_ratio = atof(pch);
-					break;
-				default:
-					break;
-			}
-			pch = strtok_r(NULL,"\n", &pst);
-			++pid;
-		}
-	  free(res);
-	}
-	if (pid!=5) {
+	char *res = a3_curl_http_get(url, NULL);
+	if (!res) {
 		return false;
 	}
+
+	std::vector<std::vector<std::string> > lines;
+	ParseCSV(std::string(res), lines);
+	free(res);
+
+	if (lines.empty() || lines.at(0).empty() || lines.at(0).size() != 6) {
+		return false;
+	}
+	if (atoi(lines.at(0).at(0)) != 1) return false; // version
+	video_start_offset = 0.0;
+	video_aspect_ratio = atof (lines.at(0).at(3));
+	video_file_fps = atof (lines.at(0).at(4));
+	video_duration = atoll(lines.at(0).at(5));
 	return true;
 }
 
 void
-video_draw_cross (Glib::RefPtr<Gdk::Pixbuf> img)
+VideoUtils::video_draw_cross (Glib::RefPtr<Gdk::Pixbuf> img)
 {
 
 	int rowstride = img->get_rowstride();
@@ -314,3 +306,71 @@ video_draw_cross (Glib::RefPtr<Gdk::Pixbuf> img)
 		if (n_channels>3) p[3] = 255;
 	}
 }
+
+
+extern "C" {
+#include <curl/curl.h>
+
+	struct A3MemoryStruct {
+		char *data;
+		size_t size;
+	};
+
+	static size_t
+	WriteMemoryCallback(void *ptr, size_t size, size_t nmemb, void *data) {
+		size_t realsize = size * nmemb;
+		struct A3MemoryStruct *mem = (struct A3MemoryStruct *)data;
+
+		mem->data = (char *)realloc(mem->data, mem->size + realsize + 1);
+		if (mem->data) {
+			memcpy(&(mem->data[mem->size]), ptr, realsize);
+			mem->size += realsize;
+			mem->data[mem->size] = 0;
+		}
+		return realsize;
+	}
+
+	char *a3_curl_http_get (const char *u, int *status) {
+		CURL *curl;
+		CURLcode res;
+		struct A3MemoryStruct chunk;
+		long int httpstatus;
+		if (status) *status = 0;
+		//Glib::usleep(500000); return NULL; // TEST & DEBUG
+		if (strncmp("http://", u, 7)) return NULL;
+
+		chunk.data=NULL;
+		chunk.size=0;
+
+		curl = curl_easy_init();
+		if(!curl) return NULL;
+		curl_easy_setopt(curl, CURLOPT_URL, u);
+
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+		curl_easy_setopt(curl, CURLOPT_USERAGENT, PROGRAM_NAME VERSIONSTRING);
+		curl_easy_setopt(curl, CURLOPT_TIMEOUT, ARDOUR_CURL_TIMEOUT);
+		curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
+#ifdef CURLERRORDEBUG
+		char curlerror[CURL_ERROR_SIZE] = "";
+		curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curlerror);
+#endif
+
+		res = curl_easy_perform(curl);
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpstatus);
+		curl_easy_cleanup(curl);
+		if (status) *status = httpstatus;
+		if (res) {
+#ifdef CURLERRORDEBUG
+			printf("a3_curl_http_get() failed: %s\n", curlerror);
+#endif
+			return NULL;
+		}
+		if (httpstatus != 200) {
+			free (chunk.data);
+			chunk.data = NULL;
+		}
+		return (chunk.data);
+	}
+
+} /* end extern "C" */

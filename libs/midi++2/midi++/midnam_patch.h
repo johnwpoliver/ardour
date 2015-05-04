@@ -21,6 +21,7 @@
 #define MIDNAM_PATCH_H_
 
 #include <algorithm>
+#include <cassert>
 #include <iostream>
 #include <string>
 #include <list>
@@ -30,6 +31,7 @@
 
 #include <stdint.h>
 
+#include "midi++/libmidi_visibility.h"
 #include "midi++/event.h"
 #include "pbd/xml++.h"
 
@@ -39,49 +41,49 @@ namespace MIDI
 namespace Name
 {
 
-struct PatchPrimaryKey
+struct LIBMIDIPP_API PatchPrimaryKey
 {
 public:
-	int bank_number;
-	int program_number;
-
-	PatchPrimaryKey (uint8_t a_program_number = 0, uint16_t a_bank_number = 0) {
-		bank_number = std::min (a_bank_number, (uint16_t) 16384);
-		program_number = std::min (a_program_number, (uint8_t) 127);
-	}
-	
-	bool is_sane() const { 	
-		return ((bank_number >= 0) && (bank_number <= 16384) && 
-			(program_number >=0 ) && (program_number <= 127));
-	}
+	PatchPrimaryKey (int program_num = 0, int bank_num = 0)
+		: _bank(std::max(0, std::min(bank_num, 16383)))
+		, _program(std::max(0, std::min(program_num, 127)))
+	{}
 	
 	inline PatchPrimaryKey& operator=(const PatchPrimaryKey& id) {
-		bank_number = id.bank_number;
-		program_number = id.program_number;
+		_bank    = id._bank;
+		_program = id._program;
 		return *this;
 	}
 	
 	inline bool operator==(const PatchPrimaryKey& id) const {
-		return (bank_number == id.bank_number && program_number == id.program_number);
+		return (_bank    == id._bank &&
+		        _program == id._program);
 	}
 	
-	/**
-	 * obey strict weak ordering or crash in STL containers
-	 */
+	/** Strict weak ordering. */
 	inline bool operator<(const PatchPrimaryKey& id) const {
-		if (bank_number < id.bank_number) {
+		if (_bank < id._bank) {
 			return true;
-		} else if (bank_number == id.bank_number && program_number < id.program_number) {
+		} else if (_bank == id._bank && _program < id._program) {
 			return true;
 		}
-		
 		return false;
 	}
+
+	void set_bank(int bank)       { _bank    = std::max(0, std::min(bank, 16383)); }
+	void set_program(int program) { _program = std::max(0, std::min(program, 127)); }
+
+	inline uint16_t bank()    const { return _bank; }
+	inline uint8_t  program() const { return _program; }
+
+private:
+	uint16_t _bank;
+	uint8_t  _program;
 };
 
 class PatchBank;
 	
-class Patch 
+class LIBMIDIPP_API Patch 
 {
 public:
 
@@ -93,11 +95,11 @@ public:
 	
 	const std::string& note_list_name() const  { return _note_list_name; }
 
-	uint8_t program_number() const     { return _id.program_number; }
-	void set_program_number(uint8_t n) { _id.program_number = n; }
+	uint8_t program_number() const     { return _id.program(); }
+	void set_program_number(uint8_t n) { _id.set_program(n); }
 
-	uint16_t bank_number() const      { return _id.bank_number; }
-	void set_bank_number (uint16_t n) { _id.bank_number = n; }
+	uint16_t bank_number() const      { return _id.bank(); }
+	void set_bank_number (uint16_t n) { _id.set_bank(n); }
 
 	const PatchPrimaryKey&   patch_primary_key()   const { return _id; }
 
@@ -112,7 +114,7 @@ private:
 
 typedef std::list<boost::shared_ptr<Patch> > PatchNameList;
 
-class PatchBank 
+class LIBMIDIPP_API PatchBank 
 {
 public:
 	PatchBank (uint16_t n = 0, std::string a_name = std::string()) : _name(a_name), _number (n) {};
@@ -138,7 +140,7 @@ private:
 	std::string       _patch_list_name;
 };
 
-class ChannelNameSet
+class LIBMIDIPP_API ChannelNameSet
 {
 public:
 	typedef std::set<uint8_t>                                    AvailableForChannels;
@@ -160,12 +162,10 @@ public:
 	}
 	
 	boost::shared_ptr<Patch> find_patch(const PatchPrimaryKey& key) {
-		assert(key.is_sane());
 		return _patch_map[key];
 	}
 	
 	boost::shared_ptr<Patch> previous_patch(const PatchPrimaryKey& key) {
-		assert(key.is_sane());
 		for (PatchList::const_iterator i = _patch_list.begin();
 			 i != _patch_list.end();
 			 ++i) {
@@ -181,7 +181,6 @@ public:
 	}
 	
 	boost::shared_ptr<Patch> next_patch(const PatchPrimaryKey& key) {
-		assert(key.is_sane());
 		for (PatchList::const_iterator i = _patch_list.begin();
 			 i != _patch_list.end();
 			 ++i) {
@@ -221,7 +220,7 @@ private:
 
 std::ostream& operator<< (std::ostream&, const ChannelNameSet&);
 
-class Note
+class LIBMIDIPP_API Note
 {
 public:
 	Note() {}
@@ -241,7 +240,7 @@ private:
 	std::string _name;
 };
 
-class NoteNameList 
+class LIBMIDIPP_API NoteNameList 
 {
 public:
 	typedef std::vector< boost::shared_ptr<Note> > Notes;
@@ -262,7 +261,56 @@ private:
 	Notes       _notes;
 };
 
-class Control
+class LIBMIDIPP_API Value
+{
+public:
+	Value() {}
+	Value(const uint16_t     number,
+	      const std::string& name)
+		: _number(number)
+		, _name(name)
+	{}
+
+	uint16_t           number() const { return _number; }
+	const std::string& name()   const { return _name; }
+
+	void set_number(uint16_t number)       { _number = number; }
+	void set_name(const std::string& name) { _name = name; }
+
+	XMLNode& get_state(void);
+	int      set_state(const XMLTree&, const XMLNode&);
+
+private:
+	uint16_t    _number;
+	std::string _name;
+};
+
+class LIBMIDIPP_API ValueNameList
+{
+public:
+	typedef std::map<uint16_t, boost::shared_ptr<Value> > Values;
+
+	ValueNameList() {}
+	ValueNameList(const std::string& name) : _name(name) {}
+
+	const std::string& name() const { return _name; }
+
+	void set_name(const std::string& name) { _name = name; }
+
+	boost::shared_ptr<const Value> value(uint16_t num) const;
+	boost::shared_ptr<const Value> max_value_below(uint16_t num) const;
+
+	const Values& values() const { return _values; }
+
+	XMLNode& get_state(void);
+	int      set_state(const XMLTree&, const XMLNode&);
+
+private:
+	std::string _name;
+	Values      _values;
+};
+
+class LIBMIDIPP_API Control
 {
 public:
 	Control() {}
@@ -278,6 +326,9 @@ public:
 	uint16_t           number() const { return _number; }
 	const std::string& name()   const { return _name; }
 
+	const std::string&                     value_name_list_name() const { return _value_name_list_name; }
+	boost::shared_ptr<const ValueNameList> value_name_list()      const { return _value_name_list; }
+
 	void set_type(const std::string& type) { _type = type; }
 	void set_number(uint16_t number)       { _number = number; }
 	void set_name(const std::string& name) { _name = name; }
@@ -289,9 +340,12 @@ private:
 	std::string _type;
 	uint16_t    _number;
 	std::string _name;
+
+	std::string                      _value_name_list_name;  ///< Global, UsesValueNameList
+	boost::shared_ptr<ValueNameList> _value_name_list;       ///< Local, ValueNameList
 };
 
-class ControlNameList 
+class LIBMIDIPP_API ControlNameList 
 {
 public:
 	typedef std::map<uint16_t, boost::shared_ptr<Control> > Controls;
@@ -315,7 +369,7 @@ private:
 	Controls    _controls;
 };
 
-class CustomDeviceMode
+class LIBMIDIPP_API CustomDeviceMode
 {
 public:
 	CustomDeviceMode() {};
@@ -341,7 +395,7 @@ private:
 	std::string _channel_name_set_assignments[16];
 };
 
-class MasterDeviceNames
+class LIBMIDIPP_API MasterDeviceNames
 {
 public:
 	typedef std::set<std::string>                                       Models;
@@ -352,6 +406,7 @@ public:
 	typedef std::map<std::string, boost::shared_ptr<ChannelNameSet> >   ChannelNameSets;
 	typedef std::map<std::string, boost::shared_ptr<NoteNameList> >     NoteNameLists;
 	typedef std::map<std::string, boost::shared_ptr<ControlNameList> >  ControlNameLists;
+	typedef std::map<std::string, boost::shared_ptr<ValueNameList> >    ValueNameLists;
 	typedef std::map<std::string, PatchNameList>                        PatchNameLists;
 	
 	MasterDeviceNames() {};
@@ -364,14 +419,21 @@ public:
 	void set_models(const Models some_models) { _models = some_models; }
 
 	const ControlNameLists& controls() const { return _control_name_lists; }
+	const ValueNameLists&   values()   const { return _value_name_lists; }
+
+	boost::shared_ptr<const ValueNameList> value_name_list_by_control(
+		const std::string& mode,
+		uint8_t            channel,
+		uint8_t            number);
 
 	const CustomDeviceModeNames& custom_device_mode_names() const { return _custom_device_mode_names; }
 	
 	boost::shared_ptr<CustomDeviceMode> custom_device_mode_by_name(const std::string& mode_name);
-	boost::shared_ptr<ChannelNameSet> channel_name_set_by_device_mode_and_channel(const std::string& mode, uint8_t channel);
+	boost::shared_ptr<ChannelNameSet> channel_name_set_by_channel(const std::string& mode, uint8_t channel);
 	boost::shared_ptr<Patch> find_patch(const std::string& mode, uint8_t channel, const PatchPrimaryKey& key);
 
 	boost::shared_ptr<ControlNameList> control_name_list(const std::string& name);
+	boost::shared_ptr<ValueNameList>   value_name_list(const std::string& name);
 	boost::shared_ptr<NoteNameList>    note_name_list(const std::string& name);
 	boost::shared_ptr<ChannelNameSet>  channel_name_set(const std::string& name);
 
@@ -393,9 +455,10 @@ private:
 	NoteNameLists         _note_name_lists;
 	PatchNameLists        _patch_name_lists;
 	ControlNameLists      _control_name_lists;
+	ValueNameLists        _value_name_lists;
 };
 
-class MIDINameDocument
+class LIBMIDIPP_API MIDINameDocument
 {
 public:
 	// Maps Model names to MasterDeviceNames
@@ -420,11 +483,10 @@ public:
 private:
 	std::string                   _author;
 	MasterDeviceNamesList         _master_device_names_list;
-	XMLTree                       _document;
 	MasterDeviceNames::Models     _all_models;
 };
 
-extern const char* general_midi_program_names[128]; /* 0 .. 127 */
+LIBMIDIPP_API extern const char* general_midi_program_names[128]; /* 0 .. 127 */
 
 }
 

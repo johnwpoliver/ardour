@@ -28,13 +28,15 @@
 #include "pbd/statefuldestructible.h"
 #include "pbd/xml++.h"
 
+#include "ardour/libardour_visibility.h"
+
 namespace ARDOUR {
 
 /** Represents metadata associated to a Session
  * Metadata can be accessed and edited via this class.
  * Exported files can also be tagged with this data.
  */
-class SessionMetadata : public PBD::StatefulDestructible
+class LIBARDOUR_API SessionMetadata : public PBD::StatefulDestructible
 {
   public:
 	//singleton instance:
@@ -50,6 +52,7 @@ class SessionMetadata : public PBD::StatefulDestructible
 	uint32_t year () const;
 
 	std::string grouping () const;
+	std::string barcode () const;
 	std::string title () const;
 	std::string subtitle () const;
 
@@ -91,6 +94,7 @@ class SessionMetadata : public PBD::StatefulDestructible
 	void set_year (uint32_t);
 
 	void set_grouping (const std::string &);
+	void set_barcode (const std::string &);
 	void set_title (const std::string &);
 	void set_subtitle (const std::string &);
 

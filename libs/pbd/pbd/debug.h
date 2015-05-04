@@ -24,25 +24,30 @@
 
 #include <sstream>
 
+#include "pbd/libpbd_visibility.h"
+#include "pbd/timing.h"
+
 namespace PBD {
 
-	extern uint64_t debug_bits;
-        uint64_t new_debug_bit (const char* name);
-	void debug_print (const char* prefix, std::string str);
-	void set_debug_bits (uint64_t bits);
-	int parse_debug_options (const char* str);
-	void list_debug_options ();
+	LIBPBD_API extern uint64_t debug_bits;
+	LIBPBD_API uint64_t new_debug_bit (const char* name);
+	LIBPBD_API void debug_print (const char* prefix, std::string str);
+	LIBPBD_API void set_debug_bits (uint64_t bits);
+	LIBPBD_API int parse_debug_options (const char* str);
+	LIBPBD_API void list_debug_options ();
 
 	namespace DEBUG {
 
 		/* this namespace is so that we can write DEBUG::bit_name */
                 
-                extern uint64_t Stateful;
-                extern uint64_t Properties;
-		extern uint64_t FileManager;
-		extern uint64_t Pool;
-		extern uint64_t EventLoop;
-		extern uint64_t AbstractUI;
+		LIBPBD_API extern uint64_t Stateful;
+		LIBPBD_API extern uint64_t Properties;
+		LIBPBD_API extern uint64_t FileManager;
+		LIBPBD_API extern uint64_t Pool;
+		LIBPBD_API extern uint64_t EventLoop;
+		LIBPBD_API extern uint64_t AbstractUI;
+		LIBPBD_API extern uint64_t Configuration;
+		extern uint64_t FileUtils;
 	}
 }
 
@@ -52,12 +57,27 @@ namespace PBD {
 #define DEBUG_STR(id) __debug_str ## id
 #define DEBUG_STR_APPEND(id,s) __debug_str ## id << s;
 #define DEBUG_ENABLED(bits) ((bits) & PBD::debug_bits)
+#ifdef PTW32_VERSION
+#define DEBUG_THREAD_SELF pthread_self().p
+#else
+#define DEBUG_THREAD_SELF pthread_self()
+#endif
+
+#define DEBUG_TIMING_START(bits,td) if ((bits) & PBD::debug_bits) { td.start_timing (); }
+#define DEBUG_TIMING_ADD_ELAPSED(bits,td) if ((bits) & PBD::debug_bits) { td.add_elapsed (); }
+#define DEBUG_TIMING_RESET(bits,td) if ((bits) & PBD::debug_bits) { td.reset (); }
+
 #else
 #define DEBUG_TRACE(bits,fmt,...) /*empty*/
 #define DEBUG_STR(a) /* empty */
 #define DEBUG_STR_APPEND(a,b) /* empty */
 #define DEBUG_ENABLED(b) (0)
-#endif
+#define DEBUG_THREAD_SELF 0
 
+#define DEBUG_TIMING_START(bits,td) /*empty*/
+#define DEBUG_TIMING_ADD_ELAPSED(bits,td) /*empty*/
+#define DEBUG_TIMING_RESET(bits,td) /*empty*/
+
+#endif
 #endif /* __libpbd_debug_h__ */
 

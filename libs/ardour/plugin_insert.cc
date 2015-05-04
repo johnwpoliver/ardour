@@ -145,7 +145,7 @@ PluginInsert::output_streams() const
 		ChanCount out = info->n_outputs;
 		// DEBUG_TRACE (DEBUG::Processors, string_compose ("Plugin insert, static output streams = %1 for %2 plugins\n", out, _plugins.size()));
 		out.set_audio (out.n_audio() * _plugins.size());
-		out.set_midi (out.n_midi() * _plugins.size());
+		out.set_midi (out.n_midi() * _plugins.size() + midi_bypass.n_midi());
 		return out;
 	}
 }
@@ -240,23 +240,27 @@ PluginInsert::create_automatable_parameters ()
 
 	set<Evoral::Parameter> a = _plugins.front()->automatable ();
 
-	Plugin::ParameterDescriptor desc;
-
 	for (set<Evoral::Parameter>::iterator i = a.begin(); i != a.end(); ++i) {
 		if (i->type() == PluginAutomation) {
 
 			Evoral::Parameter param(*i);
 
+			ParameterDescriptor desc;
 			_plugins.front()->get_parameter_descriptor(i->id(), desc);
 
-			/* the Parameter belonging to the actual plugin doesn't have its range set
-			   but we want the Controllable related to this Parameter to have those limits.
-			*/
-
-			param.set_range (desc.lower, desc.upper, _plugins.front()->default_value(i->id()), desc.toggled);
 			can_automate (param);
-			boost::shared_ptr<AutomationList> list(new AutomationList(param));
-			add_control (boost::shared_ptr<AutomationControl> (new PluginControl(this, param, list)));
+			boost::shared_ptr<AutomationList> list(new AutomationList(param, desc));
+			add_control (boost::shared_ptr<AutomationControl> (new PluginControl(this, param, desc, list)));
+		} else if (i->type() == PluginPropertyAutomation) {
+			Evoral::Parameter param(*i);
+			const ParameterDescriptor& desc = _plugins.front()->get_property_descriptor(param.id());
+			if (desc.datatype != Variant::NOTHING) {
+				boost::shared_ptr<AutomationList> list;
+				if (Variant::type_is_numeric(desc.datatype)) {
+					list = boost::shared_ptr<AutomationList>(new AutomationList(param, desc));
+				}
+				add_control (boost::shared_ptr<AutomationControl> (new PluginPropertyControl(this, param, desc, list)));
+			}
 		}
 	}
 }
@@ -346,12 +350,14 @@ PluginInsert::connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t of
 		/* XXX: audio only */
 		uint32_t first_idx = in_map.get (DataType::AUDIO, 0, &valid);
 		if (valid) {
-			Sample const * mono = bufs.get_audio (first_idx).data (offset);
 			for (uint32_t i = in_streams.n_audio(); i < natural_input_streams().n_audio(); ++i) {
-				memcpy (bufs.get_audio (in_map.get (DataType::AUDIO, i, &valid)).data (offset), mono, sizeof (Sample) * nframes);
+				bufs.get_audio(in_map.get (DataType::AUDIO, i, &valid)).read_from(bufs.get_audio(first_idx), nframes, offset, offset);
 			}
 		}
 	}
+
+	bufs.set_count(ChanCount::max(bufs.count(), in_streams));
+	bufs.set_count(ChanCount::max(bufs.count(), out_streams));
 
 	/* Note that we've already required that plugins
 	   be able to handle in-place processing.
@@ -366,7 +372,7 @@ PluginInsert::connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t of
 			boost::shared_ptr<AutomationControl> c
 				= boost::dynamic_pointer_cast<AutomationControl>(li->second);
 
-			if (c->parameter().type() == PluginAutomation && c->automation_playback()) {
+			if (c->list() && c->automation_playback()) {
 				bool valid;
 
 				const float val = c->list()->rt_safe_eval (now, valid);
@@ -448,56 +454,48 @@ PluginInsert::silence (framecnt_t nframes)
 	}
 
 	for (Plugins::iterator i = _plugins.begin(); i != _plugins.end(); ++i) {
-		(*i)->connect_and_run (_session.get_silent_buffers ((*i)->get_info()->n_inputs), in_map, out_map, nframes, 0);
+		(*i)->connect_and_run (_session.get_scratch_buffers ((*i)->get_info()->n_inputs, true), in_map, out_map, nframes, 0);
 	}
 }
 
 void
-PluginInsert::run (BufferSet& bufs, framepos_t /*start_frame*/, framepos_t /*end_frame*/, pframes_t nframes, bool)
+PluginInsert::run (BufferSet& bufs, framepos_t start_frame, framepos_t /*end_frame*/, pframes_t nframes, bool)
 {
 	if (_pending_active) {
 		/* run as normal if we are active or moving from inactive to active */
 
-		if (_session.transport_rolling()) {
-			automation_run (bufs, nframes);
+		if (_session.transport_rolling() || _session.bounce_processing()) {
+			automation_run (bufs, start_frame, nframes);
 		} else {
 			connect_and_run (bufs, nframes, 0, false);
 		}
 
 	} else {
+		uint32_t in = input_streams ().n_audio ();
+		uint32_t out = output_streams().n_audio ();
 
-		if (has_no_audio_inputs()) {
+		if (has_no_audio_inputs() || in == 0) {
 
 			/* silence all (audio) outputs. Should really declick
 			 * at the transitions of "active"
 			 */
 
-			uint32_t out = output_streams().n_audio ();
-
 			for (uint32_t n = 0; n < out; ++n) {
 				bufs.get_audio (n).silence (nframes);
 			}
 
-			bufs.count().set_audio (out);
+		} else if (out > in) {
 
-		} else {
+			/* not active, but something has make up for any channel count increase */
 
-			/* does this need to be done with MIDI? it appears not */
-
-			uint32_t in = input_streams ().n_audio ();
-			uint32_t out = output_streams().n_audio ();
-
-			if (out > in) {
-
-				/* not active, but something has make up for any channel count increase */
-				
-				for (uint32_t n = out - in; n < out; ++n) {
-					memcpy (bufs.get_audio (n).data(), bufs.get_audio(in - 1).data(), sizeof (Sample) * nframes);
-				}
+			// TODO: option round-robin (n % in) or silence additional buffers ??
+			// for now , simply replicate last buffer
+			for (uint32_t n = in; n < out; ++n) {
+				bufs.get_audio(n).read_from(bufs.get_audio(in - 1), nframes);
 			}
-
-			bufs.count().set_audio (out);
 		}
+
+		bufs.count().set_audio (out);
 	}
 
 	_active = _pending_active;
@@ -506,7 +504,6 @@ PluginInsert::run (BufferSet& bufs, framepos_t /*start_frame*/, framepos_t /*end
 	 * all buffers appropriately.
 	 */
 
-	bufs.set_is_silent (false);
 }
 
 void
@@ -545,10 +542,10 @@ PluginInsert::get_parameter (Evoral::Parameter param)
 }
 
 void
-PluginInsert::automation_run (BufferSet& bufs, pframes_t nframes)
+PluginInsert::automation_run (BufferSet& bufs, framepos_t start, pframes_t nframes)
 {
 	Evoral::ControlEvent next_event (0, 0.0f);
-	framepos_t now = _session.transport_frame ();
+	framepos_t now = start;
 	framepos_t end = now + nframes;
 	framecnt_t offset = 0;
 
@@ -598,7 +595,7 @@ PluginInsert::default_parameter_value (const Evoral::Parameter& param)
 	if (_plugins.empty()) {
 		fatal << _("programming error: ") << X_("PluginInsert::default_parameter_value() called with no plugin")
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	return _plugins[0]->default_value (param.id());
@@ -644,7 +641,7 @@ PluginInsert::plugin_factory (boost::shared_ptr<Plugin> other)
 	fatal << string_compose (_("programming error: %1"),
 			  X_("unknown plugin type in PluginInsert::plugin_factory"))
 	      << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return boost::shared_ptr<Plugin> ((Plugin*) 0);
 }
 
@@ -652,6 +649,8 @@ bool
 PluginInsert::configure_io (ChanCount in, ChanCount out)
 {
 	Match old_match = _match;
+	ChanCount old_in = input_streams ();
+	ChanCount old_out = output_streams ();
 
 	/* set the matching method and number of plugins that we will use to meet this configuration */
 	_match = private_can_support_io_configuration (in, out);
@@ -659,9 +658,12 @@ PluginInsert::configure_io (ChanCount in, ChanCount out)
 		return false;
 	}
 
-	/* a signal needs emitting if we start or stop splitting */
-	if (old_match.method != _match.method && (old_match.method == Split || _match.method == Split)) {
-		SplittingChanged (); /* EMIT SIGNAL */
+	if (  (old_match.method != _match.method && (old_match.method == Split || _match.method == Split))
+			|| old_in != in
+			|| old_out != out
+			)
+	{
+		PluginIoReConfigure (); /* EMIT SIGNAL */
 	}
 
 	/* configure plugins */
@@ -704,7 +706,7 @@ PluginInsert::configure_io (ChanCount in, ChanCount out)
  *  @return true if the given IO configuration can be supported.
  */
 bool
-PluginInsert::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
+PluginInsert::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 {
 	return private_can_support_io_configuration (in, out).method != Impossible;
 }
@@ -714,9 +716,15 @@ PluginInsert::can_support_io_configuration (const ChanCount& in, ChanCount& out)
  *  it can be.
  */
 PluginInsert::Match
-PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCount& out) const
+PluginInsert::private_can_support_io_configuration (ChanCount const & inx, ChanCount& out)
 {
+	if (_plugins.empty()) {
+		return Match();
+	}
+
 	PluginInfoPtr info = _plugins.front()->get_info();
+	ChanCount in; in += inx;
+	midi_bypass.reset();
 
 	if (info->reconfigurable_io()) {
 		/* Plugin has flexible I/O, so delegate to it */
@@ -731,6 +739,15 @@ PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCo
 	ChanCount inputs  = info->n_inputs;
 	ChanCount outputs = info->n_outputs;
 
+	if (in.get(DataType::MIDI) == 1 && outputs.get(DataType::MIDI) == 0) {
+		DEBUG_TRACE ( DEBUG::Processors, string_compose ("bypassing midi-data around %1\n", name()));
+		midi_bypass.set(DataType::MIDI, 1);
+	}
+	if (in.get(DataType::MIDI) == 1 && inputs.get(DataType::MIDI) == 0) {
+		DEBUG_TRACE ( DEBUG::Processors, string_compose ("hiding midi-port from plugin %1\n", name()));
+		in.set(DataType::MIDI, 0);
+	}
+
 	bool no_inputs = true;
 	for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
 		if (inputs.get (*t) != 0) {
@@ -741,13 +758,13 @@ PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCo
 
 	if (no_inputs) {
 		/* no inputs so we can take any input configuration since we throw it away */
-		out = outputs;
+		out = outputs + midi_bypass;
 		return Match (NoInputs, 1);
 	}
 
 	/* Plugin inputs match requested inputs exactly */
 	if (inputs == in) {
-		out = outputs;
+		out = outputs + midi_bypass;
 		return Match (ExactMatch, 1);
 	}
 
@@ -789,6 +806,7 @@ PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCo
 		for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
 			out.set (*t, outputs.get(*t) * f);
 		}
+		out += midi_bypass;
 		return Match (Replicate, f);
 	}
 
@@ -812,7 +830,7 @@ PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCo
 	}
 
 	if (can_split) {
-		out = outputs;
+		out = outputs + midi_bypass;
 		return Match (Split, 1);
 	}
 
@@ -836,10 +854,11 @@ PluginInsert::private_can_support_io_configuration (ChanCount const & in, ChanCo
 	}
 
 	if (could_hide && !cannot_hide) {
-		out = outputs;
+		out = outputs + midi_bypass;
 		return Match (Hide, 1, hide_channels);
 	}
 
+	midi_bypass.reset();
 	return Match (Impossible, 0);
 }
 
@@ -882,7 +901,12 @@ PluginInsert::set_control_ids (const XMLNode& node, int version)
 
 			if ((prop = (*iter)->property (X_("parameter"))) != 0) {
 				uint32_t p = atoi (prop->value());
+
+				/* this may create the new controllable */
+
 				boost::shared_ptr<Evoral::Control> c = control (Evoral::Parameter (PluginAutomation, 0, p));
+
+#ifndef NO_PLUGIN_STATE
 				if (!c) {
 					continue;
 				}
@@ -890,6 +914,7 @@ PluginInsert::set_control_ids (const XMLNode& node, int version)
 				if (ac) {
 					ac->set_state (**iter, version);
 				}
+#endif
 			}
 		}
 	}
@@ -955,6 +980,22 @@ PluginInsert::set_state(const XMLNode& node, int version)
 
 	boost::shared_ptr<Plugin> plugin = find_plugin (_session, prop->value(), type);
 
+	/* treat linux and windows VST plugins equivalent if they have the same uniqueID
+	 * allow to move sessions windows <> linux */
+#ifdef LXVST_SUPPORT
+	if (plugin == 0 && type == ARDOUR::Windows_VST) {
+		type = ARDOUR::LXVST;
+		plugin = find_plugin (_session, prop->value(), type);
+	}
+#endif
+
+#ifdef WINDOWS_VST_SUPPORT
+	if (plugin == 0 && type == ARDOUR::LXVST) {
+		type = ARDOUR::Windows_VST;
+		plugin = find_plugin (_session, prop->value(), type);
+	}
+#endif
+
 	if (plugin == 0) {
 		error << string_compose(
 			_("Found a reference to a plugin (\"%1\") that is unknown.\n"
@@ -1004,8 +1045,6 @@ PluginInsert::set_state(const XMLNode& node, int version)
 		*/
 
 		if ((*niter)->name() == plugin->state_node_name()) {
-
-			plugin->set_state (**niter, version);
 
 			for (Plugins::iterator i = _plugins.begin(); i != _plugins.end(); ++i) {
 				(*i)->set_state (**niter, version);
@@ -1102,7 +1141,7 @@ PluginInsert::set_parameter_state_2X (const XMLNode& node, int version)
 					float min_y = c->alist()->get_min_y ();
 					float max_y = c->alist()->get_max_y ();
 
-					Plugin::ParameterDescriptor desc;
+					ParameterDescriptor desc;
 					_plugins.front()->get_parameter_descriptor (port_id, desc);
 
 					if (min_y == FLT_MIN) {
@@ -1130,11 +1169,15 @@ PluginInsert::set_parameter_state_2X (const XMLNode& node, int version)
 string
 PluginInsert::describe_parameter (Evoral::Parameter param)
 {
-	if (param.type() != PluginAutomation) {
-		return Automatable::describe_parameter(param);
+	if (param.type() == PluginAutomation) {
+		return _plugins[0]->describe_parameter (param);
+	} else if (param.type() == PluginPropertyAutomation) {
+		boost::shared_ptr<AutomationControl> c(automation_control(param));
+		if (c && !c->desc().label.empty()) {
+			return c->desc().label;
+		}
 	}
-
-	return _plugins[0]->describe_parameter (param);
+	return Automatable::describe_parameter(param);
 }
 
 ARDOUR::framecnt_t
@@ -1153,19 +1196,23 @@ PluginInsert::type ()
        return plugin()->get_info()->type;
 }
 
-PluginInsert::PluginControl::PluginControl (PluginInsert* p, const Evoral::Parameter &param, boost::shared_ptr<AutomationList> list)
-	: AutomationControl (p->session(), param, list, p->describe_parameter(param))
+PluginInsert::PluginControl::PluginControl (PluginInsert*                     p,
+                                            const Evoral::Parameter&          param,
+                                            const ParameterDescriptor&        desc,
+                                            boost::shared_ptr<AutomationList> list)
+	: AutomationControl (p->session(), param, desc, list, p->describe_parameter(param))
 	, _plugin (p)
 {
-	Plugin::ParameterDescriptor desc;
-	boost::shared_ptr<Plugin> plugin = p->plugin (0);
-	
-	alist()->reset_default (plugin->default_value (param.id()));
+	if (alist()) {
+		alist()->reset_default (desc.normal);
+		if (desc.toggled) {
+			list->set_interpolation(Evoral::ControlList::Discrete);
+		}
+	}
 
-	plugin->get_parameter_descriptor (param.id(), desc);
-	_logarithmic = desc.logarithmic;
-	_sr_dependent = desc.sr_dependent;
-	_toggled = desc.toggled;
+	if (desc.toggled) {
+		set_flags(Controllable::Toggle);
+	}
 }
 
 /** @param val `user' value */
@@ -1189,9 +1236,11 @@ PluginInsert::PluginControl::set_value (double user_val)
 double
 PluginInsert::PluginControl::internal_to_interface (double val) const
 {
-	if (_logarithmic) {
+	val = Controllable::internal_to_interface(val);
+	
+	if (_desc.logarithmic) {
 		if (val > 0) {
-			val = log (val);
+			val = pow (val, 1/1.5);
 		} else {
 			val = 0;
 		}
@@ -1203,10 +1252,16 @@ PluginInsert::PluginControl::internal_to_interface (double val) const
 double
 PluginInsert::PluginControl::interface_to_internal (double val) const
 {
-	if (_logarithmic) {
-		val = exp (val);
+	if (_desc.logarithmic) {
+		if (val <= 0) {
+			val = 0;
+		} else {
+			val = pow (val, 1.5);
+		}
 	}
 
+	val = Controllable::interface_to_internal(val);
+	
 	return val;
 }
 
@@ -1228,6 +1283,62 @@ PluginInsert::PluginControl::get_value () const
 {
 	/* FIXME: probably should be taking out some lock here.. */
 	return _plugin->get_parameter (_list->parameter());
+}
+
+PluginInsert::PluginPropertyControl::PluginPropertyControl (PluginInsert*                     p,
+                                                            const Evoral::Parameter&          param,
+                                                            const ParameterDescriptor&        desc,
+                                                            boost::shared_ptr<AutomationList> list)
+	: AutomationControl (p->session(), param, desc, list)
+	, _plugin (p)
+{
+	if (alist()) {
+		alist()->set_yrange (desc.lower, desc.upper);
+		alist()->reset_default (desc.normal);
+	}
+
+	if (desc.toggled) {
+		set_flags(Controllable::Toggle);
+	}
+}
+
+void
+PluginInsert::PluginPropertyControl::set_value (double user_val)
+{
+	/* Old numeric set_value(), coerce to appropriate datatype if possible.
+	   This is lossy, but better than nothing until Ardour's automation system
+	   can handle various datatypes all the way down. */
+	const Variant value(_desc.datatype, user_val);
+	if (value.type() == Variant::NOTHING) {
+		error << "set_value(double) called for non-numeric property" << endmsg;
+		return;
+	}
+
+	for (Plugins::iterator i = _plugin->_plugins.begin(); i != _plugin->_plugins.end(); ++i) {
+		(*i)->set_property(_list->parameter().id(), value);
+	}
+
+	_value = value;
+	AutomationControl::set_value(user_val);
+}
+
+XMLNode&
+PluginInsert::PluginPropertyControl::get_state ()
+{
+	stringstream ss;
+
+	XMLNode& node (AutomationControl::get_state());
+	ss << parameter().id();
+	node.add_property (X_("property"), ss.str());
+	node.remove_property (X_("value"));
+
+	return node;
+}
+
+double
+PluginInsert::PluginPropertyControl::get_value () const
+{
+	return _value.to_double();
 }
 
 boost::shared_ptr<Plugin>
@@ -1260,7 +1371,7 @@ PluginInsert::collect_signal_for_analysis (framecnt_t nframes)
 void
 PluginInsert::add_plugin (boost::shared_ptr<Plugin> plugin)
 {
-	plugin->set_insert_info (this);
+	plugin->set_insert_id (this->id());
 	
 	if (_plugins.empty()) {
                 /* first (and probably only) plugin instance - connect to relevant signals 

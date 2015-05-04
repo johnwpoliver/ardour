@@ -27,18 +27,18 @@ class Source;
 class Location;
 
 /** Public interface to a Diskstream */
-class PublicDiskstream
+class LIBARDOUR_API PublicDiskstream
 {
 public:
 	virtual ~PublicDiskstream() {}
 
 	virtual boost::shared_ptr<Playlist> playlist () = 0;
-	virtual void request_jack_monitors_input (bool) = 0;
-	virtual void ensure_jack_monitors_input (bool) = 0;
+	virtual void request_input_monitoring (bool) = 0;
+	virtual void ensure_input_monitoring (bool) = 0;
 	virtual bool destructive () const = 0;
 	virtual std::list<boost::shared_ptr<Source> > & last_capture_sources () = 0;
 	virtual void set_capture_offset () = 0;
-	virtual std::list<boost::shared_ptr<Source> > steal_write_sources () = 0;
+	virtual std::string steal_write_source_name () = 0;
 	virtual void reset_write_sources (bool, bool force = false) = 0;
 	virtual float playback_buffer_load () const = 0;
 	virtual float capture_buffer_load () const = 0;
@@ -60,7 +60,7 @@ public:
 	virtual void transport_stopped_wallclock (struct tm &, time_t, bool) = 0;
 	virtual bool pending_overwrite () const = 0;
 	virtual double speed () const = 0;
-	virtual void prepare_to_stop (framepos_t) = 0;
+	virtual void prepare_to_stop (framepos_t,framepos_t) = 0;
 	virtual void set_slaved (bool) = 0;
 	virtual ChanCount n_channels () = 0;
 	virtual framepos_t get_capture_start_frame (uint32_t n = 0) const = 0;

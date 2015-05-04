@@ -22,8 +22,8 @@
 #include <iostream>
 #include <algorithm>
 
-#include "evoral/EventRingBuffer.hpp"
-
+#include "ardour/event_ring_buffer.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/midi_state_tracker.h"
 
@@ -40,41 +40,23 @@ class MidiBuffer;
  * [timestamp][type][size][size bytes of raw MIDI][timestamp][type][size](etc...)
  */
 template<typename T>
-class MidiRingBuffer : public Evoral::EventRingBuffer<T> {
+class /*LIBARDOUR_API*/ MidiRingBuffer : public EventRingBuffer<T> {
 public:
-	/** @param size Size in bytes.
-	 */
-	MidiRingBuffer(size_t size)
-		: Evoral::EventRingBuffer<T>(size) {}
+	/** @param size Size in bytes. */
+	MidiRingBuffer(size_t size) : EventRingBuffer<T>(size) {}
 
 	inline bool read_prefix(T* time, Evoral::EventType* type, uint32_t* size);
 	inline bool read_contents(uint32_t size, uint8_t* buf);
 
 	size_t read(MidiBuffer& dst, framepos_t start, framepos_t end, framecnt_t offset=0, bool stop_on_overflow_in_destination=false);
+	size_t skip_to(framepos_t start);
 
 	void dump(std::ostream& dst);
 	void flush (framepos_t start, framepos_t end);
 
 	void reset_tracker ();
-        void loop_resolve (MidiBuffer& dst, framepos_t);
-
-protected:
-	inline bool is_channel_event(uint8_t event_type_byte) {
-		// mask out channel information
-		event_type_byte &= 0xF0;
-		// midi channel events range from 0x80 to 0xE0
-		return (0x80 <= event_type_byte) && (event_type_byte <= 0xE0);
-	}
-
-	inline bool is_note_on(uint8_t event_type_byte) {
-		// mask out channel information
-		return (event_type_byte & 0xF0) == MIDI_CMD_NOTE_ON;
-	}
-
-	inline bool is_note_off(uint8_t event_type_byte) {
-		// mask out channel information
-		return (event_type_byte & 0xF0) == MIDI_CMD_NOTE_OFF;
-	}
+	void resolve_tracker (MidiBuffer& dst, framepos_t);
+	void resolve_tracker (Evoral::EventSink<framepos_t>& dst, framepos_t);
 
 private:
 	MidiStateTracker _tracker;

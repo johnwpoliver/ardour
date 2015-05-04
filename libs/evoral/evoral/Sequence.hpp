@@ -26,15 +26,17 @@
 #include <utility>
 #include <boost/shared_ptr.hpp>
 #include <glibmm/threads.h>
+
+#include "evoral/visibility.h"
 #include "evoral/types.hpp"
 #include "evoral/Note.hpp"
-#include "evoral/Parameter.hpp"
 #include "evoral/ControlSet.hpp"
 #include "evoral/ControlList.hpp"
 #include "evoral/PatchChange.hpp"
 
 namespace Evoral {
 
+class Parameter;
 class TypeMap;
 template<typename Time> class EventSink;
 template<typename Time> class Note;
@@ -42,7 +44,7 @@ template<typename Time> class Event;
 
 /** An iterator over (the x axis of) a 2-d double coordinate space.
  */
-class ControlIterator {
+class /*LIBEVORAL_API*/ ControlIterator {
 public:
 	ControlIterator(boost::shared_ptr<const ControlList> al, double ax, double ay)
 		: list(al)
@@ -60,7 +62,7 @@ public:
  * notes (instead of just unassociated note on/off events) and controller data.
  * Controller data is represented as a list of time-stamped float values. */
 template<typename Time>
-class Sequence : virtual public ControlSet {
+class LIBEVORAL_API Sequence : virtual public ControlSet {
 public:
 	Sequence(const TypeMap& type_map);
 	Sequence(const Sequence<Time>& other);
@@ -80,14 +82,15 @@ protected:
 
 public:
 
-	typedef typename boost::shared_ptr<Evoral::Note<Time> >  NotePtr;
-	typedef typename boost::shared_ptr<const Evoral::Note<Time> >  constNotePtr;
+	typedef typename boost::shared_ptr<Evoral::Note<Time> >       NotePtr;
+	typedef typename boost::weak_ptr<Evoral::Note<Time> >         WeakNotePtr;
+	typedef typename boost::shared_ptr<const Evoral::Note<Time> > constNotePtr;
 
 	typedef boost::shared_ptr<Glib::Threads::RWLock::ReaderLock> ReadLock;
-	typedef boost::shared_ptr<WriteLockImpl>            WriteLock;
+	typedef boost::shared_ptr<WriteLockImpl>                     WriteLock;
 
 	virtual ReadLock  read_lock() const { return ReadLock(new Glib::Threads::RWLock::ReaderLock(_lock)); }
-        virtual WriteLock write_lock()      { return WriteLock(new WriteLockImpl(_lock, _control_lock)); }
+	virtual WriteLock write_lock()      { return WriteLock(new WriteLockImpl(_lock, _control_lock)); }
 
 	void clear();
 
@@ -103,9 +106,11 @@ public:
 		ResolveStuckNotes
 	};
 
-	void end_write (StuckNoteOption, Time when = 0);
+	void end_write (StuckNoteOption, Time when = Time());
 
 	void append(const Event<Time>& ev, Evoral::event_id_t evid);
+
+	const TypeMap& type_map() const { return _type_map; }
 
 	inline size_t n_notes() const { return _notes.size(); }
 	inline bool   empty()   const { return _notes.empty() && _sysexes.empty() && _patch_changes.empty() && ControlSet::controls_empty(); }
@@ -125,7 +130,7 @@ public:
 	struct EarlierNoteComparator {
 		inline bool operator()(const boost::shared_ptr< const Note<Time> > a,
 		                       const boost::shared_ptr< const Note<Time> > b) const {
-			return musical_time_less_than (a->time(), b->time());
+			return a->time() < b->time();
 		}
 	};
 
@@ -133,7 +138,6 @@ public:
 		typedef const Note<Time>* value_type;
 		inline bool operator()(const boost::shared_ptr< const Note<Time> > a,
 		                       const boost::shared_ptr< const Note<Time> > b) const {
-			return musical_time_greater_than (a->time(), b->time());
 			return a->time() > b->time();
 		}
 	};
@@ -142,7 +146,7 @@ public:
 		typedef const Note<Time>* value_type;
 		inline bool operator()(const boost::shared_ptr< const Note<Time> > a,
 		                       const boost::shared_ptr< const Note<Time> > b) const {
-			return musical_time_greater_than (a->end_time(), b->end_time());
+			return a->end_time() > b->end_time();
 		}
 	};
 
@@ -179,14 +183,14 @@ public:
 	OverlapPitchResolution overlap_pitch_resolution() const { return _overlap_pitch_resolution; }
 	void set_overlap_pitch_resolution(OverlapPitchResolution opr);
 
-	void set_notes (const Sequence<Time>::Notes& n);
+	void set_notes (const typename Sequence<Time>::Notes& n);
 
 	typedef boost::shared_ptr< Event<Time> > SysExPtr;
 	typedef boost::shared_ptr<const Event<Time> > constSysExPtr;
 
 	struct EarlierSysExComparator {
 		inline bool operator() (constSysExPtr a, constSysExPtr b) const {
-			return musical_time_less_than (a->time(), b->time());
+			return a->time() < b->time();
 		}
 	};
 
@@ -199,7 +203,7 @@ public:
 
 	struct EarlierPatchChangeComparator {
 		inline bool operator() (constPatchChangePtr a, constPatchChangePtr b) const {
-			return musical_time_less_than (a->time(), b->time());
+			return a->time() < b->time();
 		}
 	};
 
@@ -214,16 +218,18 @@ private:
 public:
 
 	/** Read iterator */
-	class const_iterator {
+	class LIBEVORAL_API const_iterator {
 	public:
 		const_iterator();
-		const_iterator(const Sequence<Time>& seq, Time t, bool, std::set<Evoral::Parameter> const &);
-		~const_iterator();
+		const_iterator(const Sequence<Time>&              seq,
+		               Time                               t,
+		               bool                               force_discrete,
+		               const std::set<Evoral::Parameter>& filtered,
+		               const std::set<WeakNotePtr>*       active_notes=NULL);
 
 		inline bool valid() const { return !_is_end && _event; }
-		//inline bool locked() const { return _locked; }
 
-		void invalidate();
+		void invalidate(std::set<WeakNotePtr>* notes);
 
 		const Event<Time>& operator*()  const { return *_event;  }
 		const boost::shared_ptr< Event<Time> > operator->() const  { return _event; }
@@ -238,6 +244,9 @@ public:
 
 	private:
 		friend class Sequence<Time>;
+
+		Time choose_next(Time earliest_t);
+		void set_event();
 
 		typedef std::vector<ControlIterator> ControlIterators;
 		enum MIDIMessageType { NIL, NOTE_ON, NOTE_OFF, CONTROL, SYSEX, PATCH_CHANGE };
@@ -261,17 +270,24 @@ public:
 	};
 
 	const_iterator begin (
-		Time t = 0,
-		bool force_discrete = false,
-		std::set<Evoral::Parameter> const & f = std::set<Evoral::Parameter> ()) const {
-		return const_iterator (*this, t, force_discrete, f);
+		Time                               t              = Time(),
+		bool                               force_discrete = false,
+		const std::set<Evoral::Parameter>& f              = std::set<Evoral::Parameter>(),
+		const std::set<WeakNotePtr>*       active_notes   = NULL) const {
+		return const_iterator (*this, t, force_discrete, f, active_notes);
 	}
 
 	const const_iterator& end() const { return _end_iter; }
 
+	// CONST iterator implementations (x3)
 	typename Notes::const_iterator note_lower_bound (Time t) const;
 	typename PatchChanges::const_iterator patch_change_lower_bound (Time t) const;
 	typename SysExes::const_iterator sysex_lower_bound (Time t) const;
+
+	// NON-CONST iterator implementations (x3)
+	typename Notes::iterator note_lower_bound (Time t);
+	typename PatchChanges::iterator patch_change_lower_bound (Time t);
+	typename SysExes::iterator sysex_lower_bound (Time t);
 
 	bool control_to_midi_event(boost::shared_ptr< Event<Time> >& ev,
 	                           const ControlIterator&            iter) const;
@@ -319,11 +335,11 @@ private:
 	bool overlaps_unlocked (const NotePtr& ev, const NotePtr& ignore_this_note) const;
 	bool contains_unlocked (const NotePtr& ev) const;
 
-	void append_note_on_unlocked (NotePtr, Evoral::event_id_t);
-	void append_note_off_unlocked(NotePtr);
+	void append_note_on_unlocked(const MIDIEvent<Time>& event, Evoral::event_id_t);
+	void append_note_off_unlocked(const MIDIEvent<Time>& event);
 	void append_control_unlocked(const Parameter& param, Time time, double value, Evoral::event_id_t);
 	void append_sysex_unlocked(const MIDIEvent<Time>& ev, Evoral::event_id_t);
-	void append_patch_change_unlocked (const PatchChange<Time>&, Evoral::event_id_t);
+	void append_patch_change_unlocked(const PatchChange<Time>&, Evoral::event_id_t);
 
 	void get_notes_by_pitch (Notes&, NoteOperator, uint8_t val, int chan_mask = 0) const;
 	void get_notes_by_velocity (Notes&, NoteOperator, uint8_t val, int chan_mask = 0) const;
@@ -354,7 +370,8 @@ private:
 
 } // namespace Evoral
 
-template<typename Time> std::ostream& operator<<(std::ostream& o, const Evoral::Sequence<Time>& s) { s.dump (o); return o; }
+template<typename Time> /*LIBEVORAL_API*/ std::ostream& operator<<(std::ostream& o, const Evoral::Sequence<Time>& s) { s.dump (o); return o; }
+
 
 #endif // EVORAL_SEQUENCE_HPP
 

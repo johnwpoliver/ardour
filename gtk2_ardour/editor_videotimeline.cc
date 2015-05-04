@@ -18,7 +18,7 @@
 
 */
 
-#include <jack/types.h>
+#include <glib/gstdio.h>
 
 #include "ardour/profile.h"
 #include "ardour/rc_configuration.h"
@@ -27,15 +27,14 @@
 
 #include "ardour_ui.h"
 #include "editor.h"
-#include "simplerect.h"
-#include "canvas_impl.h"
+#include "canvas/rectangle.h"
 #include "editing.h"
 #include "audio_time_axis.h"
 #include "video_image_frame.h"
 #include "export_video_dialog.h"
-#include "export_video_infobox.h"
 #include "interthread_progress_window.h"
 
+#include "pbd/openuri.h"
 #include "i18n.h"
 
 using namespace std;
@@ -46,9 +45,7 @@ Editor::set_video_timeline_height (const int h)
 	if (videotl_bar_height == h) { return; }
 	if (h < 2 || h > 8) { return; }
   videotl_bar_height = h;
-	const double nh = (videotl_bar_height * timebar_height - ((ARDOUR::Profile->get_sae())?1.0:0.0));
 	videotl_label.set_size_request (-1, (int)timebar_height * videotl_bar_height);
-	videotl_bar->property_y2().set_value(nh);
 	ARDOUR_UI::instance()->video_timeline->set_height(videotl_bar_height * timebar_height);
 	update_ruler_visibility();
 }
@@ -56,16 +53,6 @@ Editor::set_video_timeline_height (const int h)
 void
 Editor::update_video_timeline (bool flush)
 {
-#if DEBUG
-	framepos_t rightmost_frame = leftmost_frame + current_page_frames();
-	std::cout << "VIDEO SCROLL: " << leftmost_frame << " -- " << rightmost_frame << std::endl;
-	std::cout << "SCROLL UNITS: " << frame_to_unit(leftmost_frame) << " -- " << frame_to_unit(rightmost_frame)
-	          << " = " << frame_to_unit(rightmost_frame) - frame_to_unit(leftmost_frame)
-		        << std::endl;
-#endif
-
-	// TODO later: make this a list for mult. video tracks
-	// also modify  ardour_ui_dialogs.cc : set_session()
 	if (flush) {
 		ARDOUR_UI::instance()->video_timeline->flush_local_cache();
 	}
@@ -92,13 +79,10 @@ Editor::toggle_video_timeline_locked ()
 }
 
 void
-Editor::embed_audio_from_video (std::string path, framepos_t n)
+Editor::embed_audio_from_video (std::string path, framepos_t n, bool lock_position_to_video)
 {
 	vector<std::string> paths;
 	paths.push_back(path);
-#if 0
-	do_import (paths, Editing::ImportDistinctFiles, Editing::ImportAsTrack, ARDOUR::SrcBest, n);
-#else
 	current_interthread_info = &import_status;
 	import_status.current = 1;
 	import_status.total = paths.size ();
@@ -108,34 +92,15 @@ Editor::embed_audio_from_video (std::string path, framepos_t n)
 	ipw.show ();
 
 	boost::shared_ptr<ARDOUR::Track> track;
-	bool ok = (import_sndfiles (paths, Editing::ImportAsTrack, ARDOUR::SrcBest, n, 1, 1, track, false) == 0);
+	bool ok = (import_sndfiles (paths, Editing::ImportDistinctFiles, Editing::ImportAsTrack, ARDOUR::SrcBest, n, 1, 1, track, false) == 0);
 	if (ok && track) {
-		boost::shared_ptr<ARDOUR::Playlist> pl = track->playlist();
-		pl->find_next_region(n, ARDOUR::End, 0)->set_video_locked(true);
+		if (lock_position_to_video) {
+			boost::shared_ptr<ARDOUR::Playlist> pl = track->playlist();
+			pl->find_next_region(n, ARDOUR::End, 0)->set_video_locked(true);
+		}
 		_session->save_state ("");
 	}
 
 	import_status.all_done = true;
-#endif
-	unlink(path.c_str());
-}
-
-void
-Editor::export_video ()
-{
-	if (ARDOUR::Config->get_show_video_export_info()) {
-		ExportVideoInfobox infobox (_session);
-		infobox.run();
-		if (infobox.show_again()) {
-			ARDOUR::Config->set_show_video_export_info(false);
-		}
-	}
-	ExportVideoDialog dialog (*this, _session);
-	Gtk::ResponseType r = (Gtk::ResponseType) dialog.run();
-	dialog.hide();
-#if 0
-	if (r == Gtk::RESPONSE_ACCEPT) {
-		ARDOUR_UI::instance()->popup_error(string_compose(_("Export Successful: %1"),dialog.get_exported_filename()));
-	}
-#endif
+	::g_unlink(path.c_str());
 }

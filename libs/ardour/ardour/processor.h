@@ -30,10 +30,12 @@
 #include "ardour/buffer_set.h"
 #include "ardour/latent.h"
 #include "ardour/session_object.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/automatable.h"
 
 class XMLNode;
+class ProcessorWindowProxy;
 
 namespace ARDOUR {
 
@@ -41,7 +43,7 @@ class Session;
 class Route;
 
 /** A mixer strip element - plugin, send, meter, etc */
-class Processor : public SessionObject, public Automatable, public Latent
+class LIBARDOUR_API Processor : public SessionObject, public Automatable, public Latent
 {
   public:
 	static const std::string state_node_name;
@@ -82,7 +84,7 @@ class Processor : public SessionObject, public Automatable, public Latent
 
 	/* Derived classes should override these, or processor appears as an in-place pass-through */
 
-	virtual bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const = 0;
+	virtual bool can_support_io_configuration (const ChanCount& in, ChanCount& out) = 0;
 	virtual ChanCount input_streams () const { return _configured_input; }
 	virtual ChanCount output_streams() const { return _configured_output; }
 
@@ -113,6 +115,12 @@ class Processor : public SessionObject, public Automatable, public Latent
 	void  set_ui (void*);
 	void* get_ui () const { return _ui_pointer; }
 
+	ProcessorWindowProxy * window_proxy () const { return _window_proxy; }
+	void set_window_proxy (ProcessorWindowProxy* wp);
+
+	void set_owner (SessionObject*);
+	SessionObject* owner() const;
+
 protected:
 	virtual int set_state_2X (const XMLNode&, int version);
 
@@ -125,6 +133,8 @@ protected:
 	bool      _display_to_user;
 	bool      _pre_fader; ///< true if this processor is currently placed before the Amp, otherwise false
 	void*     _ui_pointer;
+	ProcessorWindowProxy *_window_proxy;
+	SessionObject* _owner;
 };
 
 } // namespace ARDOUR

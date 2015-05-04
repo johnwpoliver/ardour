@@ -28,11 +28,22 @@
 #include "pbd/epa.h"
 #include "pbd/openuri.h"
 
+#ifdef __APPLE__
+	extern bool cocoa_open_url (const char*);
+#endif
+
+#ifdef PLATFORM_WINDOWS
+	#include <windows.h>
+	#include <shellapi.h>
+#endif
+
 bool
 PBD::open_uri (const char* uri)
 {
-#ifdef __APPLE__
-	extern bool cocoa_open_url (const char*);
+#ifdef PLATFORM_WINDOWS
+	ShellExecute(NULL, "open", uri, NULL, NULL, SW_SHOWNORMAL);
+	return true;
+#elif __APPLE__
 	return cocoa_open_url (uri);
 #else
 	EnvironmentalProtectionAgency* global_epa = EnvironmentalProtectionAgency::get_global_epa ();
@@ -49,7 +60,7 @@ PBD::open_uri (const char* uri)
 	std::string command = "xdg-open ";
 	command += uri;
 	command += " &";
-	system (command.c_str());
+	(void) system (command.c_str());
 
 	return true;
 #endif

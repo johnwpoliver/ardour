@@ -36,7 +36,9 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <fcntl.h>
+#ifndef COMPILER_MSVC
 #include <dirent.h>
+#endif
 #include <errno.h>
 #include <regex.h>
 
@@ -91,7 +93,7 @@ replace_chars (const string& str, const string& illegal_chars)
  * the goal there is to be legal across filesystems.
  */
 string
-legalize_for_path (const string& str)
+ARDOUR::legalize_for_path (const string& str)
 {
 	return replace_chars (str, "/\\");
 }
@@ -106,7 +108,7 @@ legalize_for_path (const string& str)
  * ANY filesystem.
  */
 string
-legalize_for_universal_path (const string& str)
+ARDOUR::legalize_for_universal_path (const string& str)
 {
 	return replace_chars (str, "<>:\"/\\|?*");
 }
@@ -117,7 +119,7 @@ legalize_for_universal_path (const string& str)
  * correct.
  */
 string
-legalize_for_uri (const string& str)
+ARDOUR::legalize_for_uri (const string& str)
 {
 	return replace_chars (str, "<>:\"/\\|?* #");
 }
@@ -131,7 +133,7 @@ legalize_for_uri (const string& str)
  */
 
 string 
-legalize_for_path_2X (const string& str)
+ARDOUR::legalize_for_path_2X (const string& str)
 {
 	string::size_type pos;
 	string legal_chars = "abcdefghijklmnopqrtsuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+=: ";
@@ -153,7 +155,7 @@ legalize_for_path_2X (const string& str)
 }
 
 string
-bump_name_once (const std::string& name, char delimiter)
+ARDOUR::bump_name_once (const std::string& name, char delimiter)
 {
 	string::size_type delim;
 	string newname;
@@ -194,8 +196,34 @@ bump_name_once (const std::string& name, char delimiter)
 
 }
 
+string
+ARDOUR::bump_name_number (const std::string& name)
+{
+	size_t pos = name.length();
+	size_t num = 0;
+	bool have_number = false;
+	while (pos > 0 && isdigit(name.at(--pos))) {
+		have_number = true;
+		num = pos;
+	}
+
+	string newname;
+	if (have_number) {
+		int32_t seq = strtol (name.c_str() + num, (char **)NULL, 10);
+		char buf[32];
+		snprintf (buf, sizeof(buf), "%d", seq + 1);
+		newname = name.substr (0, num);
+		newname += buf;
+	} else {
+		newname = name;
+		newname += "1";
+	}
+
+	return newname;
+}
+
 XMLNode *
-find_named_node (const XMLNode& node, string name)
+ARDOUR::find_named_node (const XMLNode& node, string name)
 {
 	XMLNodeList nlist;
 	XMLNodeConstIterator niter;
@@ -216,7 +244,7 @@ find_named_node (const XMLNode& node, string name)
 }
 
 int
-cmp_nocase (const string& s, const string& s2)
+ARDOUR::cmp_nocase (const string& s, const string& s2)
 {
 	string::const_iterator p = s.begin();
 	string::const_iterator p2 = s2.begin();
@@ -233,7 +261,43 @@ cmp_nocase (const string& s, const string& s2)
 }
 
 int
-touch_file (string path)
+ARDOUR::cmp_nocase_utf8 (const string& s1, const string& s2)
+{
+	const char *cstr1 = s1.c_str();
+	const char *cstr2 = s2.c_str();
+	gchar *cstr1folded = NULL;
+	gchar *cstr2folded = NULL;
+	int retval;
+
+	if (!g_utf8_validate (cstr1, -1, NULL) ||
+		!g_utf8_validate (cstr2, -1, NULL)) {
+		// fall back to comparing ASCII
+		return g_ascii_strcasecmp (cstr1, cstr2);
+	}
+
+	cstr1folded = g_utf8_casefold (cstr1, -1);
+	cstr2folded = g_utf8_casefold (cstr2, -1);
+
+	if (cstr1folded && cstr2folded) {
+		retval = strcmp (cstr1folded, cstr2folded);
+	} else {
+		// this shouldn't happen, make the best of it
+		retval = g_ascii_strcasecmp (cstr1, cstr2);
+	}
+
+	if (cstr1folded) {
+		g_free (cstr1folded);
+	}
+
+	if (cstr2folded) {
+		g_free (cstr2folded);
+	}
+
+	return retval;
+}
+
+int
+ARDOUR::touch_file (string path)
 {
 	int fd = open (path.c_str(), O_RDWR|O_CREAT, 0660);
 	if (fd >= 0) {
@@ -244,7 +308,7 @@ touch_file (string path)
 }
 
 string
-region_name_from_path (string path, bool strip_channels, bool add_channel_suffix, uint32_t total, uint32_t this_one)
+ARDOUR::region_name_from_path (string path, bool strip_channels, bool add_channel_suffix, uint32_t total, uint32_t this_one)
 {
 	path = PBD::basename_nosuffix (path);
 
@@ -276,7 +340,7 @@ region_name_from_path (string path, bool strip_channels, bool add_channel_suffix
 }
 
 bool
-path_is_paired (string path, string& pair_base)
+ARDOUR::path_is_paired (string path, string& pair_base)
 {
 	string::size_type pos;
 
@@ -309,7 +373,7 @@ path_is_paired (string path, string& pair_base)
 
 #if __APPLE__
 string
-CFStringRefToStdString(CFStringRef stringRef)
+ARDOUR::CFStringRefToStdString(CFStringRef stringRef)
 {
 	CFIndex size =
 		CFStringGetMaximumSizeForEncoding(CFStringGetLength(stringRef) ,
@@ -327,7 +391,7 @@ CFStringRefToStdString(CFStringRef stringRef)
 #endif // __APPLE__
 
 void
-compute_equal_power_fades (framecnt_t nframes, float* in, float* out)
+ARDOUR::compute_equal_power_fades (framecnt_t nframes, float* in, float* out)
 {
 	double step;
 
@@ -353,22 +417,24 @@ compute_equal_power_fades (framecnt_t nframes, float* in, float* out)
 }
 
 EditMode
-string_to_edit_mode (string str)
+ARDOUR::string_to_edit_mode (string str)
 {
 	if (str == _("Splice")) {
 		return Splice;
 	} else if (str == _("Slide")) {
 		return Slide;
+	} else if (str == _("Ripple")) {
+		return Ripple;
 	} else if (str == _("Lock")) {
 		return Lock;
 	}
 	fatal << string_compose (_("programming error: unknown edit mode string \"%1\""), str) << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return Slide;
 }
 
 const char*
-edit_mode_to_string (EditMode mode)
+ARDOUR::edit_mode_to_string (EditMode mode)
 {
 	switch (mode) {
 	case Slide:
@@ -377,6 +443,9 @@ edit_mode_to_string (EditMode mode)
 	case Lock:
 		return _("Lock");
 
+	case Ripple:
+		return _("Ripple");
+
 	default:
 	case Splice:
 		return _("Splice");
@@ -384,7 +453,7 @@ edit_mode_to_string (EditMode mode)
 }
 
 SyncSource
-string_to_sync_source (string str)
+ARDOUR::string_to_sync_source (string str)
 {
 	if (str == _("MIDI Timecode") || str == _("MTC")) {
 		return MTC;
@@ -395,20 +464,23 @@ string_to_sync_source (string str)
 	}
 
 	if (str == _("JACK")) {
-		return JACK;
+		return Engine;
 	}
 
 	fatal << string_compose (_("programming error: unknown sync source string \"%1\""), str) << endmsg;
-	/*NOTREACHED*/
-	return JACK;
+	abort(); /*NOTREACHED*/
+	return Engine;
 }
 
 /** @param sh Return a short version of the string */
 const char*
-sync_source_to_string (SyncSource src, bool sh)
+ARDOUR::sync_source_to_string (SyncSource src, bool sh)
 {
 	switch (src) {
-	case JACK:
+	case Engine:
+		/* no other backends offer sync for now ... deal with this if we
+		 * ever have to.
+		 */
 		return _("JACK");
 
 	case MTC:
@@ -433,7 +505,7 @@ sync_source_to_string (SyncSource src, bool sh)
 }
 
 float
-meter_falloff_to_float (MeterFalloff falloff)
+ARDOUR::meter_falloff_to_float (MeterFalloff falloff)
 {
 	switch (falloff) {
 	case MeterFalloffOff:
@@ -442,8 +514,12 @@ meter_falloff_to_float (MeterFalloff falloff)
 		return METER_FALLOFF_SLOWEST;
 	case MeterFalloffSlow:
 		return METER_FALLOFF_SLOW;
+	case MeterFalloffSlowish:
+		return METER_FALLOFF_SLOWISH;
 	case MeterFalloffMedium:
 		return METER_FALLOFF_MEDIUM;
+	case MeterFalloffModerate:
+		return METER_FALLOFF_MODERATE;
 	case MeterFalloffFast:
 		return METER_FALLOFF_FAST;
 	case MeterFalloffFaster:
@@ -456,7 +532,7 @@ meter_falloff_to_float (MeterFalloff falloff)
 }
 
 MeterFalloff
-meter_falloff_from_float (float val)
+ARDOUR::meter_falloff_from_float (float val)
 {
 	if (val == METER_FALLOFF_OFF) {
 		return MeterFalloffOff;
@@ -466,6 +542,12 @@ meter_falloff_from_float (float val)
 	}
 	else if (val <= METER_FALLOFF_SLOW) {
 		return MeterFalloffSlow;
+	}
+	else if (val <= METER_FALLOFF_SLOWISH) {
+		return MeterFalloffSlowish;
+	}
+	else if (val <= METER_FALLOFF_MODERATE) {
+		return MeterFalloffModerate;
 	}
 	else if (val <= METER_FALLOFF_MEDIUM) {
 		return MeterFalloffMedium;
@@ -495,7 +577,7 @@ ARDOUR::string_to_auto_state (std::string str)
 	}
 
 	fatal << string_compose (_("programming error: %1 %2"), "illegal AutoState string: ", str) << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return Touch;
 }
 
@@ -519,7 +601,7 @@ ARDOUR::auto_state_to_string (AutoState as)
 	}
 
 	fatal << string_compose (_("programming error: %1 %2"), "illegal AutoState type: ", as) << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return "";
 }
 
@@ -533,7 +615,7 @@ ARDOUR::string_to_auto_style (std::string str)
 	}
 
 	fatal << string_compose (_("programming error: %1 %2"), "illegal AutoStyle string: ", str) << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return Trim;
 }
 
@@ -552,7 +634,7 @@ ARDOUR::auto_style_to_string (AutoStyle as)
 	}
 
 	fatal << string_compose (_("programming error: %1 %2"), "illegal AutoStyle type: ", as) << endmsg;
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return "";
 }
 
@@ -563,7 +645,7 @@ bool_as_string (bool yn)
 }
 
 const char*
-native_header_format_extension (HeaderFormat hf, const DataType& type)
+ARDOUR::native_header_format_extension (HeaderFormat hf, const DataType& type)
 {
         if (type == DataType::MIDI) {
                 return ".mid";
@@ -587,12 +669,12 @@ native_header_format_extension (HeaderFormat hf, const DataType& type)
         }
 
         fatal << string_compose (_("programming error: unknown native header format: %1"), hf);
-        /*NOTREACHED*/
+        abort(); /*NOTREACHED*/
         return ".wav";
 }
 
 bool
-matching_unsuffixed_filename_exists_in (const string& dir, const string& path)
+ARDOUR::matching_unsuffixed_filename_exists_in (const string& dir, const string& path)
 {
         string bws = basename_nosuffix (path);
 	struct dirent* dentry;
@@ -637,7 +719,7 @@ matching_unsuffixed_filename_exists_in (const string& dir, const string& path)
 }
 
 uint32_t
-how_many_dsp_threads ()
+ARDOUR::how_many_dsp_threads ()
 {
         /* CALLER MUST HOLD PROCESS LOCK */
 
@@ -670,12 +752,14 @@ how_many_dsp_threads ()
         return num_threads;
 }
 
-double gain_to_slider_position_with_max (double g, double max_gain)
+double
+ARDOUR::gain_to_slider_position_with_max (double g, double max_gain)
 {
         return gain_to_slider_position (g * 2.0/max_gain);
 }
 
-double slider_position_to_gain_with_max (double g, double max_gain)
+double
+ARDOUR::slider_position_to_gain_with_max (double g, double max_gain)
 {
 	return slider_position_to_gain (g * max_gain/2.0);
 }

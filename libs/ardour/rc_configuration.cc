@@ -27,11 +27,11 @@
 #include "pbd/xml++.h"
 #include "pbd/file_utils.h"
 
-#include "midi++/manager.h"
-
+#include "ardour/audioengine.h"
 #include "ardour/control_protocol_manager.h"
 #include "ardour/diskstream.h"
 #include "ardour/filesystem_paths.h"
+#include "ardour/port.h"
 #include "ardour/rc_configuration.h"
 #include "ardour/session_metadata.h"
 
@@ -49,6 +49,9 @@ namespace ARDOUR {
     float speed_quietning = 0.251189; // -12dB reduction for ffwd or rewind
 }
 
+static const char* user_config_file_name = "config";
+static const char* system_config_file_name = "system_config";
+
 RCConfiguration::RCConfiguration ()
 	:
 /* construct variables */
@@ -63,13 +66,8 @@ RCConfiguration::RCConfiguration ()
 {
 }
 
-
 RCConfiguration::~RCConfiguration ()
 {
-	for (list<XMLNode*>::iterator i = _midi_port_states.begin(); i != _midi_port_states.end(); ++i) {
-		delete *i;
-	}
-
 	delete _control_protocol_state;
 }
 
@@ -77,11 +75,11 @@ int
 RCConfiguration::load_state ()
 {
 	std::string rcfile;
-	struct stat statbuf;
+	GStatBuf statbuf;
 
 	/* load system configuration first */
 
-	if (find_file_in_search_path (ardour_config_search_path(), "ardour_system.rc", rcfile)) {
+	if (find_file (ardour_config_search_path(), system_config_file_name, rcfile)) {
 
 		/* stupid XML Parser hates empty files */
 
@@ -109,7 +107,7 @@ RCConfiguration::load_state ()
 
 	/* now load configuration file for user */
 
-	if (find_file_in_search_path (ardour_config_search_path(), "ardour.rc", rcfile)) {
+	if (find_file (ardour_config_search_path(), user_config_file_name, rcfile)) {
 
 		/* stupid XML parser hates empty files */
 
@@ -141,7 +139,7 @@ RCConfiguration::load_state ()
 int
 RCConfiguration::save_state()
 {
-	const std::string rcfile = Glib::build_filename (user_config_directory(), "ardour.rc");
+	const std::string rcfile = Glib::build_filename (user_config_directory(), user_config_file_name);
 
 	// this test seems bogus?
 	if (!rcfile.empty()) {
@@ -173,19 +171,9 @@ XMLNode&
 RCConfiguration::get_state ()
 {
 	XMLNode* root;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	root = new XMLNode("Ardour");
-
-        MIDI::Manager* mm = MIDI::Manager::instance();
-
-        if (mm) {
-		boost::shared_ptr<const MIDI::Manager::PortList> ports = mm->get_midi_ports();
-
-                for (MIDI::Manager::PortList::const_iterator i = ports->begin(); i != ports->end(); ++i) {
-                        root->add_child_nocopy((*i)->get_state());
-                }
-        }
 
 	root->add_child_nocopy (get_variables ());
 
@@ -204,7 +192,7 @@ XMLNode&
 RCConfiguration::get_variables ()
 {
 	XMLNode* node;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	node = new XMLNode ("Config");
 
@@ -232,12 +220,6 @@ RCConfiguration::set_state (const XMLNode& root, int version)
 	XMLNodeConstIterator niter;
 	XMLNode *node;
 
-	for (list<XMLNode*>::iterator i = _midi_port_states.begin(); i != _midi_port_states.end(); ++i) {
-		delete *i;
-	}
-
-	_midi_port_states.clear ();
-
 	Stateful::save_extra_xml (root);
 
 	for (niter = nlist.begin(); niter != nlist.end(); ++niter) {
@@ -250,12 +232,11 @@ RCConfiguration::set_state (const XMLNode& root, int version)
 			SessionMetadata::Metadata()->set_state (*node, version);
 		} else if (node->name() == ControlProtocolManager::state_node_name) {
 			_control_protocol_state = new XMLNode (*node);
-		} else if (node->name() == MIDI::Port::state_node_name) {
-			_midi_port_states.push_back (new XMLNode (*node));
 		}
 	}
 
-	Diskstream::set_disk_io_chunk_frames (minimum_disk_io_bytes.get() / sizeof (Sample));
+	Diskstream::set_disk_read_chunk_frames (minimum_disk_read_bytes.get() / sizeof (Sample));
+	Diskstream::set_disk_write_chunk_frames (minimum_disk_write_bytes.get() / sizeof (Sample));
 
 	return 0;
 }
@@ -290,3 +271,4 @@ RCConfiguration::map_parameters (boost::function<void (std::string)>& functor)
 #undef  CONFIG_VARIABLE
 #undef  CONFIG_VARIABLE_SPECIAL
 }
+

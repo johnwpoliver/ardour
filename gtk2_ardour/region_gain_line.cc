@@ -27,10 +27,10 @@
 #include "control_point.h"
 #include "region_gain_line.h"
 #include "audio_region_view.h"
-#include "utils.h"
 
 #include "time_axis_view.h"
 #include "editor.h"
+#include "gui_thread.h"
 
 #include "i18n.h"
 
@@ -38,17 +38,19 @@ using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
 
-AudioRegionGainLine::AudioRegionGainLine (const string & name, AudioRegionView& r, ArdourCanvas::Group& parent, boost::shared_ptr<AutomationList> l)
-	: AutomationLine (name, r.get_time_axis_view(), parent, l)
+AudioRegionGainLine::AudioRegionGainLine (const string & name, AudioRegionView& r, ArdourCanvas::Container& parent, boost::shared_ptr<AutomationList> l)
+	: AutomationLine (name, r.get_time_axis_view(), parent, l, l->parameter())
 	, rv (r)
 {
 	// If this isn't true something is horribly wrong, and we'll get catastrophic gain values
 	assert(l->parameter().type() == EnvelopeAutomation);
 
-	_time_converter->set_origin_b (r.region()->position() - r.region()->start());
+	_time_converter->set_origin_b (rv.region()->position());
+
+	r.region()->PropertyChanged.connect (_region_changed_connection, invalidator (*this), boost::bind (&AudioRegionGainLine::region_changed, this, _1), gui_context());
 
 	group->raise_to_top ();
-	group->property_y() = 2;
+	group->set_y_position (2);
 	set_uses_gain_mapping (true);
 	terminal_points_can_slide = false;
 }
@@ -70,7 +72,7 @@ AudioRegionGainLine::start_drag_single (ControlPoint* cp, double x, float fracti
 void
 AudioRegionGainLine::remove_point (ControlPoint& cp)
 {
-	trackview.editor().session()->begin_reversible_command (_("remove control point"));
+	trackview.editor().begin_reversible_command (_("remove control point"));
 	XMLNode &before = alist->get_state();
 
 	if (!rv.audio_region()->envelope_active()) {
@@ -82,7 +84,7 @@ AudioRegionGainLine::remove_point (ControlPoint& cp)
 	alist->erase (cp.model());
 
 	trackview.editor().session()->add_command (new MementoCommand<AutomationList>(*alist.get(), &before, &alist->get_state()));
-	trackview.editor().session()->commit_reversible_command ();
+	trackview.editor().commit_reversible_command ();
 	trackview.editor().session()->set_dirty ();
 }
 
@@ -97,3 +99,15 @@ AudioRegionGainLine::end_drag (bool with_push, uint32_t final_index)
 	AutomationLine::end_drag (with_push, final_index);
 }
 
+void
+AudioRegionGainLine::region_changed (const PropertyChange& what_changed)
+{
+	PropertyChange interesting_stuff;
+
+	interesting_stuff.add (ARDOUR::Properties::start);
+	interesting_stuff.add (ARDOUR::Properties::position);
+
+	if (what_changed.contains (interesting_stuff)) {
+		_time_converter->set_origin_b (rv.region()->position());
+	}
+}

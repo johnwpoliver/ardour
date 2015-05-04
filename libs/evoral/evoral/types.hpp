@@ -19,10 +19,16 @@
 #ifndef EVORAL_TYPES_HPP
 #define EVORAL_TYPES_HPP
 
+#include <float.h>
+#include <math.h>
 #include <stdint.h>
+
+#include <iostream>
+#include <limits>
 #include <list>
-#include <cmath>
-#include <cfloat>
+
+#include "evoral/Beats.hpp"
+#include "evoral/visibility.h"
 
 #include "pbd/debug.h"
 
@@ -33,43 +39,6 @@ namespace Evoral {
 */
 typedef int32_t event_id_t;
 
-/** Musical time: beats relative to some defined origin */
-typedef double MusicalTime;
-const MusicalTime MaxMusicalTime = DBL_MAX;
-const MusicalTime MinMusicalTime = DBL_MIN;
-
-static inline bool musical_time_equal (MusicalTime a, MusicalTime b) {
-	/* acceptable tolerance is 1 tick. Nice if there was no magic number here */
-	return fabs (a - b) <= (1.0/1920.0);
-}
-
-static inline bool musical_time_less_than (MusicalTime a, MusicalTime b) {
-	/* acceptable tolerance is 1 tick. Nice if there was no magic number here */
-	if (fabs (a - b) <= (1.0/1920.0)) {
-		return false; /* effectively identical */
-	} else {
-		return a < b;
-	}
-}
-
-static inline bool musical_time_greater_than (MusicalTime a, MusicalTime b) {
-	/* acceptable tolerance is 1 tick. Nice if there was no magic number here */
-	if (fabs (a - b) <= (1.0/1920.0)) {
-		return false; /* effectively identical */
-	} else {
-		return a > b;
-	}
-}
-
-static inline bool musical_time_greater_or_equal_to (MusicalTime a, MusicalTime b) {
-	/* acceptable tolerance is 1 tick. Nice if there was no magic number here */
-	if (fabs (a - b) <= (1.0/1920.0)) {
-		return true; /* effectively identical, note the "or_equal_to" */
-	} else {
-		return a >= b;
-	}
-}
-
 /** Type of an event (opaque, mapped by application) */
 typedef uint32_t EventType;
 
@@ -77,9 +46,9 @@ typedef uint32_t EventType;
 
 namespace PBD {
 	namespace DEBUG {
-		extern uint64_t Sequence;
-		extern uint64_t Note;
-		extern uint64_t ControlList;
+		LIBEVORAL_API extern uint64_t Sequence;
+		LIBEVORAL_API extern uint64_t Note;
+		LIBEVORAL_API extern uint64_t ControlList;
 	}
 }
 

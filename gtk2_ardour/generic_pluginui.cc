@@ -25,6 +25,7 @@
 #include <cerrno>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include "pbd/stl_delete.h"
 #include "pbd/xml++.h"
@@ -37,20 +38,17 @@
 #include <gtkmm2ext/doi.h>
 #include <gtkmm2ext/slider_controller.h>
 
-#include "midi++/manager.h"
-
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/session.h"
-
-#include <lrdf.h>
+#include "ardour/value_as_string.h"
 
 #include "ardour_ui.h"
 #include "prompter.h"
 #include "plugin_ui.h"
-#include "utils.h"
 #include "gui_thread.h"
 #include "automation_controller.h"
+#include "timers.h"
 
 #include "i18n.h"
 
@@ -61,14 +59,14 @@ using namespace Gtkmm2ext;
 using namespace Gtk;
 
 GenericPluginUI::GenericPluginUI (boost::shared_ptr<PluginInsert> pi, bool scrollable)
-	: PlugUIBase (pi),
-	  button_table (initial_button_rows, initial_button_cols),
-	  output_table (initial_output_rows, initial_output_cols),
-	  hAdjustment(0.0, 0.0, 0.0),
-	  vAdjustment(0.0, 0.0, 0.0),
-	  scroller_view(hAdjustment, vAdjustment),
-	  automation_menu (0),
-	  is_scrollable(scrollable)
+	: PlugUIBase (pi)
+	, button_table (initial_button_rows, initial_button_cols)
+	, output_table (initial_output_rows, initial_output_cols)
+	, hAdjustment(0.0, 0.0, 0.0)
+	, vAdjustment(0.0, 0.0, 0.0)
+	, scroller_view(hAdjustment, vAdjustment)
+	, automation_menu (0)
+	, is_scrollable(scrollable)
 {
 	set_name ("PluginEditor");
 	set_border_width (10);
@@ -79,12 +77,13 @@ GenericPluginUI::GenericPluginUI (boost::shared_ptr<PluginInsert> pi, bool scrol
 
 	HBox* constraint_hbox = manage (new HBox);
 	HBox* smaller_hbox = manage (new HBox);
+	HBox* automation_hbox = manage (new HBox);
 	smaller_hbox->set_spacing (4);
+	automation_hbox->set_spacing (6);
 	Label* combo_label = manage (new Label (_("<span size=\"large\">Presets</span>")));
 	combo_label->set_use_markup (true);
 
-	latency_button.add (latency_label);
-	latency_button.signal_clicked().connect (sigc::mem_fun (*this, &PlugUIBase::latency_button_clicked));
+	latency_button.signal_clicked.connect (sigc::mem_fun (*this, &PlugUIBase::latency_button_clicked));
 	set_latency_label ();
 
 	smaller_hbox->pack_start (latency_button, false, false, 10);
@@ -94,6 +93,23 @@ GenericPluginUI::GenericPluginUI (boost::shared_ptr<PluginInsert> pi, bool scrol
 	smaller_hbox->pack_start (save_button, false, false);
 	smaller_hbox->pack_start (delete_button, false, false);
 	smaller_hbox->pack_start (bypass_button, false, true);
+	
+	automation_manual_all_button.set_text(_("Manual"));
+	automation_manual_all_button.set_name (X_("generic button"));
+	automation_play_all_button.set_text(_("Play"));
+	automation_play_all_button.set_name (X_("generic button"));
+	automation_write_all_button.set_text(_("Write"));
+	automation_write_all_button.set_name (X_("generic button"));
+	automation_touch_all_button.set_text(_("Touch"));
+	automation_touch_all_button.set_name (X_("generic button"));
+	
+	Label* l = manage (new Label (_("All Automation")));
+	l->set_alignment (1.0, 0.5);
+	automation_hbox->pack_start (*l, true, true);
+	automation_hbox->pack_start (automation_manual_all_button, false, false);
+	automation_hbox->pack_start (automation_play_all_button, false, false);
+	automation_hbox->pack_start (automation_write_all_button, false, false);
+	automation_hbox->pack_start (automation_touch_all_button, false, false);
 
 	constraint_hbox->set_spacing (5);
 	constraint_hbox->set_homogeneous (false);
@@ -105,7 +121,9 @@ GenericPluginUI::GenericPluginUI (boost::shared_ptr<PluginInsert> pi, bool scrol
 		pack_end (description_expander, false, false);
 	}
 
+	v1_box->set_spacing (6);
 	v1_box->pack_start (*smaller_hbox, false, true);
+	v1_box->pack_start (*automation_hbox, false, true);
 	v2_box->pack_start (focus_button, false, true);
 
 	main_contents.pack_start (settings_box, false, false);
@@ -243,26 +261,35 @@ GenericPluginUI::build ()
 	frame->add (*box);
 	hpacker.pack_start(*frame, true, true);
 
-	/* find all ports. build control elements for all appropriate control ports */
-	std::vector<ControlUI *> cui_controls_list;
+	std::vector<ControlUI *> control_uis;
 
+	// Build a ControlUI for each control port
 	for (i = 0; i < plugin->parameter_count(); ++i) {
 
 		if (plugin->parameter_is_control (i)) {
 
 			/* Don't show latency control ports */
 
-			if (plugin->describe_parameter (Evoral::Parameter(PluginAutomation, 0, i)) == X_("latency")) {
+			const Evoral::Parameter param(PluginAutomation, 0, i);
+			if (plugin->describe_parameter (param) == X_("latency")) {
 				continue;
 			}
+
+			if (plugin->describe_parameter (param) == X_("hidden")) {
+				continue;
+			}
+
+			const float value = plugin->get_parameter(i);
 
 			ControlUI* cui;
 
 			boost::shared_ptr<ARDOUR::AutomationControl> c
 				= boost::dynamic_pointer_cast<ARDOUR::AutomationControl>(
-					insert->control(Evoral::Parameter(PluginAutomation, 0, i)));
+					insert->control(param));
 
-			if ((cui = build_control_ui (i, c)) == 0) {
+			ParameterDescriptor desc;
+			plugin->get_parameter_descriptor(i, desc);
+			if ((cui = build_control_ui (param, desc, c, value, plugin->parameter_is_input(i))) == 0) {
 				error << string_compose(_("Plugin Editor: could not build control element for port %1"), i) << endmsg;
 				continue;
 			}
@@ -272,46 +299,83 @@ GenericPluginUI::build ()
 				ARDOUR_UI::instance()->set_tip(cui, param_docs.c_str());
 			}
 
-			if (cui->controller || cui->clickbox || cui->combo) {
-				// Get all of the controls into a list, so that
-				// we can lay them out a bit more nicely later.
-				cui_controls_list.push_back(cui);
-			} else if (cui->button) {
+			control_uis.push_back(cui);
+			input_controls_with_automation.push_back (cui);
+		}
+	}
 
-				if (!is_scrollable && button_row == button_rows) {
-					button_row = 0;
-					if (++button_col == button_cols) {
-						button_cols += 2;
-						button_table.resize (button_rows, button_cols);
-					}
-				}
+	// Build a ControlUI for each property
+	const Plugin::PropertyDescriptors& descs = plugin->get_supported_properties();
+	for (Plugin::PropertyDescriptors::const_iterator d = descs.begin(); d != descs.end(); ++d) {
+		const ParameterDescriptor& desc = d->second;
+		const Evoral::Parameter    param(PluginPropertyAutomation, 0, desc.key);
 
-				button_table.attach (*cui, button_col, button_col + 1, button_row, button_row+1,
-						     FILL|EXPAND, FILL);
-				button_row++;
+		boost::shared_ptr<ARDOUR::AutomationControl> c
+			= boost::dynamic_pointer_cast<ARDOUR::AutomationControl>(
+				insert->control(param));
 
-			} else if (cui->display) {
+		if (!c) {
+			error << string_compose(_("Plugin Editor: no control for property %1"), desc.key) << endmsg;
+			continue;
+		}
 
-				output_table.attach (*cui, output_col, output_col + 1, output_row, output_row+1,
-						     FILL|EXPAND, FILL);
+		ControlUI* cui = build_control_ui(param, desc, c, c->get_value(), true);
+		if (!cui) {
+			error << string_compose(_("Plugin Editor: could not build control element for property %1"),
+			                        desc.key) << endmsg;
+			continue;
+		}
 
- 				// TODO: The meters should be divided into multiple rows
+		control_uis.push_back(cui);
+	}
+	if (!descs.empty()) {
+		plugin->announce_property_values();
+	}
 
-				if (++output_col == output_cols) {
-					output_cols ++;
-					output_table.resize (output_rows, output_cols);
+	// Add special controls to UI, and build list of normal controls to be layed out later
+	std::vector<ControlUI *> cui_controls_list;
+	for (i = 0; i < control_uis.size(); ++i) {
+		ControlUI* cui = control_uis[i];
+
+		if (cui->controller || cui->clickbox || cui->combo) {
+			// Get all of the controls into a list, so that
+			// we can lay them out a bit more nicely later.
+			cui_controls_list.push_back(cui);
+		} else if (cui->button || cui->file_button) {
+
+			if (!is_scrollable && button_row == button_rows) {
+				button_row = 0;
+				if (++button_col == button_cols) {
+					button_cols += 2;
+					button_table.resize (button_rows, button_cols);
 				}
 			}
-		} 
+
+			button_table.attach (*cui, button_col, button_col + 1, button_row, button_row+1,
+			                     FILL|EXPAND, FILL);
+			button_row++;
+
+		} else if (cui->display) {
+
+			output_table.attach (*cui, output_col, output_col + 1, output_row, output_row+1,
+			                     FILL|EXPAND, FILL);
+
+			// TODO: The meters should be divided into multiple rows
+
+			if (++output_col == output_cols) {
+				output_cols ++;
+				output_table.resize (output_rows, output_cols);
+			}
+		}
 	}
 
 	// Iterate over the list of controls to find which adjacent controls
 	// are similar enough to be grouped together.
 	
 	string label, previous_label = "";
-	int numbers_in_labels[cui_controls_list.size()];
+	std::vector<int> numbers_in_labels(cui_controls_list.size());
 	
-	float similarity_scores[cui_controls_list.size()];
+	std::vector<float> similarity_scores(cui_controls_list.size());
 	float most_similar = 0.0, least_similar = 1.0;
 	
 	i = 0;
@@ -410,10 +474,17 @@ GenericPluginUI::build ()
 
 	output_table.show_all ();
 	button_table.show_all ();
+	
+	automation_manual_all_button.signal_clicked.connect(sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::set_all_automation), ARDOUR::Off));
+	automation_play_all_button.signal_clicked.connect(sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::set_all_automation), ARDOUR::Play));
+	automation_write_all_button.signal_clicked.connect(sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::set_all_automation), ARDOUR::Write));
+	automation_touch_all_button.signal_clicked.connect(sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::set_all_automation), ARDOUR::Touch));
 }
 
-GenericPluginUI::ControlUI::ControlUI ()
-	: automate_button (X_("")) // force creation of a label
+GenericPluginUI::ControlUI::ControlUI (const Evoral::Parameter& p)
+	: param(p)
+	, automate_button (X_("")) // force creation of a label
+	, file_button(NULL)
 {
 	automate_button.set_name ("PluginAutomateButton");
 	ARDOUR_UI::instance()->set_tip (automate_button, _("Automation control"));
@@ -466,25 +537,23 @@ GenericPluginUI::automation_state_changed (ControlUI* cui)
 	}
 }
 
-
 bool
 GenericPluginUI::integer_printer (char buf[32], Adjustment &adj, ControlUI* cui)
 {
-	float const v = adj.get_value ();
-	
-	if (cui->scale_points) {
-		Plugin::ScalePoints::const_iterator i = cui->scale_points->begin ();
-		while (i != cui->scale_points->end() && i->second != v) {
-			++i;
-		}
+	float const        v   = cui->control->interface_to_internal(adj.get_value ());
+	const std::string& str = ARDOUR::value_as_string(cui->control->desc(), Variant(v));
+	const size_t       len = str.copy(buf, 31);
+	buf[len] = '\0';
+	return true;
+}
 
-		if (i != cui->scale_points->end ()) {
-			snprintf (buf, 32, "%s", i->first.c_str());
-			return true;
-		}
-	}
-		
-	snprintf (buf, 32, "%.0f", v);
+bool
+GenericPluginUI::midinote_printer (char buf[32], Adjustment &adj, ControlUI* cui)
+{
+	float const        v   = cui->control->interface_to_internal(adj.get_value ());
+	const std::string& str = ARDOUR::value_as_string(cui->control->desc(), Variant(v));
+	const size_t       len = str.copy(buf, 31);
+	buf[len] = '\0';
 	return true;
 }
 
@@ -494,32 +563,34 @@ GenericPluginUI::print_parameter (char *buf, uint32_t len, uint32_t param)
 	plugin->print_parameter (param, buf, len);
 }
 
+/** Build a ControlUI for a parameter/property.
+ * Note that mcontrol may be NULL for outputs.
+ */
 GenericPluginUI::ControlUI*
-GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<AutomationControl> mcontrol)
+GenericPluginUI::build_control_ui (const Evoral::Parameter&             param,
+                                   const ParameterDescriptor&           desc,
+                                   boost::shared_ptr<AutomationControl> mcontrol,
+                                   float                                value,
+                                   bool                                 is_input)
 {
 	ControlUI* control_ui = 0;
 
-	Plugin::ParameterDescriptor desc;
-
-	plugin->get_parameter_descriptor (port_index, desc);
-
-	control_ui = manage (new ControlUI ());
+	control_ui = manage (new ControlUI (param));
 	control_ui->combo = 0;
 	control_ui->control = mcontrol;
 	control_ui->update_pending = false;
 	control_ui->label.set_text (desc.label);
 	control_ui->label.set_alignment (0.0, 0.5);
 	control_ui->label.set_name ("PluginParameterLabel");
-	control_ui->port_index = port_index;
 
 	control_ui->set_spacing (5);
 
 	Gtk::Requisition req (control_ui->automate_button.size_request());
 
-	if (plugin->parameter_is_input(port_index)) {
+	if (is_input) {
 
 		/* See if there any named values for our input value */
-		control_ui->scale_points = plugin->get_scale_points (port_index);
+		control_ui->scale_points = desc.scale_points;
 
 		/* If this parameter is an integer, work out the number of distinct values
 		   it can take on (assuming that lower and upper values are allowed).
@@ -535,7 +606,7 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 
 			std::vector<std::string> labels;
 			for (
-				ARDOUR::Plugin::ScalePoints::const_iterator i = control_ui->scale_points->begin();
+				ARDOUR::ScalePoints::const_iterator i = control_ui->scale_points->begin();
 				i != control_ui->scale_points->end();
 				++i) {
 				
@@ -572,12 +643,12 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 			control_ui->pack_start (control_ui->automate_button, false, false);
 
 			control_ui->button->signal_clicked().connect (sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::control_port_toggled), control_ui));
-			control_ui->automate_button.signal_clicked().connect (bind (mem_fun(*this, &GenericPluginUI::astate_clicked), control_ui, (uint32_t) port_index));
+			control_ui->automate_button.signal_clicked().connect (bind (mem_fun(*this, &GenericPluginUI::astate_clicked), control_ui));
 
 			mcontrol->Changed.connect (control_connections, invalidator (*this), boost::bind (&GenericPluginUI::toggle_parameter_changed, this, control_ui), gui_context());
 			mcontrol->alist()->automation_state_changed.connect (control_connections, invalidator (*this), boost::bind (&GenericPluginUI::automation_state_changed, this, control_ui), gui_context());
 
-			if (plugin->get_parameter (port_index) > 0.5){
+			if (value > 0.5){
 				control_ui->button->set_active(true);
 			}
 
@@ -586,10 +657,35 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 			return control_ui;
 		}
 
+		if (desc.datatype == Variant::PATH) {
+
+			/* Build a file selector button */
+
+			// Create/add controller
+			control_ui->file_button = manage(new Gtk::FileChooserButton(Gtk::FILE_CHOOSER_ACTION_OPEN));
+			control_ui->file_button->set_title(desc.label);
+
+			control_ui->pack_start (control_ui->label, true, true);
+			control_ui->pack_start (*control_ui->file_button, true, true);
+
+			// Connect signals (TODO: do this via the Control)
+			control_ui->file_button->signal_file_set().connect(
+				sigc::bind(sigc::mem_fun(*this, &GenericPluginUI::set_property),
+				           desc, control_ui->file_button));
+			plugin->PropertyChanged.connect(*this, invalidator(*this),
+			                                boost::bind(&GenericPluginUI::property_changed, this, _1, _2),
+			                                gui_context());
+
+			_property_controls.insert(std::make_pair(desc.key, control_ui->file_button));
+			control_ui->file_button = control_ui->file_button;
+
+			return control_ui;
+		}
+
 		/* create the controller */
 
 		if (mcontrol) {
-			control_ui->controller = AutomationController::create(insert, mcontrol->parameter(), mcontrol);
+			control_ui->controller = AutomationController::create(insert, mcontrol->parameter(), desc, mcontrol);
 		}
 
 		/* XXX this code is not right yet, because it doesn't handle
@@ -597,33 +693,24 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 		*/
 
 		Adjustment* adj = control_ui->controller->adjustment();
-		boost::shared_ptr<PluginInsert::PluginControl> pc = boost::dynamic_pointer_cast<PluginInsert::PluginControl> (control_ui->control);
-
-		adj->set_lower (pc->internal_to_interface (desc.lower));
-		adj->set_upper (pc->internal_to_interface (desc.upper));
-
-		adj->set_step_increment (desc.step);
-		adj->set_page_increment (desc.largestep);
 
 		if (desc.integer_step) {
-			control_ui->clickbox = new ClickBox (adj, "PluginUIClickBox");
+			control_ui->clickbox = new ClickBox (adj, "PluginUIClickBox", desc.enumeration);
 			Gtkmm2ext::set_size_request_to_display_given_text (*control_ui->clickbox, "g9999999", 2, 2);
-			control_ui->clickbox->set_printer (sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::integer_printer), control_ui));
+			if (desc.unit == ParameterDescriptor::MIDI_NOTE) {
+				control_ui->clickbox->set_printer (sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::midinote_printer), control_ui));
+			} else {
+				control_ui->clickbox->set_printer (sigc::bind (sigc::mem_fun (*this, &GenericPluginUI::integer_printer), control_ui));
+			}
 		} else {
 			//sigc::slot<void,char*,uint32_t> pslot = sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::print_parameter), (uint32_t) port_index);
 
 			control_ui->controller->set_size_request (200, req.height);
-			control_ui->controller->set_name (X_("PluginSlider"));
-			control_ui->controller->set_style (BarController::LeftToRight);
-			control_ui->controller->set_use_parent (true);
-			control_ui->controller->set_logarithmic (desc.logarithmic);
-
-			control_ui->controller->StartGesture.connect (sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::start_touch), control_ui));
-			control_ui->controller->StopGesture.connect (sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::stop_touch), control_ui));
+			control_ui->controller->set_name (X_("ProcessorControlSlider"));
 
 		}
 
-		adj->set_value (pc->internal_to_interface (plugin->get_parameter (port_index)));
+		adj->set_value (mcontrol->internal_to_interface(value));
 
 		/* XXX memory leak: SliderController not destroyed by ControlUI
 		   destructor, and manage() reports object hierarchy
@@ -638,16 +725,16 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 		}
 
 		control_ui->pack_start (control_ui->automate_button, false, false);
-		control_ui->automate_button.signal_clicked().connect (sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::astate_clicked), control_ui, (uint32_t) port_index));
+		control_ui->automate_button.signal_clicked().connect (sigc::bind (sigc::mem_fun(*this, &GenericPluginUI::astate_clicked), control_ui));
 
 		automation_state_changed (control_ui);
 
-		mcontrol->Changed.connect (control_connections, invalidator (*this), boost::bind (&GenericPluginUI::ui_parameter_changed, this, control_ui), gui_context());
 		mcontrol->alist()->automation_state_changed.connect (control_connections, invalidator (*this), boost::bind (&GenericPluginUI::automation_state_changed, this, control_ui), gui_context());
 
 		input_controls.push_back (control_ui);
+		input_controls_with_automation.push_back (control_ui);
 
-	} else if (plugin->parameter_is_output (port_index)) {
+	} else if (!is_input) {
 
 		control_ui->display = manage (new EventBox);
 		control_ui->display->set_name ("ParameterValueDisplay");
@@ -657,17 +744,27 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 		control_ui->display_label->set_name ("ParameterValueDisplay");
 
 		control_ui->display->add (*control_ui->display_label);
-		Gtkmm2ext::set_size_request_to_display_given_text (*control_ui->display, "-99,99", 2, 2);
+		Gtkmm2ext::set_size_request_to_display_given_text (*control_ui->display, "-888.8g", 2, 6);
 
 		control_ui->display->show_all ();
 
 		/* set up a meter */
 		/* TODO: only make a meter if the port is Hinted for it */
 
-		MeterInfo * info = new MeterInfo(port_index);
+		MeterInfo * info = new MeterInfo();
  		control_ui->meterinfo = info;
 
-		info->meter = new FastMeter (5, 5, FastMeter::Vertical);
+		info->meter = new FastMeter (
+				5, 5, FastMeter::Vertical, 0,
+				0x0000aaff,
+				0x008800ff, 0x008800ff,
+				0x00ff00ff, 0x00ff00ff,
+				0xcccc00ff, 0xcccc00ff,
+				0xffaa00ff, 0xffaa00ff,
+				0xff0000ff,
+				ARDOUR_UI::config()->color ("meter background bottom"),
+				ARDOUR_UI::config()->color ("meter background top")
+				);
 
 		info->min_unbound = desc.min_unbound;
 		info->max_unbound = desc.max_unbound;
@@ -677,6 +774,9 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 
 		control_ui->vbox = manage (new VBox);
 		control_ui->hbox = manage (new HBox);
+
+		control_ui->hbox->set_spacing(1);
+		control_ui->vbox->set_spacing(3);
 
 		control_ui->label.set_angle(90);
 		control_ui->hbox->pack_start (control_ui->label, false, false);
@@ -702,19 +802,7 @@ GenericPluginUI::build_control_ui (guint32 port_index, boost::shared_ptr<Automat
 }
 
 void
-GenericPluginUI::start_touch (GenericPluginUI::ControlUI* cui)
-{
-	cui->control->start_touch (cui->control->session().transport_frame());
-}
-
-void
-GenericPluginUI::stop_touch (GenericPluginUI::ControlUI* cui)
-{
-	cui->control->stop_touch (false, cui->control->session().transport_frame());
-}
-
-void
-GenericPluginUI::astate_clicked (ControlUI* cui, uint32_t /*port*/)
+GenericPluginUI::astate_clicked (ControlUI* cui)
 {
 	using namespace Menu_Helpers;
 
@@ -738,6 +826,16 @@ GenericPluginUI::astate_clicked (ControlUI* cui, uint32_t /*port*/)
 	automation_menu->popup (1, gtk_get_current_event_time());
 }
 
+void 
+GenericPluginUI::set_all_automation (AutoState as)
+{
+	for (vector<ControlUI*>::iterator i = input_controls_with_automation.begin(); i != input_controls_with_automation.end(); ++i) {
+		if ((*i)->controller || (*i)->button) {
+			set_automation_state (as, (*i));
+		}
+	}
+}
+
 void
 GenericPluginUI::set_automation_state (AutoState state, ControlUI* cui)
 {
@@ -752,8 +850,10 @@ GenericPluginUI::toggle_parameter_changed (ControlUI* cui)
 	if (!cui->ignore_change) {
 		if (val > 0.5) {
 			cui->button->set_active (true);
+			cui->button->set_name ("PluginEditorButton-active");
 		} else {
 			cui->button->set_active (false);
+			cui->button->set_name ("PluginEditorButton");
 		}
 	}
 }
@@ -779,7 +879,7 @@ GenericPluginUI::update_control_display (ControlUI* cui)
 	cui->ignore_change++;
 
 	if (cui->combo && cui->scale_points) {
-		for (ARDOUR::Plugin::ScalePoints::iterator it = cui->scale_points->begin(); it != cui->scale_points->end(); ++it) {
+		for (ARDOUR::ScalePoints::iterator it = cui->scale_points->begin(); it != cui->scale_points->end(); ++it) {
 			if (it->second == val) {
 				cui->combo->set_active_text(it->first);
 				break;
@@ -814,7 +914,13 @@ void
 GenericPluginUI::control_port_toggled (ControlUI* cui)
 {
 	cui->ignore_change++;
-	insert->automation_control (cui->parameter())->set_value (cui->button->get_active());
+	const bool active = cui->button->get_active();
+	if (active) {
+		cui->button->set_name ("PluginEditorButton-active");
+	} else {
+		cui->button->set_name ("PluginEditorButton");
+	}
+	insert->automation_control (cui->parameter())->set_value (active);
 	cui->ignore_change--;
 }
 
@@ -832,8 +938,7 @@ GenericPluginUI::start_updating (GdkEventAny*)
 {
 	if (output_controls.size() > 0 ) {
 		screen_update_connection.disconnect();
-		screen_update_connection = ARDOUR_UI::instance()->RapidScreenUpdate.connect
-			(sigc::mem_fun(*this, &GenericPluginUI::output_update));
+		screen_update_connection = Timers::super_rapid_connect (sigc::mem_fun(*this, &GenericPluginUI::output_update));
 	}
 	return false;
 }
@@ -856,7 +961,7 @@ void
 GenericPluginUI::output_update ()
 {
 	for (vector<ControlUI*>::iterator i = output_controls.begin(); i != output_controls.end(); ++i) {
-		float val = plugin->get_parameter ((*i)->port_index);
+		float val = plugin->get_parameter ((*i)->parameter().id());
 		char buf[32];
 		snprintf (buf, sizeof(buf), "%.2f", val);
 		(*i)->display_label->set_text (buf);
@@ -886,4 +991,20 @@ GenericPluginUI::output_update ()
 	}
 }
 
+void
+GenericPluginUI::set_property (const ParameterDescriptor& desc,
+                               Gtk::FileChooserButton*    widget)
+{
+	plugin->set_property(desc.key, Variant(Variant::PATH, widget->get_filename()));
+}
 
+void
+GenericPluginUI::property_changed (uint32_t key, const Variant& value)
+{
+	PropertyControls::iterator c = _property_controls.find(key);
+	if (c != _property_controls.end()) {
+		c->second->set_filename(value.get_path());
+	} else {
+		std::cerr << "warning: property change for property with no control" << std::endl;
+	}
+}

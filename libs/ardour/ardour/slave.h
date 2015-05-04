@@ -24,13 +24,13 @@
 
 #include <glibmm/threads.h>
 
-#include <jack/jack.h>
+#include <ltc.h>
 
 #include "pbd/signals.h"
 
 #include "timecode/time.h"
-#include "ltc/ltc.h"
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "midi++/parser.h"
 #include "midi++/types.h"
@@ -40,14 +40,12 @@
 #define PLUSMINUS(A) ( ((A)<0) ? "-" : (((A)>0) ? "+" : "\u00B1") )
 #define LEADINGZERO(A) ( (A)<10 ? "   " : (A)<100 ? "  " : (A)<1000 ? " " : "" )
 
-namespace MIDI {
-	class Port;
-}
-
 namespace ARDOUR {
 
 class TempoMap;
 class Session;
+class AudioEngine;
+class MidiPort;
 
 /**
  * @class Slave
@@ -61,7 +59,7 @@ class Session;
  * Therefore it is rather that class, that makes ARDOUR a slave by connecting it
  * to its external time master.
  */
-class Slave {
+class LIBARDOUR_API Slave {
   public:
 	Slave() { }
 	virtual ~Slave() {}
@@ -182,15 +180,17 @@ class Slave {
 };
 
 /// We need this wrapper for testability, it's just too hard to mock up a session class
-class ISlaveSessionProxy {
+class LIBARDOUR_API ISlaveSessionProxy {
   public:
 	virtual ~ISlaveSessionProxy() {}
-	virtual TempoMap&  tempo_map()                 const   { return *((TempoMap *) 0); }
-	virtual framecnt_t frame_rate()                const   { return 0; }
-	virtual framepos_t audible_frame ()            const   { return 0; }
-	virtual framepos_t transport_frame ()          const   { return 0; }
-	virtual pframes_t  frames_since_cycle_start () const   { return 0; }
-	virtual framepos_t frame_time ()               const   { return 0; }
+	virtual TempoMap&  tempo_map()                  const   { return *((TempoMap *) 0); }
+	virtual framecnt_t frame_rate()                 const   { return 0; }
+	virtual pframes_t  frames_per_cycle()           const   { return 0; }
+	virtual framepos_t audible_frame ()             const   { return 0; }
+	virtual framepos_t transport_frame ()           const   { return 0; }
+	virtual pframes_t  frames_since_cycle_start ()  const   { return 0; }
+	virtual framepos_t sample_time_at_cycle_start() const   { return 0; }
+	virtual framepos_t frame_time ()                const   { return 0; }
 
 	virtual void request_locate (framepos_t /*frame*/, bool with_roll = false) {
 		(void) with_roll;
@@ -200,24 +200,26 @@ class ISlaveSessionProxy {
 
 
 /// The Session Proxy for use in real Ardour
-class SlaveSessionProxy : public ISlaveSessionProxy {
+class LIBARDOUR_API SlaveSessionProxy : public ISlaveSessionProxy {
 	Session&    session;
 
   public:
 	SlaveSessionProxy(Session &s) : session(s) {}
 
-	TempoMap&  tempo_map()                 const;
-	framecnt_t frame_rate()                const;
-	framepos_t audible_frame ()            const;
-	framepos_t transport_frame ()          const;
-	pframes_t  frames_since_cycle_start () const;
-	framepos_t frame_time ()               const;
+	TempoMap&  tempo_map()                   const;
+	framecnt_t frame_rate()                  const;
+	pframes_t  frames_per_cycle()            const;
+	framepos_t audible_frame ()              const;
+	framepos_t transport_frame ()            const;
+	pframes_t  frames_since_cycle_start ()   const;
+	framepos_t sample_time_at_cycle_start()  const;
+	framepos_t frame_time ()                 const;
 
 	void request_locate (framepos_t frame, bool with_roll = false);
 	void request_transport_speed (double speed);
 };
 
-struct SafeTime {
+struct LIBARDOUR_API SafeTime {
 	volatile int guard1;
 	framepos_t   position;
 	framepos_t   timestamp;
@@ -233,7 +235,7 @@ struct SafeTime {
 	}
 };
 
-class TimecodeSlave : public Slave {
+class LIBARDOUR_API TimecodeSlave : public Slave {
   public:
     TimecodeSlave () {}
 
@@ -250,12 +252,12 @@ class TimecodeSlave : public Slave {
     bool              timecode_negative_offset;
 };
 
-class MTC_Slave : public TimecodeSlave {
+class LIBARDOUR_API MTC_Slave : public TimecodeSlave {
   public:
-	MTC_Slave (Session&, MIDI::Port&);
+	MTC_Slave (Session&, MidiPort&);
 	~MTC_Slave ();
 
-	void rebind (MIDI::Port&);
+	void rebind (MidiPort&);
 	bool speed_and_position (double&, framepos_t&);
 
 	bool locked() const;
@@ -273,7 +275,7 @@ class MTC_Slave : public TimecodeSlave {
 
   private:
 	Session&    session;
-	MIDI::Port* port;
+	MidiPort*   port;
 	PBD::ScopedConnectionList port_connections;
 	PBD::ScopedConnection     config_connection;
 	bool        can_notify_on_unknown_rate;
@@ -334,7 +336,7 @@ class MTC_Slave : public TimecodeSlave {
 	void parameter_changed(std::string const & p);
 };
 
-class LTC_Slave : public TimecodeSlave {
+class LIBARDOUR_API LTC_Slave : public TimecodeSlave {
 public:
 	LTC_Slave (Session&);
 	~LTC_Slave ();
@@ -354,7 +356,7 @@ public:
 	std::string approximate_current_delta() const;
 
   private:
-	void parse_ltc(const jack_nframes_t, const jack_default_audio_sample_t * const, const framecnt_t);
+	void parse_ltc(const pframes_t, const Sample* const, const framecnt_t);
 	void process_ltc(framepos_t const);
 	void init_engine_dll (framepos_t, int32_t);
 	bool detect_discontinuity(LTCFrameExt *, int, bool);
@@ -386,12 +388,13 @@ public:
 	int            ltc_detect_fps_cnt;
 	int            ltc_detect_fps_max;
 	bool           printed_timecode_warning;
+	bool           sync_lock_broken;
 	Timecode::TimecodeFormat ltc_timecode;
 	Timecode::TimecodeFormat a3e_timecode;
 
 	PBD::ScopedConnectionList port_connections;
 	PBD::ScopedConnection     config_connection;
-	jack_latency_range_t      ltc_slave_latency;
+        LatencyRange  ltc_slave_latency;
 
 	/* DLL - chase LTC */
 	int    transport_direction;
@@ -402,15 +405,15 @@ public:
 	double b, c; ///< DLL filter coefficients
 };
 
-class MIDIClock_Slave : public Slave {
+class LIBARDOUR_API MIDIClock_Slave : public Slave {
   public:
-	MIDIClock_Slave (Session&, MIDI::Port&, int ppqn = 24);
+	MIDIClock_Slave (Session&, MidiPort&, int ppqn = 24);
 
 	/// Constructor for unit tests
 	MIDIClock_Slave (ISlaveSessionProxy* session_proxy = 0, int ppqn = 24);
 	~MIDIClock_Slave ();
 
-	void rebind (MIDI::Port&);
+	void rebind (MidiPort&);
 	bool speed_and_position (double&, framepos_t&);
 
 	bool locked() const;
@@ -426,7 +429,6 @@ class MIDIClock_Slave : public Slave {
 
   protected:
 	ISlaveSessionProxy* session;
-	MIDI::Port* port;
 	PBD::ScopedConnectionList port_connections;
 
 	/// pulses per quarter note for one MIDI clock frame (default 24)
@@ -489,11 +491,11 @@ class MIDIClock_Slave : public Slave {
 	bool _starting;
 };
 
-class JACK_Slave : public Slave
+class LIBARDOUR_API Engine_Slave : public Slave
 {
   public:
-	JACK_Slave (jack_client_t*);
-	~JACK_Slave ();
+	Engine_Slave (AudioEngine&);
+	~Engine_Slave ();
 
 	bool speed_and_position (double& speed, framepos_t& pos);
 
@@ -502,12 +504,10 @@ class JACK_Slave : public Slave
 	bool ok() const;
 	framecnt_t resolution () const { return 1; }
 	bool requires_seekahead () const { return false; }
-	void reset_client (jack_client_t* jack);
 	bool is_always_synced() const { return true; }
 
   private:
-	jack_client_t* jack;
-	double speed;
+        AudioEngine& engine;
 	bool _starting;
 };
 

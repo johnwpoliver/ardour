@@ -27,7 +27,6 @@
 #include "streamview.h"
 #include "time_axis_view_item.h"
 #include "route_time_axis.h"
-#include "canvas.h"
 
 namespace Gdk {
 	class Color;
@@ -40,6 +39,10 @@ namespace ARDOUR {
 	class Route;
 	class Source;
 	struct PeakData;
+}
+
+namespace ArdourCanvas {
+	class LineSet;
 }
 
 class PublicEditor;
@@ -65,7 +68,7 @@ class MidiStreamView : public StreamView
 	};
 
 	Gtk::Adjustment note_range_adjustment;
-	ArdourCanvas::Group* midi_underlay_group;
+	ArdourCanvas::Container* midi_underlay_group;
 
 	void set_note_range(VisibleNoteRange r);
 
@@ -76,8 +79,6 @@ class MidiStreamView : public StreamView
 
 	void redisplay_track ();
 
-	void leave_internal_edit_mode ();
-	
 	inline double contents_height() const
 	{ return (child_height() - TimeAxisViewItem::NAME_HIGHLIGHT_SIZE - 2); }
 
@@ -97,14 +98,18 @@ class MidiStreamView : public StreamView
 
 	RegionView* create_region_view (boost::shared_ptr<ARDOUR::Region>, bool, bool);
 
+	bool paste (ARDOUR::framepos_t pos, const Selection& selection, PasteContext& ctx);
+
 	void apply_note_range(uint8_t lowest, uint8_t highest, bool to_region_views);
 
 	void suspend_updates ();
 	void resume_updates ();
 
-  private:
+  protected:
 	void setup_rec_box ();
 	void update_rec_box ();
+
+  private:
 
 	RegionView* add_region_view_internal (
 		boost::shared_ptr<ARDOUR::Region>,

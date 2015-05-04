@@ -35,8 +35,6 @@ private:
 		return get_width();
 	}
 
-	PBD::PropertyList default_properties () const;
-        ARDOUR::RouteSortOrderKey  order_key () const;
 	ARDOUR::RouteList selected_routes () const;
 	void sync_order_keys ();
 

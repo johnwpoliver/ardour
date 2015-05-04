@@ -23,15 +23,17 @@
 #include <map>
 #include <string>
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/utils.h"
-#include "ardour/configuration.h"
+
+#include "pbd/configuration.h"
 
 class XMLNode;
 
 namespace ARDOUR {
 
-class RCConfiguration : public Configuration
+class LIBARDOUR_API RCConfiguration : public PBD::Configuration
 {
   public:
 	RCConfiguration();
@@ -52,7 +54,6 @@ class RCConfiguration : public Configuration
 	XMLNode * instant_xml (const std::string& str);
 
 	XMLNode* control_protocol_state () { return _control_protocol_state; }
-	std::list<XMLNode*> midi_port_states () { return _midi_port_states; }
 
 	/* define accessor methods */
 
@@ -74,23 +75,18 @@ class RCConfiguration : public Configuration
 
 #undef  CONFIG_VARIABLE
 #undef  CONFIG_VARIABLE_SPECIAL
-#define CONFIG_VARIABLE(Type,var,name,value) ConfigVariable<Type> var;
-#define CONFIG_VARIABLE_SPECIAL(Type,var,name,value,mutator) ConfigVariableWithMutation<Type> var;
+#define CONFIG_VARIABLE(Type,var,name,value) PBD::ConfigVariable<Type> var;
+#define CONFIG_VARIABLE_SPECIAL(Type,var,name,value,mutator) PBD::ConfigVariableWithMutation<Type> var;
 #include "ardour/rc_configuration_vars.h"
 #undef  CONFIG_VARIABLE
 #undef  CONFIG_VARIABLE_SPECIAL
 
 	XMLNode* _control_protocol_state;
-
-	/** MIDI port nodes from the RC configuration.  We store them so that we can set their
-	    state once the audio engine and hence ports are up.
-	*/
-	std::list<XMLNode*> _midi_port_states;
 };
 
 /* XXX: rename this */
-extern RCConfiguration *Config;
-extern gain_t speed_quietning; /* see comment in configuration.cc */
+LIBARDOUR_API extern RCConfiguration *Config;
+LIBARDOUR_API extern gain_t speed_quietning; /* see comment in configuration.cc */
 
 } // namespace ARDOUR
 

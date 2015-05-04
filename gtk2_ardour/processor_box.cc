@@ -38,13 +38,16 @@
 #include <gtkmm2ext/choice.h>
 #include <gtkmm2ext/utils.h>
 #include <gtkmm2ext/doi.h>
+#include <gtkmm2ext/rgb_macros.h>
 
 #include "ardour/amp.h"
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
 #include "ardour/internal_return.h"
 #include "ardour/internal_send.h"
+#include "ardour/panner_shell.h"
 #include "ardour/plugin_insert.h"
+#include "ardour/pannable.h"
 #include "ardour/port_insert.h"
 #include "ardour/profile.h"
 #include "ardour/return.h"
@@ -69,7 +72,7 @@
 #include "return_ui.h"
 #include "route_processor_selection.h"
 #include "send_ui.h"
-#include "utils.h"
+#include "timers.h"
 
 #include "i18n.h"
 
@@ -91,36 +94,61 @@ RefPtr<Action> ProcessorBox::rename_action;
 RefPtr<Action> ProcessorBox::edit_action;
 RefPtr<Action> ProcessorBox::edit_generic_action;
 
+static const uint32_t audio_port_color = 0x4A8A0EFF; // Green
+static const uint32_t midi_port_color = 0x960909FF; //Red
+
 ProcessorEntry::ProcessorEntry (ProcessorBox* parent, boost::shared_ptr<Processor> p, Width w)
 	: _button (ArdourButton::led_default_elements)
 	, _position (PreFader)
+	, _position_num(0)
+	, _selectable(true)
 	, _parent (parent)
 	, _processor (p)
 	, _width (w)
-	, _visual_state (Gtk::STATE_NORMAL)
+	, _input_icon(true)
+	, _output_icon(false)
 {
 	_vbox.show ();
 	
-	_button.set_diameter (3);
 	_button.set_distinct_led_click (true);
+	_button.set_fallthrough_to_parent(true);
 	_button.set_led_left (true);
 	_button.signal_led_clicked.connect (sigc::mem_fun (*this, &ProcessorEntry::led_clicked));
 	_button.set_text (name (_width));
 
 	if (_processor) {
 
+		_vbox.pack_start (_routing_icon);
+		_vbox.pack_start (_input_icon);
 		_vbox.pack_start (_button, true, true);
+		_vbox.pack_end (_output_icon);
 
 		_button.set_active (_processor->active());
+
+		_routing_icon.set_no_show_all(true);
+		_input_icon.set_no_show_all(true);
+
 		_button.show ();
-		
+		_routing_icon.set_visible(false);
+		_input_icon.hide();
+		_output_icon.show();
+
 		_processor->ActiveChanged.connect (active_connection, invalidator (*this), boost::bind (&ProcessorEntry::processor_active_changed, this), gui_context());
 		_processor->PropertyChanged.connect (name_connection, invalidator (*this), boost::bind (&ProcessorEntry::processor_property_changed, this, _1), gui_context());
+		_processor->ConfigurationChanged.connect (config_connection, invalidator (*this), boost::bind (&ProcessorEntry::processor_configuration_changed, this, _1, _2), gui_context());
 
 		set<Evoral::Parameter> p = _processor->what_can_be_automated ();
 		for (set<Evoral::Parameter>::iterator i = p.begin(); i != p.end(); ++i) {
 			
-			Control* c = new Control (_processor->automation_control (*i), _processor->describe_parameter (*i));
+			std::string label = _processor->describe_parameter (*i);
+
+			if (boost::dynamic_pointer_cast<Send> (_processor)) {
+				label = _("Send");
+			} else if (boost::dynamic_pointer_cast<Return> (_processor)) {
+				label = _("Return");
+			}
+
+			Control* c = new Control (_processor->automation_control (*i), label);
 			
 			_controls.push_back (c);
 
@@ -128,12 +156,13 @@ ProcessorEntry::ProcessorEntry (ProcessorBox* parent, boost::shared_ptr<Processo
 				/* Add non-Amp controls to the processor box */
 				_vbox.pack_start (c->box);
 			}
-
-			if (boost::dynamic_pointer_cast<Send> (_processor)) {
-				/* Don't label send faders */
-				c->hide_label ();
-			}
 		}
+
+		_input_icon.set_ports(_processor->input_streams());
+		_output_icon.set_ports(_processor->output_streams());
+
+		_routing_icon.set_sources(_processor->input_streams());
+		_routing_icon.set_sinks(_processor->output_streams());
 
 		setup_tooltip ();
 		setup_visuals ();
@@ -168,9 +197,17 @@ ProcessorEntry::drag_text () const
 }
 
 void
-ProcessorEntry::set_position (Position p)
+ProcessorEntry::set_position (Position p, uint32_t num)
 {
 	_position = p;
+	_position_num = num;
+
+	if (_position_num == 0 || _routing_icon.get_visible()) {
+		_input_icon.show();
+	} else {
+		_input_icon.hide();
+	}
+
 	setup_visuals ();
 }
 
@@ -213,6 +250,7 @@ void
 ProcessorEntry::set_enum_width (Width w)
 {
 	_width = w;
+	_button.set_text (name (_width));
 }
 
 void
@@ -245,9 +283,39 @@ ProcessorEntry::processor_property_changed (const PropertyChange& what_changed)
 }
 
 void
+ProcessorEntry::processor_configuration_changed (const ChanCount in, const ChanCount out)
+{
+	_input_icon.set_ports(in);
+	_output_icon.set_ports(out);
+	_routing_icon.set_sources(in);
+	_routing_icon.set_sinks(out);
+	_input_icon.queue_draw();
+	_output_icon.queue_draw();
+	_routing_icon.queue_draw();
+}
+
+void
 ProcessorEntry::setup_tooltip ()
 {
-	ARDOUR_UI::instance()->set_tip (_button, name (Wide));
+	if (_processor) {
+		boost::shared_ptr<PluginInsert> pi = boost::dynamic_pointer_cast<PluginInsert> (_processor);
+		if (pi) {
+			std::string postfix = "";
+			uint32_t replicated;
+			if ((replicated = pi->get_count()) > 1) {
+				postfix = string_compose(_("\nThis mono plugin has been replicated %1 times."), replicated);
+			}
+			if (pi->plugin()->has_editor()) {
+				ARDOUR_UI::instance()->set_tip (_button,
+						string_compose (_("<b>%1</b>\nDouble-click to show GUI.\nAlt+double-click to show generic GUI.%2"), name (Wide), postfix));
+			} else {
+				ARDOUR_UI::instance()->set_tip (_button,
+						string_compose (_("<b>%1</b>\nDouble-click to show generic GUI.%2"), name (Wide), postfix));
+			}
+			return;
+		}
+	}
+	ARDOUR_UI::instance()->set_tip (_button, string_compose ("<b>%1</b>", name (Wide)));
 }
 
 string
@@ -281,6 +349,13 @@ ProcessorEntry::name (Width w) const
 		}
 
 	} else {
+		boost::shared_ptr<ARDOUR::PluginInsert> pi;
+		uint32_t replicated;
+		if ((pi = boost::dynamic_pointer_cast<ARDOUR::PluginInsert> (_processor)) != 0
+				&& (replicated = pi->get_count()) > 1)
+		{
+			name_display += string_compose(_("(%1x1) "), replicated);
+		}
 
 		switch (w) {
 		case Wide:
@@ -368,7 +443,7 @@ ProcessorEntry::build_controls_menu ()
 	
 	for (list<Control*>::iterator i = _controls.begin(); i != _controls.end(); ++i) {
 		items.push_back (CheckMenuElem ((*i)->name ()));
-		CheckMenuItem* c = dynamic_cast<CheckMenuItem*> (&items.back ());
+		Gtk::CheckMenuItem* c = dynamic_cast<Gtk::CheckMenuItem*> (&items.back ());
 		c->set_active ((*i)->visible ());
 		c->signal_toggled().connect (sigc::bind (sigc::mem_fun (*this, &ProcessorEntry::toggle_control_visibility), *i));
 	}
@@ -383,23 +458,52 @@ ProcessorEntry::toggle_control_visibility (Control* c)
 	_parent->update_gui_object_state (this);
 }
 
+Menu *
+ProcessorEntry::build_send_options_menu ()
+{
+	using namespace Menu_Helpers;
+	Menu* menu = manage (new Menu);
+	MenuList& items = menu->items ();
+
+	boost::shared_ptr<Send> send = boost::dynamic_pointer_cast<Send> (_processor);
+	if (send) {
+
+		items.push_back (CheckMenuElem (_("Link panner controls")));
+		Gtk::CheckMenuItem* c = dynamic_cast<Gtk::CheckMenuItem*> (&items.back ());
+		c->set_active (send->panner_shell()->is_linked_to_route());
+		c->signal_toggled().connect (sigc::mem_fun (*this, &ProcessorEntry::toggle_panner_link));
+
+	}
+	return menu;
+}
+
+void
+ProcessorEntry::toggle_panner_link ()
+{
+	boost::shared_ptr<Send> send = boost::dynamic_pointer_cast<Send> (_processor);
+	if (send) {
+		send->panner_shell()->set_linked_to_route(!send->panner_shell()->is_linked_to_route());
+	}
+}
+
 ProcessorEntry::Control::Control (boost::shared_ptr<AutomationControl> c, string const & n)
 	: _control (c)
 	, _adjustment (gain_to_slider_position_with_max (1.0, Config->get_max_gain()), 0, 1, 0.01, 0.1)
-	, _slider (&_adjustment, 0, 13, false)
+	, _slider (&_adjustment, boost::shared_ptr<PBD::Controllable>(), 0, max(13.f, rintf(13.f * ARDOUR_UI::ui_scale)))
 	, _slider_persistant_tooltip (&_slider)
-	, _button (ArdourButton::Element (ArdourButton::Text | ArdourButton::Indicator))
+	, _button (ArdourButton::led_default_elements)
 	, _ignore_ui_adjustment (false)
 	, _visible (false)
 	, _name (n)
 {
 	_slider.set_controllable (c);
+	box.set_padding(0, 0, 4, 4);
 
 	if (c->toggled()) {
 		_button.set_text (_name);
 		_button.set_led_left (true);
 		_button.set_name ("processor control button");
-		box.pack_start (_button);
+		box.add (_button);
 		_button.show ();
 
 		_button.signal_clicked.connect (sigc::mem_fun (*this, &Control::button_clicked));
@@ -408,26 +512,42 @@ ProcessorEntry::Control::Control (boost::shared_ptr<AutomationControl> c, string
 
 	} else {
 		
-		_slider.set_name ("PluginSlider");
+		_slider.set_name ("ProcessorControlSlider");
 		_slider.set_text (_name);
 
-		box.pack_start (_slider);
+		box.add (_slider);
 		_slider.show ();
 
-		double const lo = c->internal_to_interface (c->lower ());
-		double const up = c->internal_to_interface (c->upper ());
-		
+		const ARDOUR::ParameterDescriptor& desc = c->desc();
+		double const lo = c->internal_to_interface(desc.lower);
+		double const up = c->internal_to_interface(desc.upper);
+		double const normal = c->internal_to_interface(desc.normal);
+		double smallstep = desc.smallstep;
+		double largestep = desc.largestep;
+
+		if (smallstep == 0.0) {
+			smallstep = up / 1000.;
+		} else {
+			smallstep = c->internal_to_interface(desc.lower + smallstep);
+		}
+
+		if (largestep == 0.0) {
+			largestep = up / 40.;
+		} else {
+			largestep = c->internal_to_interface(desc.lower + largestep);
+		}
+
 		_adjustment.set_lower (lo);
 		_adjustment.set_upper (up);
-		_adjustment.set_step_increment ((up - lo) / 100);
-		_adjustment.set_page_increment ((up - lo) / 10);
-		_slider.set_default_value (c->internal_to_interface (c->normal ()));
+		_adjustment.set_step_increment (smallstep);
+		_adjustment.set_page_increment (largestep);
+		_slider.set_default_value (normal);
 		
 		_adjustment.signal_value_changed().connect (sigc::mem_fun (*this, &Control::slider_adjusted));
 		c->Changed.connect (_connection, MISSING_INVALIDATOR, boost::bind (&Control::control_changed, this), gui_context ());
 	}
 
-	ARDOUR_UI::RapidScreenUpdate.connect (sigc::mem_fun (*this, &Control::control_changed));
+	Timers::rapid_connect (sigc::mem_fun (*this, &Control::control_changed));
 	
 	control_changed ();
 	set_tooltip ();
@@ -456,7 +576,6 @@ ProcessorEntry::Control::set_tooltip ()
 
 	string sm = Glib::Markup::escape_text (s.str());
 	
-	ARDOUR_UI::instance()->set_tip (_label, sm);
 	_slider_persistant_tooltip.set_tip (sm);
 	ARDOUR_UI::instance()->set_tip (_button, sm);
 }
@@ -474,7 +593,7 @@ ProcessorEntry::Control::slider_adjusted ()
 		return;
 	}
 
-	c->set_value (c->interface_to_internal (_adjustment.get_value ()));
+	c->set_value ( c->interface_to_internal(_adjustment.get_value ()) );
 	set_tooltip ();
 }
 
@@ -491,6 +610,7 @@ ProcessorEntry::Control::button_clicked ()
 
 	c->set_value (n ? 0 : 1);
 	_button.set_active (!n);
+	set_tooltip ();
 }
 
 void
@@ -509,12 +629,8 @@ ProcessorEntry::Control::control_changed ()
 		
 	} else {
 
-		_adjustment.set_value (c->internal_to_interface (c->get_value ()));
-		
-		stringstream s;
-		s.precision (1);
-		s.setf (ios::fixed, ios::floatfield);
-		s << c->internal_to_user (c->get_value ());
+		_adjustment.set_value (c->internal_to_interface(c->get_value ()));
+		set_tooltip ();
 	}
 	
 	_ignore_ui_adjustment = false;
@@ -564,12 +680,6 @@ ProcessorEntry::Control::hide_things ()
 	}
 }
 
-void
-ProcessorEntry::Control::hide_label ()
-{
-	_label.hide ();
-}
-
 string
 ProcessorEntry::Control::state_id () const
 {
@@ -579,23 +689,13 @@ ProcessorEntry::Control::state_id () const
 	return string_compose (X_("control %1"), c->id().to_s ());
 }
 
-BlankProcessorEntry::BlankProcessorEntry (ProcessorBox* b, Width w)
-	: ProcessorEntry (b, boost::shared_ptr<Processor>(), w)
-{
-}
-
 PluginInsertProcessorEntry::PluginInsertProcessorEntry (ProcessorBox* b, boost::shared_ptr<ARDOUR::PluginInsert> p, Width w)
 	: ProcessorEntry (b, p, w)
 	, _plugin_insert (p)
 {
-	p->SplittingChanged.connect (
+	p->PluginIoReConfigure.connect (
 		_splitting_connection, invalidator (*this), boost::bind (&PluginInsertProcessorEntry::plugin_insert_splitting_changed, this), gui_context()
 		);
-
-	_splitting_icon.set_size_request (-1, 12);
-
-	_vbox.pack_start (_splitting_icon);
-	_vbox.reorder_child (_splitting_icon, 0);
 
 	plugin_insert_splitting_changed ();
 }
@@ -603,11 +703,46 @@ PluginInsertProcessorEntry::PluginInsertProcessorEntry (ProcessorBox* b, boost::
 void
 PluginInsertProcessorEntry::plugin_insert_splitting_changed ()
 {
-	if (_plugin_insert->splitting ()) {
-		_splitting_icon.show ();
-	} else {
-		_splitting_icon.hide ();
+	_output_icon.set_ports(_plugin_insert->output_streams());
+	_routing_icon.set_splitting(_plugin_insert->splitting ());
+
+	ChanCount sources = _plugin_insert->input_streams();
+	ChanCount sinks = _plugin_insert->natural_input_streams();
+
+	/* replicated instances */
+	if (!_plugin_insert->splitting () && _plugin_insert->get_count() > 1) {
+		for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
+			sinks.set(*t, sinks.get(*t) * _plugin_insert->get_count());
+		}
 	}
+	/* MIDI bypass */
+	if (_plugin_insert->natural_output_streams().n_midi() == 0 &&
+			_plugin_insert->output_streams().n_midi() == 1) {
+		sinks.set(DataType::MIDI, 1);
+		sources.set(DataType::MIDI, 1);
+	}
+
+	_input_icon.set_ports(sinks);
+	_routing_icon.set_sinks(sinks);
+	_routing_icon.set_sources(sources);
+
+	if (_plugin_insert->splitting () ||
+			_plugin_insert->input_streams().n_audio() < _plugin_insert->natural_input_streams().n_audio()
+		 )
+	{
+		_routing_icon.set_size_request (-1, std::max (7.f, rintf(7.f * ARDOUR_UI::ui_scale)));
+		_routing_icon.set_visible(true);
+		_input_icon.show();
+	} else {
+		_routing_icon.set_visible(false);
+		if (_position_num != 0) {
+			_input_icon.hide();
+		}
+	}
+
+	_input_icon.queue_draw();
+	_output_icon.queue_draw();
+	_routing_icon.queue_draw();
 }
 
 void
@@ -617,35 +752,84 @@ PluginInsertProcessorEntry::hide_things ()
 	plugin_insert_splitting_changed ();
 }
 
-void
-PluginInsertProcessorEntry::setup_visuals ()
-{
-	switch (_position) {
-	case PreFader:
-		_splitting_icon.set_name ("ProcessorPreFader");
-		break;
-
-	case Fader:
-		_splitting_icon.set_name ("ProcessorFader");
-		break;
-
-	case PostFader:
-		_splitting_icon.set_name ("ProcessorPostFader");
-		break;
-	}
-
-	ProcessorEntry::setup_visuals ();
+ProcessorEntry::PortIcon::PortIcon(bool input) {
+	_input = input;
+	_ports = ARDOUR::ChanCount(ARDOUR::DataType::AUDIO, 1);
+	set_size_request (-1, std::max (2.f, rintf(2.f * ARDOUR_UI::ui_scale)));
 }
 
 bool
-PluginInsertProcessorEntry::SplittingIcon::on_expose_event (GdkEventExpose* ev)
+ProcessorEntry::PortIcon::on_expose_event (GdkEventExpose* ev)
 {
 	cairo_t* cr = gdk_cairo_create (get_window()->gobj());
 
-	cairo_set_line_width (cr, 1);
+	cairo_rectangle (cr, ev->area.x, ev->area.y, ev->area.width, ev->area.height);
+	cairo_clip (cr);
 
-	double const width = ev->area.width;
-	double const height = ev->area.height;
+	Gtk::Allocation a = get_allocation();
+	double const width = a.get_width();
+	double const height = a.get_height();
+
+	Gdk::Color const bg = get_style()->get_bg (STATE_NORMAL);
+	cairo_set_source_rgb (cr, bg.get_red_p (), bg.get_green_p (), bg.get_blue_p ());
+
+	cairo_rectangle (cr, 0, 0, width, height);
+	cairo_fill (cr);
+
+	const double dx = rint(max(2., 2. * ARDOUR_UI::ui_scale));
+	if (_ports.n_total() > 1) {
+		for (uint32_t i = 0; i < _ports.n_total(); ++i) {
+			if (i < _ports.n_midi()) {
+				cairo_set_source_rgb (cr,
+						UINT_RGBA_R_FLT(midi_port_color),
+						UINT_RGBA_G_FLT(midi_port_color),
+						UINT_RGBA_B_FLT(midi_port_color));
+			} else {
+				cairo_set_source_rgb (cr,
+						UINT_RGBA_R_FLT(audio_port_color),
+						UINT_RGBA_G_FLT(audio_port_color),
+						UINT_RGBA_B_FLT(audio_port_color));
+			}
+			const float x = rintf(width * (.2f + .6f * i / (_ports.n_total() - 1.f)));
+			cairo_rectangle (cr, x-dx * .5, 0, 1+dx, height);
+			cairo_fill(cr);
+		}
+	} else if (_ports.n_total() == 1) {
+		if (_ports.n_midi() == 1) {
+			cairo_set_source_rgb (cr,
+					UINT_RGBA_R_FLT(midi_port_color),
+					UINT_RGBA_G_FLT(midi_port_color),
+					UINT_RGBA_B_FLT(midi_port_color));
+		} else {
+			cairo_set_source_rgb (cr,
+					UINT_RGBA_R_FLT(audio_port_color),
+					UINT_RGBA_G_FLT(audio_port_color),
+					UINT_RGBA_B_FLT(audio_port_color));
+		}
+		const float x = rintf(width * .5);
+		cairo_rectangle (cr, x-dx * .5, 0, 1+dx, height);
+		cairo_fill(cr);
+		cairo_stroke(cr);
+	}
+
+	cairo_destroy(cr);
+	return true;
+}
+
+bool
+ProcessorEntry::RoutingIcon::on_expose_event (GdkEventExpose* ev)
+{
+	cairo_t* cr = gdk_cairo_create (get_window()->gobj());
+
+	cairo_rectangle (cr, ev->area.x, ev->area.y, ev->area.width, ev->area.height);
+	cairo_clip (cr);
+
+	cairo_set_line_width (cr, max (1.f, ARDOUR_UI::ui_scale));
+	cairo_set_line_cap (cr, CAIRO_LINE_CAP_ROUND);
+
+	Gtk::Allocation a = get_allocation();
+	double const width = a.get_width();
+	double const height = a.get_height();
 
 	Gdk::Color const bg = get_style()->get_bg (STATE_NORMAL);
 	cairo_set_source_rgb (cr, bg.get_red_p (), bg.get_green_p (), bg.get_blue_p ());
@@ -656,14 +840,73 @@ PluginInsertProcessorEntry::SplittingIcon::on_expose_event (GdkEventExpose* ev)
 	Gdk::Color const fg = get_style()->get_fg (STATE_NORMAL);
 	cairo_set_source_rgb (cr, fg.get_red_p (), fg.get_green_p (), fg.get_blue_p ());
 
-	cairo_move_to (cr, width * 0.3, height);
-	cairo_line_to (cr, width * 0.3, height * 0.5);
-	cairo_line_to (cr, width * 0.7, height * 0.5);
-	cairo_line_to (cr, width * 0.7, height);
-	cairo_move_to (cr, width * 0.5, height * 0.5);
-	cairo_line_to (cr, width * 0.5, 0);
-	cairo_stroke (cr);
+	const uint32_t sources = _sources.n_total();
+	const uint32_t sinks = _sinks.n_total();
 
+	/* MIDI */
+	const uint32_t midi_sources = _sources.n_midi();
+	const uint32_t midi_sinks = _sinks.n_midi();
+
+	cairo_set_source_rgb (cr,
+			UINT_RGBA_R_FLT(midi_port_color),
+			UINT_RGBA_G_FLT(midi_port_color),
+			UINT_RGBA_B_FLT(midi_port_color));
+	if (midi_sources > 0 && midi_sinks > 0 && sinks > 1 && sources > 1) {
+		for (uint32_t i = 0 ; i < midi_sources; ++i) {
+			const float si_x  = rintf(width * (.2f + .6f * i  / (sinks - 1.f))) + .5f;
+			const float si_x0 = rintf(width * (.2f + .6f * i / (sources - 1.f))) + .5f;
+			cairo_move_to (cr, si_x, height);
+			cairo_curve_to (cr, si_x, 0, si_x0, height, si_x0, 0);
+			cairo_stroke (cr);
+		}
+	} else if (midi_sources == 1 && midi_sinks == 1 && sinks == 1 && sources == 1) {
+		const float si_x = rintf(width * .5f) + .5f;
+		cairo_move_to (cr, si_x, height);
+		cairo_line_to (cr, si_x, 0);
+		cairo_stroke (cr);
+	} else if (midi_sources == 1 && midi_sinks == 1) {
+		/* unusual cases -- removed synth, midi-track w/audio plugins */
+		const float si_x  = rintf(width * (sinks   > 1 ? .2f : .5f)) + .5f;
+		const float si_x0 = rintf(width * (sources > 1 ? .2f : .5f)) + .5f;
+		cairo_move_to (cr, si_x, height);
+		cairo_curve_to (cr, si_x, 0, si_x0, height, si_x0, 0);
+		cairo_stroke (cr);
+	}
+
+	/* AUDIO */
+	const uint32_t audio_sources = _sources.n_audio();
+	const uint32_t audio_sinks = _sinks.n_audio();
+	cairo_set_source_rgb (cr,
+			UINT_RGBA_R_FLT(audio_port_color),
+			UINT_RGBA_G_FLT(audio_port_color),
+			UINT_RGBA_B_FLT(audio_port_color));
+
+	if (_splitting) {
+		assert(audio_sources < 2);
+		assert(audio_sinks > 1);
+		/* assume there is only ever one MIDI port */
+		const float si_x0 = rintf(width * (midi_sources > 0 ? .8f : .5f)) + .5f;
+		for (uint32_t i = midi_sinks; i < sinks; ++i) {
+			const float si_x = rintf(width * (.2f + .6f * i / (sinks - 1.f))) + .5f;
+			cairo_move_to (cr, si_x, height);
+			cairo_curve_to (cr, si_x, 0, si_x0, height, si_x0, 0);
+			cairo_stroke (cr);
+		}
+	} else if (audio_sources > 1) {
+		for (uint32_t i = 0 ; i < audio_sources; ++i) {
+			const float si_x = rintf(width * (.2f + .6f * (i + midi_sinks) / (sinks - 1.f))) + .5f;
+			const float si_x0 = rintf(width * (.2f + .6f * (i + midi_sources) / (sources - 1.f))) + .5f;
+			cairo_move_to (cr, si_x, height);
+			cairo_curve_to (cr, si_x, 0, si_x0, height, si_x0, 0);
+			cairo_stroke (cr);
+		}
+	} else if (audio_sources == 1 && audio_sinks == 1) {
+		const float si_x = rintf(width * .5f) + .5f;
+		cairo_move_to (cr, si_x, height);
+		cairo_line_to (cr, si_x, 0);
+		cairo_stroke (cr);
+	}
+	cairo_destroy(cr);
 	return true;
 }
 
@@ -693,7 +936,7 @@ ProcessorBox::ProcessorBox (ARDOUR::Session* sess, boost::function<PluginSelecto
 	processor_display.set_name ("ProcessorList");
 	processor_display.set_data ("processorbox", this);
 	processor_display.set_size_request (48, -1);
-	processor_display.set_spacing (2);
+	processor_display.set_spacing (0);
 
 	processor_display.signal_enter_notify_event().connect (sigc::mem_fun(*this, &ProcessorBox::enter_notify), false);
 	processor_display.signal_leave_notify_event().connect (sigc::mem_fun(*this, &ProcessorBox::leave_notify), false);
@@ -777,10 +1020,6 @@ ProcessorBox::object_drop(DnDVBox<ProcessorEntry>* source, ProcessorEntry* posit
 			   `dropped on' processor */
 			list<ProcessorEntry*> c = processor_display.children ();
 			list<ProcessorEntry*>::iterator i = c.begin ();
-			while (dynamic_cast<BlankProcessorEntry*> (*i)) {
-				assert (i != c.end ());
-				++i;
-			}
 
 			assert (i != c.end ());
 			p = (*i)->processor ();
@@ -907,6 +1146,24 @@ ProcessorBox::show_processor_menu (int arg)
 				gtk_menu_item_set_submenu (controls_menu_item->gobj(), 0);
 				controls_menu_item->set_sensitive (false);
 			}
+		} else {
+			controls_menu_item->set_sensitive (false);
+		}
+	}
+
+	Gtk::MenuItem* send_menu_item = dynamic_cast<Gtk::MenuItem*>(ActionManager::get_widget("/ProcessorMenu/send_options"));
+	if (send_menu_item) {
+		if (single_selection) {
+			Menu* m = single_selection->build_send_options_menu ();
+			if (m && !m->items().empty()) {
+				send_menu_item->set_submenu (*m);
+				send_menu_item->set_sensitive (true);
+			} else {
+				gtk_menu_item_set_submenu (send_menu_item->gobj(), 0);
+				send_menu_item->set_sensitive (false);
+			}
+		} else {
+			send_menu_item->set_sensitive (false);
 		}
 	}
 
@@ -918,6 +1175,7 @@ ProcessorBox::show_processor_menu (int arg)
 	const bool sensitive = !processor_display.selection().empty();
 	ActionManager::set_sensitive (ActionManager::plugin_selection_sensitive_actions, sensitive);
 	edit_action->set_sensitive (one_processor_can_be_edited ());
+	edit_generic_action->set_sensitive (one_processor_can_be_edited ());
 
 	boost::shared_ptr<PluginInsert> pi;
 	if (single_selection) {
@@ -925,7 +1183,7 @@ ProcessorBox::show_processor_menu (int arg)
 	}
 
 	/* allow editing with an Ardour-generated UI for plugin inserts with editors */
-	edit_generic_action->set_sensitive (pi && pi->plugin()->has_editor ());
+	edit_action->set_sensitive (pi && pi->plugin()->has_editor ());
 
 	/* disallow rename for multiple selections, for plugin inserts and for the fader */
 	rename_action->set_sensitive (single_selection && !pi && !boost::dynamic_pointer_cast<Amp> (single_selection->processor ()));
@@ -957,14 +1215,14 @@ ProcessorBox::leave_notify (GdkEventCrossing*)
 	return false;
 }
 
-void
+bool
 ProcessorBox::processor_operation (ProcessorOperation op) 
 {
 	ProcSelection targets;
 
 	get_selected_processors (targets);
 
-	if (targets.empty()) {
+/*	if (targets.empty()) {
 
 		int x, y;
 		processor_display.get_pointer (x, y);
@@ -975,10 +1233,18 @@ ProcessorBox::processor_operation (ProcessorOperation op)
 			targets.push_back (pointer.first->processor ());
 		}
 	}
+*/
 
+	if ( (op == ProcessorsDelete) && targets.empty() )
+		return false;  //nothing to delete.  return false so the editor-mixer, because the user was probably intending to delete something in the editor
+	
 	switch (op) {
 	case ProcessorsSelectAll:
 		processor_display.select_all ();
+		break;
+
+	case ProcessorsSelectNone:
+		processor_display.select_none ();
 		break;
 
 	case ProcessorsCopy:
@@ -1018,22 +1284,15 @@ ProcessorBox::processor_operation (ProcessorOperation op)
 	default:
 		break;
 	}
+	
+	return true;
 }
 
 ProcessorWindowProxy* 
 ProcessorBox::find_window_proxy (boost::shared_ptr<Processor> processor) const
 {
-	for (list<ProcessorWindowProxy*>::const_iterator i = _processor_window_info.begin(); i != _processor_window_info.end(); ++i) {
-		boost::shared_ptr<Processor> p = (*i)->processor().lock();
-
-		if (p && p == processor) {
-			return (*i);
-		}
-	}
-
-	return 0;
+	return  processor->window_proxy();
 }
-
 
 
 bool
@@ -1050,16 +1309,25 @@ ProcessorBox::processor_button_press_event (GdkEventButton *ev, ProcessorEntry* 
 	if (processor && (Keyboard::is_edit_event (ev) || (ev->button == 1 && ev->type == GDK_2BUTTON_PRESS))) {
 
 		if (_session->engine().connected()) {
-
 			/* XXX giving an error message here is hard, because we may be in the midst of a button press */
 
-			if (Config->get_use_plugin_own_gui ()) {
-				edit_processor (processor);
-			} else {
+			if (!one_processor_can_be_edited ()) {
+				return true;
+			}
+
+			if (Keyboard::modifier_state_equals (ev->state, Keyboard::SecondaryModifier)) {
 				generic_edit_processor (processor);
+			} else {
+				edit_processor (processor);
 			}
 		}
 
+		ret = true;
+
+	} else if (Keyboard::is_context_menu_event (ev)) {
+
+		show_processor_menu (ev->time);
+		
 		ret = true;
 
 	} else if (processor && ev->button == 1 && selected) {
@@ -1089,10 +1357,6 @@ ProcessorBox::processor_button_release_event (GdkEventButton *ev, ProcessorEntry
 		Glib::signal_idle().connect (sigc::bind (
 				sigc::mem_fun(*this, &ProcessorBox::idle_delete_processor),
 				boost::weak_ptr<Processor>(processor)));
-
-	} else if (Keyboard::is_context_menu_event (ev)) {
-
-		show_processor_menu (ev->time);
 
 	} else if (processor && Keyboard::is_button2_event (ev)
 #ifndef GTKOSX
@@ -1219,7 +1483,8 @@ ProcessorBox::choose_insert ()
 void
 ProcessorBox::choose_send ()
 {
-	boost::shared_ptr<Send> send (new Send (*_session, _route->pannable(), _route->mute_master()));
+	boost::shared_ptr<Pannable> sendpan(new Pannable (*_session));
+	boost::shared_ptr<Send> send (new Send (*_session, sendpan, _route->mute_master()));
 
 	/* make an educated guess at the initial number of outputs for the send */
 	ChanCount outs = (_session->master_out())
@@ -1357,35 +1622,8 @@ ProcessorBox::redisplay_processors ()
 	_route->foreach_processor (sigc::bind (sigc::mem_fun (*this, &ProcessorBox::help_count_visible_prefader_processors), 
 					       &_visible_prefader_processors, &fader_seen));
 
-	if (_visible_prefader_processors == 0) { // fader only
-		BlankProcessorEntry* bpe = new BlankProcessorEntry (this, _width);
-		processor_display.add_child (bpe);
-	}
-
 	_route->foreach_processor (sigc::mem_fun (*this, &ProcessorBox::add_processor_to_display));
-
-	for (list<ProcessorWindowProxy*>::iterator i = _processor_window_info.begin(); i != _processor_window_info.end(); ++i) {
-		(*i)->marked = false;
-	}
-
 	_route->foreach_processor (sigc::mem_fun (*this, &ProcessorBox::maybe_add_processor_to_ui_list));
-
-	/* trim dead wood from the processor window proxy list */
-
-	list<ProcessorWindowProxy*>::iterator i = _processor_window_info.begin();
-	while (i != _processor_window_info.end()) {
-		list<ProcessorWindowProxy*>::iterator j = i;
-		++j;
-
-		if (!(*i)->marked) {
-			WM::Manager::instance().remove (*i);
-			delete *i;
-			_processor_window_info.erase (i);
-		}
-
-		i = j;
-	}
-
 	setup_entry_positions ();
 }
 
@@ -1399,24 +1637,14 @@ ProcessorBox::maybe_add_processor_to_ui_list (boost::weak_ptr<Processor> w)
 	if (!p) {
 		return;
 	}
-
-	list<ProcessorWindowProxy*>::iterator i = _processor_window_info.begin ();
-	while (i != _processor_window_info.end()) {
-
-		boost::shared_ptr<Processor> t = (*i)->processor().lock ();
-
-		if (p == t) {
-			/* this processor is already on the list; done */
-			(*i)->marked = true;
-			return;
-		}
-
-		++i;
+	if (p->window_proxy()) {
+		return;
 	}
 
 	/* not on the list; add it */
 
 	string loc;
+#if 0 // is this still needed? Why?
 	if (_parent_strip) {
 		if (_parent_strip->mixer_owned()) {
 			loc = X_("M");
@@ -1426,6 +1654,9 @@ ProcessorBox::maybe_add_processor_to_ui_list (boost::weak_ptr<Processor> w)
 	} else {
 		loc = X_("P");
 	}
+#else
+	loc = X_("P");
+#endif
 
 	ProcessorWindowProxy* wp = new ProcessorWindowProxy (
 		string_compose ("%1-%2-%3", loc, _route->id(), p->id()),
@@ -1438,19 +1669,13 @@ ProcessorBox::maybe_add_processor_to_ui_list (boost::weak_ptr<Processor> w)
 		wp->set_state (*ui_xml);
 	}
 	
-	wp->marked = true;
-
-        /* if the processor already has an existing UI,
-           note that so that we don't recreate it
-        */
-
         void* existing_ui = p->get_ui ();
 
         if (existing_ui) {
                 wp->use_window (*(reinterpret_cast<Gtk::Window*>(existing_ui)));
         }
 
-	_processor_window_info.push_back (wp);
+	p->set_window_proxy (wp);
 	WM::Manager::instance().register_window (wp);
 }
 
@@ -1481,6 +1706,7 @@ ProcessorBox::add_processor_to_display (boost::weak_ptr<Processor> p)
 	}
 
 	boost::shared_ptr<PluginInsert> plugin_insert = boost::dynamic_pointer_cast<PluginInsert> (processor);
+	
 	ProcessorEntry* e = 0;
 	if (plugin_insert) {
 		e = new PluginInsertProcessorEntry (this, plugin_insert, _width);
@@ -1488,14 +1714,32 @@ ProcessorBox::add_processor_to_display (boost::weak_ptr<Processor> p)
 		e = new ProcessorEntry (this, processor, _width);
 	}
 
+	boost::shared_ptr<Send> send = boost::dynamic_pointer_cast<Send> (processor);
+	boost::shared_ptr<PortInsert> ext = boost::dynamic_pointer_cast<PortInsert> (processor);
+	
+	//faders and meters are not deletable, copy/paste-able, so they shouldn't be selectable
+	if (!send && !plugin_insert && !ext)
+		e->set_selectable(false);
+
+	bool mark_send_visible = false;
+	if (send && _parent_strip) {
+		/* show controls of new sends by default */
+		GUIObjectState& st = _parent_strip->gui_object_state ();
+		XMLNode* strip = st.get_or_add_node (_parent_strip->state_id ());
+		assert (strip);
+		/* check if state exists, if not it must be a new send */
+		if (!st.get_node(strip, e->state_id())) {
+			mark_send_visible = true;
+		}
+	}
+
 	/* Set up this entry's state from the GUIObjectState */
 	XMLNode* proc = entry_gui_object_state (e);
 	if (proc) {
 		e->set_control_state (proc);
 	}
-	
-	if (boost::dynamic_pointer_cast<Send> (processor)) {
-		/* Always show send controls */
+
+	if (mark_send_visible) {
 		e->show_all_controls ();
 	}
 
@@ -1515,15 +1759,16 @@ ProcessorBox::setup_entry_positions ()
 	list<ProcessorEntry*> children = processor_display.children ();
 	bool pre_fader = true;
 
+	uint32_t num = 0;
 	for (list<ProcessorEntry*>::iterator i = children.begin(); i != children.end(); ++i) {
 		if (boost::dynamic_pointer_cast<Amp>((*i)->processor())) {
 			pre_fader = false;
-			(*i)->set_position (ProcessorEntry::Fader);
+			(*i)->set_position (ProcessorEntry::Fader, num++);
 		} else {
 			if (pre_fader) {
-				(*i)->set_position (ProcessorEntry::PreFader);
+				(*i)->set_position (ProcessorEntry::PreFader, num++);
 			} else {
-				(*i)->set_position (ProcessorEntry::PostFader);
+				(*i)->set_position (ProcessorEntry::PostFader, num++);
 			}
 		}
 	}
@@ -1845,9 +2090,10 @@ ProcessorBox::paste_processor_state (const XMLNodeList& nlist, boost::shared_ptr
 					continue;
 				}
 
+				boost::shared_ptr<Pannable> sendpan(new Pannable (*_session));
 				XMLNode n (**niter);
-                                InternalSend* s = new InternalSend (*_session, _route->pannable(), _route->mute_master(),
-								    boost::shared_ptr<Route>(), Delivery::Aux); 
+				InternalSend* s = new InternalSend (*_session, sendpan, _route->mute_master(),
+						_route, boost::shared_ptr<Route>(), Delivery::Aux);
 
 				IOProcessor::prepare_for_reset (n, s->name());
 
@@ -1860,8 +2106,10 @@ ProcessorBox::paste_processor_state (const XMLNodeList& nlist, boost::shared_ptr
 
 			} else if (type->value() == "send") {
 
+				boost::shared_ptr<Pannable> sendpan(new Pannable (*_session));
 				XMLNode n (**niter);
-                                Send* s = new Send (*_session, _route->pannable(), _route->mute_master());
+
+				Send* s = new Send (*_session, _route->pannable(), _route->mute_master());
 
 				IOProcessor::prepare_for_reset (n, s->name());
 				
@@ -2016,7 +2264,7 @@ ProcessorBox::processor_can_be_edited (boost::shared_ptr<Processor> processor)
 	}
 
 	if (
-		(boost::dynamic_pointer_cast<Send> (processor) && !boost::dynamic_pointer_cast<InternalSend> (processor))||
+		boost::dynamic_pointer_cast<Send> (processor) ||
 		boost::dynamic_pointer_cast<Return> (processor) ||
 		boost::dynamic_pointer_cast<PluginInsert> (processor) ||
 		boost::dynamic_pointer_cast<PortInsert> (processor)
@@ -2040,7 +2288,7 @@ ProcessorBox::one_processor_can_be_edited ()
 }
 
 Gtk::Window*
-ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor)
+ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor, bool use_custom)
 {
 	boost::shared_ptr<Send> send;
 	boost::shared_ptr<InternalSend> internal_send;
@@ -2048,6 +2296,18 @@ ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor)
 	boost::shared_ptr<PluginInsert> plugin_insert;
 	boost::shared_ptr<PortInsert> port_insert;
 	Window* gidget = 0;
+
+	/* This method may or may not return a Window, but if it does not it
+	 * will modify the parent mixer strip appearance layout to allow
+	 * "editing" the @param processor that was passed in.
+	 *
+	 * So for example, if the processor is an Amp (gain), the parent strip
+	 * will be forced back into a model where the fader controls the main gain.
+	 * If the processor is a send, then we map the send controls onto the
+	 * strip.
+	 * 
+	 * Plugins and others will return a window for control.
+	 */
 
 	if (boost::dynamic_pointer_cast<AudioTrack>(_route) != 0) {
 
@@ -2069,17 +2329,8 @@ ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor)
 		}
 
 		if (boost::dynamic_pointer_cast<InternalSend> (processor) == 0) {
-			SendUIWindow* w = new SendUIWindow (send, _session);
-			w->show ();
-		} else {
-			/* assign internal send to main fader */
-			if (_parent_strip) {
-				if (_parent_strip->current_delivery() == send) {
-					_parent_strip->revert_to_default_display ();
-				} else {
-					_parent_strip->show_send(send);
-				}
-			} 
+
+			gidget = new SendUIWindow (send, _session);
 		}
 
 	} else if ((retrn = boost::dynamic_pointer_cast<Return> (processor)) != 0) {
@@ -2119,8 +2370,7 @@ ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor)
 		Window* w = get_processor_ui (plugin_insert);
 
 		if (w == 0) {
-
-			plugin_ui = new PluginUIWindow (plugin_insert, false, Config->get_use_plugin_own_gui());
+			plugin_ui = new PluginUIWindow (plugin_insert, false, use_custom);
 			plugin_ui->set_title (generate_processor_title (plugin_insert));
 			set_processor_ui (plugin_insert, plugin_ui);
 
@@ -2133,7 +2383,7 @@ ProcessorBox::get_editor_window (boost::shared_ptr<Processor> processor)
 	} else if ((port_insert = boost::dynamic_pointer_cast<PortInsert> (processor)) != 0) {
 
 		if (!_session->engine().connected()) {
-			MessageDialog msg ( _("Not connected to JACK - no I/O changes are possible"));
+			MessageDialog msg ( _("Not connected to audio engine - no I/O changes are possible"));
 			msg.run ();
 			return 0;
 		}
@@ -2184,14 +2434,15 @@ ProcessorBox::register_actions ()
 
 	act = ActionManager::register_action (popup_act_grp, X_("newinsert"), _("New Insert"),
 			sigc::ptr_fun (ProcessorBox::rb_choose_insert));
-	ActionManager::jack_sensitive_actions.push_back (act);
+	ActionManager::engine_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (popup_act_grp, X_("newsend"), _("New External Send ..."),
 			sigc::ptr_fun (ProcessorBox::rb_choose_send));
-	ActionManager::jack_sensitive_actions.push_back (act);
+	ActionManager::engine_sensitive_actions.push_back (act);
 
 	ActionManager::register_action (popup_act_grp, X_("newaux"), _("New Aux Send ..."));
 
 	ActionManager::register_action (popup_act_grp, X_("controls"), _("Controls"));
+	ActionManager::register_action (popup_act_grp, X_("send_options"), _("Send Options"));
 
 	ActionManager::register_action (popup_act_grp, X_("clear"), _("Clear (all)"),
 			sigc::ptr_fun (ProcessorBox::rb_clear));
@@ -2236,7 +2487,7 @@ ProcessorBox::register_actions ()
 		sigc::ptr_fun (ProcessorBox::rb_edit));
 
 	edit_generic_action = ActionManager::register_action (
-		popup_act_grp, X_("edit-generic"), _("Edit with basic controls..."),
+		popup_act_grp, X_("edit-generic"), _("Edit with generic controls..."),
 		sigc::ptr_fun (ProcessorBox::rb_edit_generic));
 
 	ActionManager::add_action_group (popup_act_grp);
@@ -2428,16 +2679,38 @@ ProcessorBox::rb_edit ()
 	_current_processor_box->for_selected_processors (&ProcessorBox::edit_processor);
 }
 
+bool
+ProcessorBox::edit_aux_send (boost::shared_ptr<Processor> processor)
+{
+	if (boost::dynamic_pointer_cast<InternalSend> (processor) == 0) {
+		return false;
+	}
+
+	if (_parent_strip) {
+		boost::shared_ptr<Send> send = boost::dynamic_pointer_cast<Send> (processor);
+		if (_parent_strip->current_delivery() == send) {
+			_parent_strip->revert_to_default_display ();
+		} else {
+			_parent_strip->show_send(send);
+		}
+	}
+	return true;
+}
+
 void
 ProcessorBox::edit_processor (boost::shared_ptr<Processor> processor)
 {
 	if (!processor) {
 		return;
 	}
-	
+	if (edit_aux_send (processor)) {
+		return;
+	}
+
 	ProcessorWindowProxy* proxy = find_window_proxy (processor);
 
 	if (proxy) {
+		proxy->set_custom_ui_mode (true);
 		proxy->toggle ();
 	}
 }
@@ -2448,10 +2721,14 @@ ProcessorBox::generic_edit_processor (boost::shared_ptr<Processor> processor)
 	if (!processor) {
 		return;
 	}
-	
+	if (edit_aux_send (processor)) {
+		return;
+	}
+
 	ProcessorWindowProxy* proxy = find_window_proxy (processor);
 
 	if (proxy) {
+		proxy->set_custom_ui_mode (false);
 		proxy->toggle ();
 	}
 }
@@ -2510,7 +2787,13 @@ ProcessorBox::generate_processor_title (boost::shared_ptr<PluginInsert> pi)
 		maker += " ...";
 	}
 
-	return string_compose(_("%1: %2 (by %3)"), _route->name(), pi->name(), maker);
+	SessionObject* owner = pi->owner();
+
+	if (owner) {
+		return string_compose(_("%1: %2 (by %3)"), owner->name(), pi->name(), maker);
+	} else {
+		return string_compose(_("%1 (by %2)"), pi->name(), maker);
+	}
 }
 
 /** @param p Processor.
@@ -2519,16 +2802,10 @@ ProcessorBox::generate_processor_title (boost::shared_ptr<PluginInsert> pi)
 Window *
 ProcessorBox::get_processor_ui (boost::shared_ptr<Processor> p) const
 {
-	list<ProcessorWindowProxy*>::const_iterator i = _processor_window_info.begin ();
-	while (i != _processor_window_info.end()) {
-		boost::shared_ptr<Processor> t = (*i)->processor().lock ();
-		if (t && t == p) {
-			return (*i)->get ();
-		}
-
-		++i;
+	ProcessorWindowProxy* wp = p->window_proxy();
+	if (wp) {
+		return wp->get ();
 	}
-
 	return 0;
 }
 
@@ -2539,24 +2816,9 @@ ProcessorBox::get_processor_ui (boost::shared_ptr<Processor> p) const
 void
 ProcessorBox::set_processor_ui (boost::shared_ptr<Processor> p, Gtk::Window* w)
 {
- 	list<ProcessorWindowProxy*>::iterator i = _processor_window_info.begin ();
-
+	assert (p->window_proxy());
 	p->set_ui (w);
-
-	while (i != _processor_window_info.end()) {
-		boost::shared_ptr<Processor> t = (*i)->processor().lock ();
-		if (t && t == p) {
-			(*i)->use_window (*w);
-			return;
-		}
-
-		++i;
-	}
-
-	/* we shouldn't get here, because the ProcessorUIList should always contain
-	   an entry for each processor.
-	*/
-	assert (false);
+	p->window_proxy()->use_window (*w);
 }
 
 void
@@ -2623,14 +2885,45 @@ ProcessorBox::update_gui_object_state (ProcessorEntry* entry)
 	entry->add_control_state (proc);
 }
 
+bool
+ProcessorBox::is_editor_mixer_strip() const
+{
+	return _parent_strip && !_parent_strip->mixer_owned();
+}
+
 ProcessorWindowProxy::ProcessorWindowProxy (string const & name, ProcessorBox* box, boost::weak_ptr<Processor> processor)
 	: WM::ProxyBase (name, string())
-	, marked (false)
 	, _processor_box (box)
 	, _processor (processor)
 	, is_custom (false)
+	, want_custom (false)
 {
+	boost::shared_ptr<Processor> p = _processor.lock ();
+	if (!p) {
+		return;
+	}
+	p->DropReferences.connect (going_away_connection, MISSING_INVALIDATOR, boost::bind (&ProcessorWindowProxy::processor_going_away, this), gui_context());
+}
 
+ProcessorWindowProxy::~ProcessorWindowProxy()
+{
+	/* processor window proxies do not own the windows they create with
+	 * ::get(), so set _window to null before the normal WindowProxy method
+	 * deletes it.
+	 */
+	_window = 0;
+}
+
+void
+ProcessorWindowProxy::processor_going_away ()
+{
+	delete _window;
+	_window = 0;
+	WM::Manager::instance().remove (this);
+	/* should be no real reason to do this, since the object that would
+	   send DropReferences is about to be deleted, but lets do it anyway.
+	*/
+	going_away_connection.disconnect();
 }
 
 ARDOUR::SessionHandlePtr*
@@ -2638,6 +2931,38 @@ ProcessorWindowProxy::session_handle()
 {
 	/* we don't care */
 	return 0;
+}
+
+XMLNode&
+ProcessorWindowProxy::get_state () const
+{
+	XMLNode *node;
+	node = &ProxyBase::get_state();
+	node->add_property (X_("custom-ui"), is_custom? X_("yes") : X_("no"));
+	return *node;
+}
+
+void
+ProcessorWindowProxy::set_state (const XMLNode& node)
+{
+	XMLNodeList children = node.children ();
+	XMLNodeList::const_iterator i = children.begin ();
+	while (i != children.end()) {
+		XMLProperty* prop = (*i)->property (X_("name"));
+		if ((*i)->name() == X_("Window") && prop && prop->value() == _name) {
+			break;
+		}
+		++i;
+	}
+
+	if (i != children.end()) {
+		XMLProperty* prop;
+		if ((prop = (*i)->property (X_("custom-ui"))) != 0) {
+			want_custom = PBD::string_is_affirmative (prop->value ());
+		}
+	}
+
+	ProxyBase::set_state(node);
 }
 
 Gtk::Window*
@@ -2648,8 +2973,7 @@ ProcessorWindowProxy::get (bool create)
 	if (!p) {
 		return 0;
 	}
-	
-	if (_window && (is_custom != Config->get_use_plugin_own_gui ())) {
+	if (_window && (is_custom != want_custom)) {
 		/* drop existing window - wrong type */
 		drop_window ();
 	}
@@ -2659,8 +2983,8 @@ ProcessorWindowProxy::get (bool create)
 			return 0;
 		}
 		
-		_window = _processor_box->get_editor_window (p);
-		is_custom = Config->get_use_plugin_own_gui();
+		is_custom = want_custom;
+		_window = _processor_box->get_editor_window (p, is_custom);
 
 		if (_window) {
 			setup ();
@@ -2673,10 +2997,11 @@ ProcessorWindowProxy::get (bool create)
 void
 ProcessorWindowProxy::toggle ()
 {
-	if (_window && (is_custom != Config->get_use_plugin_own_gui ())) {
+	if (_window && (is_custom != want_custom)) {
 		/* drop existing window - wrong type */
 		drop_window ();
 	}
+	is_custom = want_custom;
 
 	WM::ProxyBase::toggle ();
 }

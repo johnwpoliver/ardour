@@ -35,6 +35,7 @@
 #include "gtkmm2ext/keyboard.h"
 #include "gtkmm2ext/actions.h"
 
+#include "ardour_ui.h"
 #include "midi_list_editor.h"
 #include "note_player.h"
 
@@ -185,7 +186,7 @@ MidiListEditor::scroll_event (GdkEventScroll* ev)
 	MidiModel::NoteDiffCommand::Property prop (MidiModel::NoteDiffCommand::NoteNumber);
 	bool apply = false;
 	bool was_selected = false;
-	char* opname;
+	char const * opname;
 
 	if (!view.get_path_at_pos (ev->x, ev->y, path, col, cellx, celly)) {
 		return false;
@@ -291,17 +292,18 @@ MidiListEditor::scroll_event (GdkEventScroll* ev)
 						if (note->time() + fdelta >= 0) {
 							cmd->change (note, prop, note->time() + fdelta);
 						} else {
-							cmd->change (note, prop, 0.0);
+							cmd->change (note, prop, Evoral::Beats());
 						}
 						break;
 					case MidiModel::NoteDiffCommand::Velocity:
 						cmd->change (note, prop, (uint8_t) (note->velocity() + idelta));
 						break;
 					case MidiModel::NoteDiffCommand::Length:
-						if (note->length() + fdelta >= 1.0/BBT_Time::ticks_per_beat) {
+						if (note->length().to_double() + fdelta >=
+						    Evoral::Beats::tick().to_double()) {
 							cmd->change (note, prop, note->length() + fdelta);
 						} else {
-							cmd->change (note, prop, 1.0/BBT_Time::ticks_per_beat);
+							cmd->change (note, prop, Evoral::Beats::tick());
 						}
 						break;
 					case MidiModel::NoteDiffCommand::Channel:
@@ -333,17 +335,18 @@ MidiListEditor::scroll_event (GdkEventScroll* ev)
 					if (note->time() + fdelta >= 0) {
 						cmd->change (note, prop, note->time() + fdelta);
 					} else {
-						cmd->change (note, prop, 0.0);
+						cmd->change (note, prop, Evoral::Beats());
 					}
 					break;
 				case MidiModel::NoteDiffCommand::Velocity:
 					cmd->change (note, prop, (uint8_t) (note->velocity() + idelta));
 					break;
 				case MidiModel::NoteDiffCommand::Length:
-					if (note->length() + fdelta >= 1.0/BBT_Time::ticks_per_beat) {
+					if (note->length() + fdelta >=
+					    Evoral::Beats::tick().to_double()) {
 						cmd->change (note, prop, note->length() + fdelta);
 					} else {
-						cmd->change (note, prop, 1.0/BBT_Time::ticks_per_beat);
+						cmd->change (note, prop, Evoral::Beats::tick());
 					}
 					break;
 				case MidiModel::NoteDiffCommand::Channel:
@@ -587,7 +590,7 @@ MidiListEditor::edited (const std::string& path, const std::string& text)
 	bool   apply = false;
 	int    idelta = 0;
 	double fdelta = 0;
-	char*  opname;
+	char const * opname;
 	switch (edit_column) {
 	case 0: // start
 		break;
@@ -637,7 +640,7 @@ MidiListEditor::edited (const std::string& path, const std::string& text)
 			 * entry for the actual note ticks
 			 */
 
-			int len_ticks = lrint (note->length() * Timecode::BBT_Time::ticks_per_beat);
+			uint64_t len_ticks = note->length().to_ticks();
 			std::map<int,string>::iterator x = note_length_map.find (len_ticks);
 
 			if (x == note_length_map.end()) {
@@ -682,7 +685,7 @@ MidiListEditor::edited (const std::string& path, const std::string& text)
 		}
 
 		if (fval > 0.0) {
-			fdelta = fval - note->length();
+			fdelta = fval - note->length().to_double();
 			prop = MidiModel::NoteDiffCommand::Length;
 			opname = _("change note length");
 			apply = true;
@@ -762,7 +765,6 @@ MidiListEditor::redisplay_model ()
 			row[columns.velocity] = (*i)->velocity();
 
 			Timecode::BBT_Time bbt;
-			double dur;
 
 			_session->tempo_map().bbt_time (conv.to ((*i)->time()), bbt);
 
@@ -771,11 +773,11 @@ MidiListEditor::redisplay_model ()
 			row[columns.start] = ss.str();
 
 			bbt.bars = 0;
-			dur = (*i)->end_time() - (*i)->time();
-			bbt.beats = floor (dur);
-			bbt.ticks = (uint32_t) lrint (fmod (dur, 1.0) * Timecode::BBT_Time::ticks_per_beat);
+			const Evoral::Beats dur = (*i)->end_time() - (*i)->time();
+			bbt.beats = dur.get_beats ();
+			bbt.ticks = dur.get_ticks ();
 			
-			int len_ticks = lrint ((*i)->length() * Timecode::BBT_Time::ticks_per_beat);
+			int len_ticks = (*i)->length().to_ticks();
 			std::map<int,string>::iterator x = note_length_map.find (len_ticks);
 
 			if (x != note_length_map.end()) {
@@ -796,7 +798,7 @@ MidiListEditor::redisplay_model ()
 void
 MidiListEditor::selection_changed ()
 {
-	if (!Config->get_sound_midi_notes()) {
+	if (!ARDOUR_UI::config()->get_sound_midi_notes()) {
 		return;
 	}
 

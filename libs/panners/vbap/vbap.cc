@@ -25,6 +25,10 @@
 #include <iostream>
 #include <string>
 
+#ifdef COMPILER_MSVC
+#include <malloc.h>
+#endif
+
 #include "pbd/cartesian.h"
 #include "pbd/compose.h"
 
@@ -46,11 +50,14 @@ using namespace std;
 
 static PanPluginDescriptor _descriptor = {
         "VBAP 2D panner",
+        "http://ardour.org/plugin/panner_vbap",
+        "http://ardour.org/plugin/panner_vbap#ui",
         -1, -1,
+        1000,
         VBAPanner::factory
 };
 
-extern "C" { PanPluginDescriptor* panner_descriptor () { return &_descriptor; } }
+extern "C" ARDOURPANNER_API PanPluginDescriptor* panner_descriptor () { return &_descriptor; }
 
 VBAPanner::Signal::Signal (Session&, VBAPanner&, uint32_t, uint32_t n_speakers)
 {
@@ -62,7 +69,7 @@ VBAPanner::Signal::Signal (Session&, VBAPanner&, uint32_t, uint32_t n_speakers)
 }
 
 void
-VBAPanner::Signal::Signal::resize_gains (uint32_t n)
+VBAPanner::Signal::resize_gains (uint32_t n)
 {
         gains.assign (n, 0.0);
 }        
@@ -72,7 +79,11 @@ VBAPanner::VBAPanner (boost::shared_ptr<Pannable> p, boost::shared_ptr<Speakers>
 	, _speakers (new VBAPSpeakers (s))
 {
         _pannable->pan_azimuth_control->Changed.connect_same_thread (*this, boost::bind (&VBAPanner::update, this));
+        _pannable->pan_elevation_control->Changed.connect_same_thread (*this, boost::bind (&VBAPanner::update, this));
         _pannable->pan_width_control->Changed.connect_same_thread (*this, boost::bind (&VBAPanner::update, this));
+        if (!_pannable->has_state()) {
+                reset();
+        }
 
         update ();
 }
@@ -110,76 +121,36 @@ VBAPanner::configure_io (ChanCount in, ChanCount /* ignored - we use Speakers */
 void
 VBAPanner::update ()
 {
-        /* recompute signal directions based on panner azimuth and, if relevant, width (diffusion) parameters)
-         */
-
-        /* panner azimuth control is [0 .. 1.0] which we interpret as [0 .. 360] degrees
-         */
-        double center = _pannable->pan_azimuth_control->get_value() * 360.0;
+        /* recompute signal directions based on panner azimuth and, if relevant, width (diffusion) and elevation parameters */
+        double elevation = _pannable->pan_elevation_control->get_value() * 90.0;
 
         if (_signals.size() > 1) {
-
-                /* panner width control is [-1.0 .. 1.0]; we ignore sign, and map to [0 .. 360] degrees
-                   so that a width of 1 corresponds to a signal equally present from all directions, 
-                   and a width of zero corresponds to a point source from the "center" (above) point
-                   on the perimeter of the speaker array.
-                */
-
-                double w = fabs (_pannable->pan_width_control->get_value()) * 360.0;
+                double w = - (_pannable->pan_width_control->get_value());
+                double signal_direction = 1.0 - (_pannable->pan_azimuth_control->get_value() + (w/2));
+                double grd_step_per_signal = w / (_signals.size() - 1);
+                for (vector<Signal*>::iterator s = _signals.begin(); s != _signals.end(); ++s) {
                 
-                double min_dir = center - (w/2.0);
-                if (min_dir < 0) {
-                        min_dir = 360.0 + min_dir; // its already negative
+                        Signal* signal = *s;
+
+                        int over = signal_direction;
+                        over -= (signal_direction >= 0) ? 0 : 1;
+                        signal_direction -= (double)over;
+
+                        signal->direction = AngularVector (signal_direction * 360.0, elevation);
+                        compute_gains (signal->desired_gains, signal->desired_outputs, signal->direction.azi, signal->direction.ele);
+                        signal_direction += grd_step_per_signal;
                 }
-                min_dir = max (min (min_dir, 360.0), 0.0);
-                
-                double max_dir = center + (w/2.0);
-                if (max_dir > 360.0) {
-                        max_dir = max_dir - 360.0;
-                }
-                max_dir = max (min (max_dir, 360.0), 0.0);
-                
-                if (max_dir < min_dir) {
-                        swap (max_dir, min_dir);
-                }
-
-                double degree_step_per_signal = (max_dir - min_dir) / (_signals.size() - 1);
-                double signal_direction = min_dir;
-
-                if (w >= 0.0) {
-
-                        /* positive width - normal order of signal spread */
-
-                        for (vector<Signal*>::iterator s = _signals.begin(); s != _signals.end(); ++s) {
-                        
-                                Signal* signal = *s;
-                                
-                                signal->direction = AngularVector (signal_direction, 0.0);
-                                compute_gains (signal->desired_gains, signal->desired_outputs, signal->direction.azi, signal->direction.ele);
-                                signal_direction += degree_step_per_signal;
-                        }
-                } else {
-
-                        /* inverted width - reverse order of signal spread */
-
-                        for (vector<Signal*>::reverse_iterator s = _signals.rbegin(); s != _signals.rend(); ++s) {
-                        
-                                Signal* signal = *s;
-                                
-                                signal->direction = AngularVector (signal_direction, 0.0);
-                                compute_gains (signal->desired_gains, signal->desired_outputs, signal->direction.azi, signal->direction.ele);
-                                signal_direction += degree_step_per_signal;
-                        }
-                }
-
         } else if (_signals.size() == 1) {
+                double center = (1.0 - _pannable->pan_azimuth_control->get_value()) * 360.0;
 
                 /* width has no role to play if there is only 1 signal: VBAP does not do "diffusion" of a single channel */
 
                 Signal* s = _signals.front();
-                s->direction = AngularVector (center, 0);
+                s->direction = AngularVector (center, elevation);
                 compute_gains (s->desired_gains, s->desired_outputs, s->direction.azi, s->direction.ele);
         }
+
+        SignalPositionChanged(); /* emit */
 }
 
 void 
@@ -191,6 +162,8 @@ VBAPanner::compute_gains (double gains[3], int speaker_ids[3], int azi, int ele)
 	int i,j,k;
 	double small_g;
 	double big_sm_g, gtmp[3];
+	const int dimension = _speakers->dimension();
+	assert(dimension == 2 || dimension == 3);
 
 	spherical_to_cartesian (azi, ele, 1.0, cartdir[0], cartdir[1], cartdir[2]);  
 	big_sm_g = -100000.0;
@@ -202,12 +175,12 @@ VBAPanner::compute_gains (double gains[3], int speaker_ids[3], int azi, int ele)
 
 		small_g = 10000000.0;
 
-		for (j = 0; j < _speakers->dimension(); j++) {
+		for (j = 0; j < dimension; j++) {
 
 			gtmp[j] = 0.0;
 
-			for (k = 0; k < _speakers->dimension(); k++) {
-				gtmp[j] += cartdir[k] * _speakers->matrix(i)[j*_speakers->dimension()+k]; 
+			for (k = 0; k < dimension; k++) {
+				gtmp[j] += cartdir[k] * _speakers->matrix(i)[j * dimension + k];
 			}
 
 			if (gtmp[j] < small_g) {
@@ -290,7 +263,7 @@ VBAPanner::distribute_one (AudioBuffer& srcbuf, BufferSet& obufs, gain_t gain_co
 
         assert (sz == obufs.count().n_audio());
 
-        int8_t outputs[sz]; // on the stack, no malloc
+        int8_t *outputs = (int8_t*)alloca(sz); // on the stack, no malloc
         
         /* set initial state of each output "record"
          */
@@ -319,10 +292,10 @@ VBAPanner::distribute_one (AudioBuffer& srcbuf, BufferSet& obufs, gain_t gain_co
 
         /* at this point, we can test a speaker's status:
 
-           (outputs[o] & 1)      <= in use before
-           (outputs[o] & 2)      <= in use this time
-           (outputs[o] & 3) == 3 <= in use both times
-            outputs[o] == 0      <= not in use either time
+           (*outputs[o] & 1)      <= in use before
+           (*outputs[o] & 2)      <= in use this time
+           (*outputs[o] & 3) == 3 <= in use both times
+            *outputs[o] == 0      <= not in use either time
            
         */
 
@@ -392,7 +365,9 @@ VBAPanner::distribute_one_automated (AudioBuffer& /*src*/, BufferSet& /*obufs*/,
 XMLNode&
 VBAPanner::get_state ()
 {
-        XMLNode& node (Panner::get_state());
+	XMLNode& node (Panner::get_state());
+	node.add_property (X_("uri"), _descriptor.panner_uri);
+	/* this is needed to allow new sessions to load with old Ardour: */
 	node.add_property (X_("type"), _descriptor.name);
 	return node;
 }
@@ -423,6 +398,9 @@ VBAPanner::what_can_be_automated() const
         if (_signals.size() > 1) {
                 s.insert (Evoral::Parameter (PanWidthAutomation));
         }
+        if (_speakers->dimension() == 3) {
+                s.insert (Evoral::Parameter (PanElevationAutomation));
+        }
         return s;
 }
         
@@ -431,9 +409,11 @@ VBAPanner::describe_parameter (Evoral::Parameter p)
 {
         switch (p.type()) {
         case PanAzimuthAutomation:
-                return _("Direction");
+                return _("Azimuth");
         case PanWidthAutomation:
-                return _("Diffusion");
+                return _("Width");
+        case PanElevationAutomation:
+                return _("Elevation");
         default:
                 return _pannable->describe_parameter (p);
         }
@@ -447,13 +427,16 @@ VBAPanner::value_as_string (boost::shared_ptr<AutomationControl> ac) const
 
         switch (ac->parameter().type()) {
         case PanAzimuthAutomation: /* direction */
-                return string_compose (_("%1"), int (rint (val * 360.0)));
+                return string_compose (_("%1\u00B0"), (int (rint (val * 360.0))+180)%360);
                 
         case PanWidthAutomation: /* diffusion */
                 return string_compose (_("%1%%"), (int) floor (100.0 * fabs(val)));
+
+        case PanElevationAutomation: /* elevation */
+                return string_compose (_("%1\u00B0"), (int) floor (90.0 * fabs(val)));
                 
         default:
-                return _pannable->value_as_string (ac);
+                return _("unused");
         }
 }
 
@@ -476,15 +459,11 @@ VBAPanner::get_speakers () const
 void
 VBAPanner::set_position (double p)
 {
-        if (p < 0.0) {
-                p = 1.0 + p;
-        }
-
-        if (p > 1.0) {
-                p = fmod (p, 1.0);
-        } 
-
-        _pannable->pan_azimuth_control->set_value (p);
+	/* map into 0..1 range */
+	int over = p;
+	over -= (p >= 0) ? 0 : 1;
+	p -= (double)over;
+	_pannable->pan_azimuth_control->set_value (p);
 }
 
 void
@@ -494,10 +473,21 @@ VBAPanner::set_width (double w)
 }
 
 void
+VBAPanner::set_elevation (double e)
+{
+        _pannable->pan_elevation_control->set_value (min (1.0, max (0.0, e)));
+}
+
+void
 VBAPanner::reset ()
 {
-	set_position (0);
-	set_width (1);
+	set_position (.5);
+        if (_signals.size() > 1) {
+                set_width (1.0 - (1.0 / (double)_signals.size()));
+        } else {
+                set_width (1.0);
+        }
+	set_elevation (0);
 
 	update ();
 }

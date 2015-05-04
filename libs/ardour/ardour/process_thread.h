@@ -23,6 +23,7 @@
 #include <glibmm/threads.h>
 
 #include "ardour/chan_count.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 
 namespace ARDOUR {
@@ -30,7 +31,7 @@ namespace ARDOUR {
 class ThreadBuffers;
 class BufferSet;
 
-class ProcessThread
+class LIBARDOUR_API ProcessThread
 {
 public:
 	ProcessThread ();
@@ -45,9 +46,11 @@ public:
 	 */
 
 	static BufferSet& get_silent_buffers (ChanCount count = ChanCount::ZERO);
-	static BufferSet& get_scratch_buffers (ChanCount count = ChanCount::ZERO);
+	static BufferSet& get_scratch_buffers (ChanCount count = ChanCount::ZERO, bool silence = false);
+	static BufferSet& get_route_buffers (ChanCount count = ChanCount::ZERO, bool silence = false);
 	static BufferSet& get_mix_buffers (ChanCount count = ChanCount::ZERO);
 	static gain_t* gain_automation_buffer ();
+	static gain_t* trim_automation_buffer ();
 	static gain_t* send_gain_automation_buffer ();
 	static pan_t** pan_automation_buffer ();
 

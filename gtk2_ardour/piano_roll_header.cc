@@ -174,16 +174,16 @@ render_dga(Cairo::RefPtr<Cairo::Context> cr, int /*note*/, double x[], double y[
 void
 PianoRollHeader::get_path(PianoRollHeader::ItemType note_type, int note, double x[], double y[])
 {
-	double y_pos = floor(_view.note_to_y(note)) - 0.5f;
+	double y_pos = floor(_view.note_to_y(note)) + 1.5f;
 	double note_height;
-	double other_y1 = floor(_view.note_to_y(note+1)) + floor(_note_height / 2.0f) + 0.5f;
-	double other_y2 = floor(_view.note_to_y(note-1)) + floor(_note_height / 2.0f) - 1.0f;
+	double other_y1 = floor(_view.note_to_y(note+1)) + floor(_note_height / 2.0f) + 2.5f;
+	double other_y2 = floor(_view.note_to_y(note-1)) + floor(_note_height / 2.0f) + 1.0f;
 	double width = get_width();
 
 	if (note == 0) {
-		note_height = floor(_view.contents_height()) - y_pos;
+		note_height = floor(_view.contents_height()) - y_pos + 2.;
 	} else {
-		note_height = floor(_view.note_to_y(note - 1)) - y_pos;
+		note_height = floor(_view.note_to_y(note - 1)) - y_pos + 2.;
 	}
 
 	switch (note_type) {
@@ -513,32 +513,26 @@ bool
 PianoRollHeader::on_button_press_event (GdkEventButton* ev)
 {
 	int note = _view.y_to_note(ev->y);
+	bool tertiary = Keyboard::modifier_state_contains (ev->state, Keyboard::TertiaryModifier);
 
-	if (ev->button != 1) {
-		return false;
-	}
-
-	if (editor().current_mouse_mode() == Editing::MouseRange) {
-		if (Keyboard::no_modifiers_active (ev->state)) {
-			SetNoteSelection (note); // EMIT SIGNAL
-		}
+	if (ev->button == 2 && Keyboard::no_modifiers_active (ev->state)) {
+		SetNoteSelection (note); // EMIT SIGNAL
+		return true;
+	} else if (tertiary && (ev->button == 1 || ev->button == 2)) {
+		ExtendNoteSelection (note); // EMIT SIGNAL
+		return true;
+	} else if (ev->button == 1 && note >= 0 && note < 128) {
+		add_modal_grab();
 		_dragging = true;
-	} else {
-
-		if (ev->type == GDK_BUTTON_PRESS && note >= 0 && note < 128) {
-
-			add_modal_grab();
-			_dragging = true;
-
-			if (!_active_notes[note]) {
-				_active_notes[note] = true;
-				_clicked_note = note;
-				send_note_on(note);
-
-				invalidate_note_range(note, note);
-			} else {
-				reset_clicked_note(note);
-			}
+		
+		if (!_active_notes[note]) {
+			_active_notes[note] = true;
+			_clicked_note = note;
+			send_note_on(note);
+			
+			invalidate_note_range(note, note);
+		} else {
+			reset_clicked_note(note);
 		}
 	}
 

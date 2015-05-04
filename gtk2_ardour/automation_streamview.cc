@@ -17,45 +17,51 @@
 */
 
 #include <cmath>
-#include <cassert>
+#include <list>
 #include <utility>
 
 #include <gtkmm.h>
 
-#include <gtkmm2ext/gtk_ui.h>
+#include "gtkmm2ext/gtk_ui.h"
+
+#include "pbd/compose.h"
+#include "canvas/debug.h"
 
 #include "ardour/midi_region.h"
 #include "ardour/midi_source.h"
 
-#include "automation_streamview.h"
-#include "region_view.h"
-#include "automation_region_view.h"
-#include "automation_time_axis.h"
-#include "canvas-simplerect.h"
-#include "region_selection.h"
-#include "selection.h"
-#include "public_editor.h"
 #include "ardour_ui.h"
-#include "rgb_macros.h"
+#include "automation_region_view.h"
+#include "automation_streamview.h"
+#include "automation_time_axis.h"
+#include "global_signals.h"
 #include "gui_thread.h"
-#include "utils.h"
-#include "simplerect.h"
-#include "simpleline.h"
+#include "public_editor.h"
+#include "region_selection.h"
+#include "region_view.h"
+#include "rgb_macros.h"
+#include "selection.h"
+
+#include "i18n.h"
 
 using namespace std;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Editing;
 
 AutomationStreamView::AutomationStreamView (AutomationTimeAxisView& tv)
 	: StreamView (*dynamic_cast<RouteTimeAxisView*>(tv.get_parent()),
-		      new ArdourCanvas::Group(*tv.canvas_background()),
-		      new ArdourCanvas::Group(*tv.canvas_display()))
+		      tv.canvas_display())
 	, _automation_view(tv)
 	, _pending_automation_state (Off)
 {
-	//canvas_rect->property_fill_color_rgba() = stream_base_color;
-	canvas_rect->property_outline_color_rgba() = RGBA_BLACK;
+	CANVAS_DEBUG_NAME (_canvas_group, string_compose ("SV canvas group auto %1", tv.name()));
+	CANVAS_DEBUG_NAME (canvas_rect, string_compose ("SV canvas rectangle auto %1", tv.name()));
+
+	color_handler ();
+
+	ColorsChanged.connect(sigc::mem_fun(*this, &AutomationStreamView::color_handler));
 }
 
 AutomationStreamView::~AutomationStreamView ()
@@ -64,14 +70,17 @@ AutomationStreamView::~AutomationStreamView ()
 
 
 RegionView*
-AutomationStreamView::add_region_view_internal (boost::shared_ptr<Region> region, bool wfd, bool /*recording*/)
+AutomationStreamView::add_region_view_internal (boost::shared_ptr<Region> region, bool wait_for_data, bool /*recording*/)
 {
-	assert (region);
+	if (!region) {
+		return 0;
+	}
 
-	if (wfd) {
+	if (wait_for_data) {
 		boost::shared_ptr<MidiRegion> mr = boost::dynamic_pointer_cast<MidiRegion>(region);
 		if (mr) {
-			mr->midi_source()->load_model();
+			Source::Lock lock(mr->midi_source()->mutex());
+			mr->midi_source()->load_model(lock);
 		}
 	}
 
@@ -82,7 +91,10 @@ AutomationStreamView::add_region_view_internal (boost::shared_ptr<Region> region
 	boost::shared_ptr<AutomationList> list;
 	if (control) {
 		list = boost::dynamic_pointer_cast<AutomationList>(control->list());
-		assert(!control->list() || list);
+		if (control->list() && !list) {
+			error << _("unable to display automation region for control without list") << endmsg;
+			return 0;
+		}
 	}
 
 	AutomationRegionView *region_view;
@@ -98,7 +110,7 @@ AutomationStreamView::add_region_view_internal (boost::shared_ptr<Region> region
 				arv->line()->set_list (list);
 			}
 			(*i)->set_valid (true);
-			(*i)->enable_display(wfd);
+			(*i)->enable_display (wait_for_data);
 			display_region(arv);
 
 			return 0;
@@ -108,20 +120,20 @@ AutomationStreamView::add_region_view_internal (boost::shared_ptr<Region> region
 	region_view = new AutomationRegionView (
 		_canvas_group, _automation_view, region,
 		_automation_view.parameter (), list,
-		_samples_per_unit, region_color
+		_samples_per_pixel, region_color
 		);
 
-	region_view->init (region_color, false);
+	region_view->init (false);
 	region_views.push_front (region_view);
 
 	/* follow global waveform setting */
 
-	if (wfd) {
+	if (wait_for_data) {
 		region_view->enable_display(true);
-		//region_view->midi_region()->midi_source(0)->load_model();
+		// region_view->midi_region()->midi_source(0)->load_model();
 	}
 
-	display_region(region_view);
+	display_region (region_view);
 
 	/* catch regionview going away */
 	region->DropReferences.connect (*this, invalidator (*this), boost::bind (&AutomationStreamView::remove_region_view, this, boost::weak_ptr<Region>(region)), gui_context());
@@ -190,13 +202,11 @@ AutomationStreamView::setup_rec_box ()
 void
 AutomationStreamView::color_handler ()
 {
-	/*if (_trackview.is_midi_track()) {
-		canvas_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_MidiTrackBase.get();
+	if (_trackview.is_midi_track()) {
+		canvas_rect->set_fill_color (ARDOUR_UI::config()->color_mod ("midi track base", "midi track base"));
+	} else {
+		canvas_rect->set_fill_color (ARDOUR_UI::config()->color ("midi bus base"));
 	}
-
-	if (!_trackview.is_midi_track()) {
-		canvas_rect->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_MidiBusBase.get();;
-	}*/
 }
 
 AutoState
@@ -274,12 +284,13 @@ AutomationStreamView::clear ()
  *  confusing.
  */
 void
-AutomationStreamView::get_selectables (framepos_t start, framepos_t end, double botfrac, double topfrac, list<Selectable*>& results)
+AutomationStreamView::get_selectables (framepos_t start, framepos_t end, double botfrac, double topfrac, list<Selectable*>& results, bool /*within*/)
 {
 	for (list<RegionView*>::iterator i = region_views.begin(); i != region_views.end(); ++i) {
 		AutomationRegionView* arv = dynamic_cast<AutomationRegionView*> (*i);
-		assert (arv);
-		arv->line()->get_selectables (start, end, botfrac, topfrac, results);
+		if (arv) {
+			arv->line()->get_selectables (start, end, botfrac, topfrac, results);
+		}
 	}
 }
 
@@ -300,33 +311,27 @@ AutomationStreamView::get_lines () const
 
 	for (list<RegionView*>::const_iterator i = region_views.begin(); i != region_views.end(); ++i) {
 		AutomationRegionView* arv = dynamic_cast<AutomationRegionView*> (*i);
-		assert (arv);
-		lines.push_back (arv->line());
+		if (arv) {
+			lines.push_back (arv->line());
+		}
 	}
 
 	return lines;
 }
 
-struct RegionPositionSorter {
-	bool operator() (RegionView* a, RegionView* b) {
-		return a->region()->position() < b->region()->position();
-	}
-};
-
-
-/** @param pos Position, in session frames.
- *  @return AutomationLine to paste to for that position, or 0 if there is none appropriate.
- */
-boost::shared_ptr<AutomationLine>
-AutomationStreamView::paste_line (framepos_t pos)
+bool
+AutomationStreamView::paste (framepos_t                                pos,
+                             unsigned                                  paste_count,
+                             float                                     times,
+                             boost::shared_ptr<ARDOUR::AutomationList> alist)
 {
 	/* XXX: not sure how best to pick this; for now, just use the last region which starts before pos */
 
 	if (region_views.empty()) {
-		return boost::shared_ptr<AutomationLine> ();
+		return false;
 	}
 
-	region_views.sort (RegionPositionSorter ());
+	region_views.sort (RegionView::PositionOrder());
 
 	list<RegionView*>::const_iterator prev = region_views.begin ();
 
@@ -341,11 +346,9 @@ AutomationStreamView::paste_line (framepos_t pos)
 
 	/* If *prev doesn't cover pos, it's no good */
 	if (r->position() > pos || ((r->position() + r->length()) < pos)) {
-		return boost::shared_ptr<AutomationLine> ();
+		return false;
 	}
 
 	AutomationRegionView* arv = dynamic_cast<AutomationRegionView*> (*prev);
-	assert (arv);
-
-	return arv->line ();
+	return arv ? arv->paste(pos, paste_count, times, alist) : false;
 }

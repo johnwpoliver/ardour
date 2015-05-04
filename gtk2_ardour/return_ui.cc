@@ -23,11 +23,10 @@
 #include "ardour/rc_configuration.h"
 #include "ardour/return.h"
 
-#include "utils.h"
 #include "return_ui.h"
 #include "io_selector.h"
-#include "ardour_ui.h"
 #include "gui_thread.h"
+#include "timers.h"
 
 #include "i18n.h"
 
@@ -42,14 +41,14 @@ ReturnUI::ReturnUI (Gtk::Window* parent, boost::shared_ptr<Return> r, Session* s
  	_gpm.set_controls (boost::shared_ptr<Route>(), r->meter(), r->amp());
 
 	_hbox.pack_start (_gpm, true, true);
-	set_name ("ReturnUIFrame");
+	set_name (X_("ReturnUIFrame"));
 
 	_vbox.set_spacing (5);
 	_vbox.set_border_width (5);
 
 	_vbox.pack_start (_hbox, false, false, false);
 
-	io = manage (new IOSelector (parent, session, r->output()));
+	io = Gtk::manage (new IOSelector (parent, session, r->output()));
 
 	pack_start (_vbox, false, false);
 
@@ -61,10 +60,10 @@ ReturnUI::ReturnUI (Gtk::Window* parent, boost::shared_ptr<Return> r, Session* s
 	_return->input()->changed.connect (input_change_connection, invalidator (*this), boost::bind (&ReturnUI::ins_changed, this, _1, _2), gui_context());
 
 	_gpm.setup_meters ();
-	_gpm.set_fader_name ("ReturnUIFrame");
+	_gpm.set_fader_name (X_("ReturnUIFader"));
 
-	// screen_update_connection = ARDOUR_UI::instance()->RapidScreenUpdate.connect (sigc::mem_fun (*this, &ReturnUI::update));
-	fast_screen_update_connection = ARDOUR_UI::instance()->SuperRapidScreenUpdate.connect (sigc::mem_fun (*this, &ReturnUI::fast_update));
+	// screen_update_connection = Timers::rapid_connect (sigc::mem_fun (*this, &ReturnUI::update));
+	fast_screen_update_connection = Timers::super_rapid_connect (sigc::mem_fun (*this, &ReturnUI::fast_update));
 }
 
 ReturnUI::~ReturnUI ()
@@ -110,20 +109,9 @@ ReturnUIWindow::ReturnUIWindow (boost::shared_ptr<Return> r, ARDOUR::Session* s)
 
 	set_name ("ReturnUIWindow");
 
-	r->DropReferences.connect (going_away_connection, invalidator (*this), boost::bind (&ReturnUIWindow::return_going_away, this), gui_context());
-	signal_delete_event().connect (sigc::bind (sigc::ptr_fun (just_hide_it), reinterpret_cast<Window *> (this)));
 }
 
 ReturnUIWindow::~ReturnUIWindow ()
 {
 	delete ui;
 }
-
-void
-ReturnUIWindow::return_going_away ()
-{
-	ENSURE_GUI_THREAD (*this, &ReturnUIWindow::return_going_away)
-	going_away_connection.disconnect ();
-	delete_when_idle (this);
-}
-

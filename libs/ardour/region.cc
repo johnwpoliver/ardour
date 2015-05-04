@@ -698,33 +698,32 @@ Region::set_start (framepos_t pos)
 }
 
 void
-Region::trim_start (framepos_t new_position)
+Region::move_start (frameoffset_t distance)
 {
 	if (locked() || position_locked() || video_locked()) {
 		return;
 	}
 
 	framepos_t new_start;
-	frameoffset_t const start_shift = new_position - _position;
 
-	if (start_shift > 0) {
+	if (distance > 0) {
 
-		if (_start > max_framepos - start_shift) {
-			new_start = max_framepos;
+		if (_start > max_framepos - distance) {
+			new_start = max_framepos; // makes no sense
 		} else {
-			new_start = _start + start_shift;
+			new_start = _start + distance;
 		}
 
 		if (!verify_start (new_start)) {
 			return;
 		}
 
-	} else if (start_shift < 0) {
+	} else if (distance < 0) {
 
-		if (_start < -start_shift) {
+		if (_start < -distance) {
 			new_start = 0;
 		} else {
-			new_start = _start + start_shift;
+			new_start = _start + distance;
 		}
 
 	} else {
@@ -736,6 +735,7 @@ Region::trim_start (framepos_t new_position)
 	}
 
 	set_start_internal (new_start);
+
 	_whole_file = false;
 	first_edit ();
 
@@ -1138,7 +1138,7 @@ Region::state ()
 	XMLNode *node = new XMLNode ("Region");
 	char buf[64];
 	char buf2[64];
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 	const char* fe = NULL;
 
 	/* custom version of 'add_properties (*node);'
@@ -1490,6 +1490,20 @@ Region::uses_source (boost::shared_ptr<const Source> source) const
 		}
 	}
 
+	for (SourceList::const_iterator i = _master_sources.begin(); i != _master_sources.end(); ++i) {
+		if (*i == source) {
+			return true;
+		}
+
+		boost::shared_ptr<PlaylistSource> ps = boost::dynamic_pointer_cast<PlaylistSource> (*i);
+
+		if (ps) {
+			if (ps->playlist()->uses_source (source)) {
+				return true;
+			}
+		}
+	}
+
 	return false;
 }
 
@@ -1501,7 +1515,7 @@ Region::source_length(uint32_t n) const
 }
 
 bool
-Region::verify_length (framecnt_t len)
+Region::verify_length (framecnt_t& len)
 {
 	if (source() && (source()->destructive() || source()->length_mutable())) {
 		return true;

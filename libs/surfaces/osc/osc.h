@@ -31,6 +31,7 @@
 
 #include <glibmm/main.h>
 
+#define ABSTRACT_UI_EXPORTS
 #include "pbd/abstract_ui.h"
 
 #include "ardour/types.h"
@@ -48,6 +49,8 @@ class Route;
    point we will want to add more members to accomodate
    certain types of requests to the OSC UI
 */
+
+namespace ArdourSurface {
 
 struct OSCUIRequest : public BaseUI::BaseRequestObject {
   public:
@@ -188,7 +191,7 @@ class OSC : public ARDOUR::ControlProtocol, public AbstractUI<OSCUIRequest>
         static int _ ## name (const char *path, const char *types, lo_arg **argv, int argc, void *data, void *user_data) { \
                return static_cast<OSC*>(user_data)->cb_ ## name (path, types, argv, argc, data); \
         } \
-        int cb_ ## name (const char *, const char *, lo_arg **argv, int argc, void *data) { \
+        int cb_ ## name (const char *, const char *, lo_arg **argv, int argc, void *) { \
                 if (argc > 1) {                                                \
                  name (argv[0]->arg1type, argv[1]->arg2type,argv[2]->arg3type); \
                 }                                                      \
@@ -199,7 +202,7 @@ class OSC : public ARDOUR::ControlProtocol, public AbstractUI<OSCUIRequest>
         static int _ ## name (const char *path, const char *types, lo_arg **argv, int argc, void *data, void *user_data) { \
                return static_cast<OSC*>(user_data)->cb_ ## name (path, types, argv, argc, data); \
         } \
-        int cb_ ## name (const char *, const char *, lo_arg **argv, int argc, void *data) { \
+        int cb_ ## name (const char *, const char *, lo_arg **argv, int argc, void *) { \
                 if (argc > 1) {                                                \
                  name (argv[0]->arg1type, argv[1]->arg2type,argv[2]->arg3type,argv[3]->arg4type); \
                 }                                                      \
@@ -207,13 +210,18 @@ class OSC : public ARDOUR::ControlProtocol, public AbstractUI<OSCUIRequest>
        } 
 
         PATH_CALLBACK2(locate,i,i);
+        PATH_CALLBACK2(loop_location,i,i);
 	PATH_CALLBACK2(route_mute,i,i);
 	PATH_CALLBACK2(route_solo,i,i);
 	PATH_CALLBACK2(route_recenable,i,i);
 	PATH_CALLBACK2(route_set_gain_abs,i,f);
 	PATH_CALLBACK2(route_set_gain_dB,i,f);
+	PATH_CALLBACK2(route_set_trim_abs,i,f);
+	PATH_CALLBACK2(route_set_trim_dB,i,f);
 	PATH_CALLBACK2(route_set_pan_stereo_position,i,f);
 	PATH_CALLBACK2(route_set_pan_stereo_width,i,f);
+        PATH_CALLBACK3(route_set_send_gain_abs,i,i,f);
+        PATH_CALLBACK3(route_set_send_gain_dB,i,i,f);
         PATH_CALLBACK4(route_plugin_parameter,i,i,i,f);
         PATH_CALLBACK3(route_plugin_parameter_print,i,i,i); 
 
@@ -222,8 +230,12 @@ class OSC : public ARDOUR::ControlProtocol, public AbstractUI<OSCUIRequest>
 	int route_recenable (int rid, int yn);
 	int route_set_gain_abs (int rid, float level);
 	int route_set_gain_dB (int rid, float dB);
+	int route_set_trim_abs (int rid, float level);
+	int route_set_trim_dB (int rid, float dB);
 	int route_set_pan_stereo_position (int rid, float left_right_fraction);
 	int route_set_pan_stereo_width (int rid, float percent);
+	int route_set_send_gain_abs (int rid, int sid, float val);
+	int route_set_send_gain_dB (int rid, int sid, float val);
 	int route_plugin_parameter (int rid, int piid,int par, float val);
 	int route_plugin_parameter_print (int rid, int piid,int par);
 	
@@ -242,5 +254,7 @@ class OSC : public ARDOUR::ControlProtocol, public AbstractUI<OSCUIRequest>
 
 	static OSC* _instance;
 };
+
+} // namespace
 
 #endif // ardour_osc_h

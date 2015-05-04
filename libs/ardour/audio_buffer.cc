@@ -28,15 +28,15 @@ using namespace PBD;
 using namespace ARDOUR;
 
 AudioBuffer::AudioBuffer(size_t capacity)
-	: Buffer(DataType::AUDIO, capacity)
+	: Buffer (DataType::AUDIO)
 	, _owns_data (false)
 	, _data (0)
 {
-	if (_capacity > 0) {
+	if (capacity) {
 		_owns_data = true; // prevent resize() from gagging
-		resize (_capacity);
+		resize (capacity);
 		_silent = false; // force silence on the intial buffer state
-		silence (_capacity);
+		clear ();
 	}
 }
 
@@ -50,30 +50,45 @@ void
 AudioBuffer::resize (size_t size)
 {
 	if (!_owns_data) {
+		/* XXX how the hell is this enforced? */
+		_capacity = size;
 		return;
 	}
 
-	if (size < _capacity) {
-		_size = size;
+	if (_data && size < _capacity) {
+		/* buffer is already large enough */
 		return;
 	}
 
 	free (_data);
 
-	_capacity = size;
-	_size = size;
-	_silent = false;
+	cache_aligned_malloc ((void**) &_data, sizeof (Sample) * size);
 
-	cache_aligned_malloc ((void**) &_data, sizeof (Sample) * _capacity);
+	_capacity = size;
+	_silent = false;
 }
 
 bool
 AudioBuffer::check_silence (pframes_t nframes, pframes_t& n) const
 {
-	for (n = 0; n < _size && n < nframes; ++n) {
+	for (n = 0; n < nframes; ++n) {
 		if (_data[n] != Sample (0)) {
 			return false;
 		}
 	}
 	return true;
+}
+
+void
+AudioBuffer::silence (framecnt_t len, framecnt_t offset) {
+
+	if (!_silent) {
+		assert(_capacity > 0);
+		assert(offset + len <= _capacity);
+		memset(_data + offset, 0, sizeof (Sample) * len);
+		if (len == _capacity) {
+			_silent = true;
+		}
+	}
+	_written = true;
 }

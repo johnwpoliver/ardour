@@ -25,6 +25,8 @@
 
 #include <gtkmm/messagedialog.h>
 
+#include <glib/gstdio.h>
+
 #include "gtkmm2ext/choice.h"
 
 #include "pbd/pthread_utils.h"
@@ -88,7 +90,7 @@ Editor::export_range ()
 
 	if ((marker = reinterpret_cast<Marker *> (marker_menu_item->get_data ("marker"))) == 0) {
 		fatal << _("programming error: marker canvas item has no marker object pointer!") << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	Location* l;
@@ -158,11 +160,11 @@ Editor::export_region ()
 
 			switch (ret) {
 			case Gtk::RESPONSE_ACCEPT:
-				/* force unlink because the backend code will
+				/* force ::g_unlink because the backend code will
 				   go wrong if it tries to open an existing
 				   file for writing.
 				*/
-				::unlink (path.c_str());
+				::g_unlink (path.c_str());
 				break;
 			default:
 				return;

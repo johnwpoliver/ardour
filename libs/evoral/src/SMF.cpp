@@ -17,6 +17,7 @@
  * 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -25,7 +26,10 @@
 #include "evoral/Event.hpp"
 #include "evoral/SMF.hpp"
 #include "evoral/midi_util.h"
-#include "pbd/file_manager.h"
+
+#ifdef COMPILER_MSVC
+extern double round(double x);
+#endif
 
 using namespace std;
 
@@ -33,22 +37,20 @@ namespace Evoral {
 
 SMF::~SMF()
 {
-	if (_smf) {
-		smf_delete(_smf);
-		_smf = 0;
-		_smf_track = 0;
-	}
+	close ();
 }
 
 uint16_t
 SMF::num_tracks() const
 {
-	return _smf->number_of_tracks;
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+	return _smf ? _smf->number_of_tracks : 0;
 }
 
 uint16_t
 SMF::ppqn() const
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
 	return _smf->ppqn;
 }
 
@@ -58,6 +60,7 @@ SMF::ppqn() const
 int
 SMF::seek_to_track(int track)
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
 	_smf_track = smf_get_track_by_number(_smf, track);
 	if (_smf_track != NULL) {
 		_smf_track->next_event_number = (_smf_track->number_of_events == 0) ? 0 : 1;
@@ -65,6 +68,28 @@ SMF::seek_to_track(int track)
 	} else {
 		return -1;
 	}
+}
+
+/** Attempt to open the SMF file just to see if it is valid.
+ *
+ * \return  true on success
+ *          false on failure
+ */
+bool
+SMF::test(const std::string& path)
+{
+	FILE* f = fopen(path.c_str(), "r");
+	if (f == 0) {
+		return false;
+	}
+
+	smf_t* test_smf = smf_load(f);
+	fclose(f);
+
+	const bool success = (test_smf != NULL);
+	smf_delete(test_smf);
+
+	return success;
 }
 
 /** Attempt to open the SMF file for reading and/or writing.
@@ -76,24 +101,21 @@ SMF::seek_to_track(int track)
 int
 SMF::open(const std::string& path, int track) THROW_FILE_ERROR
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	assert(track >= 1);
 	if (_smf) {
 		smf_delete(_smf);
 	}
 
-	_file_path = path;
-
-	PBD::StdioFileDescriptor d (_file_path, "r");
-	FILE* f = d.allocate ();
+	FILE* f = fopen(path.c_str(), "r");
 	if (f == 0) {
 		return -1;
-	}
-
-	if ((_smf = smf_load (f)) == 0) {
+	} else if ((_smf = smf_load(f)) == 0) {
+		fclose(f);
 		return -1;
-	}
-
-	if ((_smf_track = smf_get_track_by_number(_smf, track)) == 0) {
+	} else if ((_smf_track = smf_get_track_by_number(_smf, track)) == 0) {
+		fclose(f);
 		return -2;
 	}
 
@@ -106,6 +128,7 @@ SMF::open(const std::string& path, int track) THROW_FILE_ERROR
 		_empty = false;
 	}
 
+	fclose(f);
 	return 0;
 }
 
@@ -119,12 +142,12 @@ SMF::open(const std::string& path, int track) THROW_FILE_ERROR
 int
 SMF::create(const std::string& path, int track, uint16_t ppqn) THROW_FILE_ERROR
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	assert(track >= 1);
 	if (_smf) {
 		smf_delete(_smf);
 	}
-
-	_file_path = path;
 
 	_smf = smf_new();
 
@@ -138,7 +161,9 @@ SMF::create(const std::string& path, int track, uint16_t ppqn) THROW_FILE_ERROR
 
 	for (int i = 0; i < track; ++i) {
 		_smf_track = smf_track_new();
-		assert(_smf_track);
+		if (!_smf_track) {
+			return -2;
+		}
 		smf_add_track(_smf, _smf_track);
 	}
 
@@ -151,15 +176,16 @@ SMF::create(const std::string& path, int track, uint16_t ppqn) THROW_FILE_ERROR
 	{
 		/* put a stub file on disk */
 
-		PBD::StdioFileDescriptor d (_file_path, "w+");
-		FILE* f = d.allocate ();
+		FILE* f = fopen (path.c_str(), "w+");
 		if (f == 0) {
 			return -1;
 		}
 
 		if (smf_save (_smf, f)) {
+			fclose (f);
 			return -1;
 		}
+		fclose (f);
 	}
 
 	_empty = true;
@@ -170,6 +196,8 @@ SMF::create(const std::string& path, int track, uint16_t ppqn) THROW_FILE_ERROR
 void
 SMF::close() THROW_FILE_ERROR
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	if (_smf) {
 		smf_delete(_smf);
 		_smf = 0;
@@ -180,7 +208,12 @@ SMF::close() THROW_FILE_ERROR
 void
 SMF::seek_to_start() const
 {
-	_smf_track->next_event_number = 1;
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+	if (_smf_track) {
+		_smf_track->next_event_number = std::min(_smf_track->number_of_events, (size_t)1);
+	} else {
+		cerr << "WARNING: SMF seek_to_start() with no track" << endl;
+	}
 }
 
 /** Read an event from the current position in file.
@@ -203,6 +236,8 @@ SMF::seek_to_start() const
 int
 SMF::read_event(uint32_t* delta_t, uint32_t* size, uint8_t** buf, event_id_t* note_id) const
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	smf_event_t* event;
 
 	assert(delta_t);
@@ -248,8 +283,17 @@ SMF::read_event(uint32_t* delta_t, uint32_t* size, uint8_t** buf, event_id_t* no
 		}
 		memcpy(*buf, event->midi_buffer, size_t(event_size));
 		*size = event_size;
+		if (((*buf)[0] & 0xF0) == 0x90 && (*buf)[2] == 0) {
+			/* normalize note on with velocity 0 to proper note off */
+			(*buf)[0] = 0x80 | ((*buf)[0] & 0x0F);  /* note off */
+			(*buf)[2] = 0x40;  /* default velocity */
+		}
 
-		assert(midi_event_is_valid(*buf, *size));
+		if (!midi_event_is_valid(*buf, *size)) {
+			cerr << "WARNING: SMF ignoring illegal MIDI event" << endl;
+			*size = 0;
+			return -1;
+		}
 
 		/* printf("SMF::read_event @ %u: ", *delta_t);
 		   for (size_t i = 0; i < *size; ++i) {
@@ -265,6 +309,8 @@ SMF::read_event(uint32_t* delta_t, uint32_t* size, uint8_t** buf, event_id_t* no
 void
 SMF::append_event_delta(uint32_t delta_t, uint32_t size, const uint8_t* buf, event_id_t note_id)
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	if (size == 0) {
 		return;
 	}
@@ -314,7 +360,7 @@ SMF::append_event_delta(uint32_t delta_t, uint32_t size, const uint8_t* buf, eve
 		/* this should be allocated by malloc(3) because libsmf will
 		   call free(3) on it
 		*/
-		event->midi_buffer = (uint8_t*) malloc (sizeof (uint8_t*) * event->midi_buffer_length);
+		event->midi_buffer = (uint8_t*) malloc (sizeof(uint8_t) * event->midi_buffer_length);
 
 		event->midi_buffer[0] = 0xff; // Meta-event
 		event->midi_buffer[1] = 0x7f; // Sequencer-specific
@@ -338,6 +384,8 @@ SMF::append_event_delta(uint32_t delta_t, uint32_t size, const uint8_t* buf, eve
 void
 SMF::begin_write()
 {
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
 	assert(_smf_track);
 	smf_track_delete(_smf_track);
 
@@ -349,17 +397,25 @@ SMF::begin_write()
 }
 
 void
-SMF::end_write() THROW_FILE_ERROR
+SMF::end_write(string const & path) THROW_FILE_ERROR
 {
-	PBD::StdioFileDescriptor d (_file_path, "w+");
-	FILE* f = d.allocate ();
+	Glib::Threads::Mutex::Lock lm (_smf_lock);
+
+	if (!_smf) {
+		return;
+	}
+
+	FILE* f = fopen (path.c_str(), "w+");
 	if (f == 0) {
-		throw FileError (_file_path);
+		throw FileError (path);
 	}
 
 	if (smf_save(_smf, f) != 0) {
-		throw FileError (_file_path);
+		fclose(f);
+		throw FileError (path);
 	}
+
+	fclose(f);
 }
 
 double
@@ -368,12 +424,6 @@ SMF::round_to_file_precision (double val) const
 	double div = ppqn();
 
 	return round (val * div) / div;
-}
-
-void
-SMF::set_path (const std::string& p)
-{
-	_file_path = p;
 }
 
 } // namespace Evoral

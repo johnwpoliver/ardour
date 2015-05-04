@@ -1,6 +1,9 @@
 #undef  Marker
 #define Marker FuckYouAppleAndYourLackOfNameSpaces
 
+#include <gtkmm/button.h>
+#include <gdk/gdkquartz.h>
+
 #include "pbd/convert.h"
 #include "pbd/error.h"
 
@@ -9,9 +12,6 @@
 #include "ardour/plugin_insert.h"
 
 #undef check // stupid gtk, stupid apple
-
-#include <gtkmm/button.h>
-#include <gdk/gdkquartz.h>
 
 #include <gtkmm2ext/utils.h>
 
@@ -34,7 +34,6 @@
 using namespace ARDOUR;
 using namespace Gtk;
 using namespace Gtkmm2ext;
-using namespace sigc;
 using namespace std;
 using namespace PBD;
 
@@ -84,12 +83,12 @@ dump_view_tree (NSView* view, int depth)
                         [[NSNotificationCenter defaultCenter] addObserver:self
                          selector:@selector(cocoaParentActivationHandler:)
                          name:NSWindowDidBecomeMainNotification
-                         object:nil];
+                         object:NULL];
                         
                         [[NSNotificationCenter defaultCenter] addObserver:self
                          selector:@selector(cocoaParentBecameKeyHandler:)
                          name:NSWindowDidBecomeKeyNotification
-                         object:nil];
+                         object:NULL];
                 }
         }
 
@@ -122,7 +121,7 @@ dump_view_tree (NSView* view, int depth)
 	} 
 }
 
-- (void)auViewResized:(NSNotification *)notification;
+- (void)auViewResized:(NSNotification *)notification
 {
         (void) notification; // stop complaints about unusued argument
 	plugin_ui->cocoa_view_resized();
@@ -154,8 +153,15 @@ AUPluginUI::AUPluginUI (boost::shared_ptr<PluginInsert> insert)
 
 	smaller_hbox->set_spacing (6);
 	smaller_hbox->pack_start (preset_label, false, false, 4);
+	smaller_hbox->pack_start (_preset_modified, false, false);
 	smaller_hbox->pack_start (_preset_combo, false, false);
+	smaller_hbox->pack_start (add_button, false, false);
+#if 0
+	/* Ardour does not currently allow to overwrite existing presets
+	 * see save_property_list() in audio_unit.cc
+	 */
 	smaller_hbox->pack_start (save_button, false, false);
+#endif
 #if 0
 	/* one day these might be useful with an AU plugin, but not yet */
 	smaller_hbox->pack_start (automation_mode_label, false, false);
@@ -191,7 +197,7 @@ AUPluginUI::AUPluginUI (boost::shared_ptr<PluginInsert> insert)
 	cocoa_parent = 0;
 	cocoa_window = 0;
 
-#ifdef WITH_CARBBON
+#ifdef WITH_CARBON
 	_activating_from_app = false;
 	_notify = 0;
 	au_view = 0;
@@ -211,7 +217,10 @@ AUPluginUI::AUPluginUI (boost::shared_ptr<PluginInsert> insert)
 		create_cocoa_view ();
 	}
 
+	low_box.add_events(Gdk::VISIBILITY_NOTIFY_MASK);
+
 	low_box.signal_realize().connect (mem_fun (this, &AUPluginUI::lower_box_realized));
+	low_box.signal_visibility_notify_event ().connect (mem_fun (this, &AUPluginUI::lower_box_visibility_notify));
 }
 
 AUPluginUI::~AUPluginUI ()
@@ -366,7 +375,7 @@ AUPluginUI::create_cocoa_view ()
 
 		DEBUG_TRACE (DEBUG::AudioUnits, string_compose ("tried to create bundle, result = %1\n", viewBundle));
 
-		if (viewBundle == nil) {
+		if (viewBundle == NULL) {
 			error << _("AUPluginUI: error loading AU view's bundle") << endmsg;
 			return -1;
 		} else {
@@ -384,7 +393,7 @@ AUPluginUI::create_cocoa_view ()
 			}
 			// make a factory
 			id factory = [[[factoryClass alloc] init] autorelease];
-			if (factory == nil) {
+			if (factory == NULL) {
 				error << _("AUPluginUI: Could not create an instance of the AU view factory") << endmsg;
 				return -1;
 			}
@@ -431,7 +440,6 @@ AUPluginUI::create_cocoa_view ()
 void
 AUPluginUI::cocoa_view_resized ()
 {
-        GtkRequisition topsize = top_box.size_request ();
         NSWindow* window = get_nswindow ();
         NSRect windowFrame= [window frame];
         NSRect new_frame = [au_view frame];
@@ -498,7 +506,7 @@ AUPluginUI::create_carbon_view ()
 						  kWindowNoShadowAttribute|
 						  kWindowNoTitleBarAttribute);
 
-	if ((err = CreateNewWindow(kDocumentWindowClass, attr, &r, &carbon_window)) != noErr) {
+	if ((err = CreateNewWindow(kUtilityWindowClass, attr, &r, &carbon_window)) != noErr) {
 		error << string_compose (_("AUPluginUI: cannot create carbon window (err: %1)"), err) << endmsg;
 	        CloseComponent (editView);
 		return -1;
@@ -628,6 +636,7 @@ AUPluginUI::parent_carbon_window ()
 	_notify = [ [NotificationObject alloc] initWithPluginUI:this andCocoaParent:cocoa_parent andTopLevelParent:win ]; 
 
 	[win addChildWindow:cocoa_parent ordered:NSWindowAbove];
+	[win setAutodisplay:1]; // turn of GTK stuff for this window
 
 	return 0;
 #else
@@ -658,16 +667,19 @@ AUPluginUI::parent_cocoa_window ()
 
 	/* move the au_view down so that it doesn't overlap the top_box contents */
 
-	NSPoint origin = { 0, a.height };
+	const int spacing = 6;  // main vbox spacing
+	const int pad     = 4;  // box pad
+
+	NSPoint origin = { spacing + pad, static_cast<CGFloat> (a.height) + (2 * spacing) + pad };
 
 	[au_view setFrameOrigin:origin];
-        [view addSubview:au_view positioned:NSWindowBelow relativeTo:nil]; 
+        [view addSubview:au_view positioned:NSWindowBelow relativeTo:NULL];
 
         last_au_frame = [au_view frame];
 
 	// watch for size changes of the view
 
-	_notify = [ [NotificationObject alloc] initWithPluginUI:this andCocoaParent:nil andTopLevelParent:win ]; 
+	_notify = [ [NotificationObject alloc] initWithPluginUI:this andCocoaParent:NULL andTopLevelParent:win ];
 
         [[NSNotificationCenter defaultCenter] addObserver:_notify
          selector:@selector(auViewResized:) name:NSViewFrameDidChangeNotification
@@ -676,6 +688,13 @@ AUPluginUI::parent_cocoa_window ()
 	return 0;
 }
 
+void
+AUPluginUI::grab_focus()
+{
+	if (au_view) {
+		[au_view becomeFirstResponder];
+	}
+}
 void
 AUPluginUI::forward_key_event (GdkEventKey* ev)
 {
@@ -719,6 +738,19 @@ AUPluginUI::lower_box_realized ()
 	} else if (carbon_window) {
 		parent_carbon_window ();
 	}
+}
+
+bool
+AUPluginUI::lower_box_visibility_notify (GdkEventVisibility* ev)
+{
+#ifdef WITH_CARBON
+	if (carbon_window  && ev->state != GDK_VISIBILITY_UNOBSCURED) {
+		ShowWindow (carbon_window);
+		ActivateWindow (carbon_window, TRUE);
+		return true;
+	}
+#endif
+	return false;
 }
 
 void

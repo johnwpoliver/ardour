@@ -20,9 +20,15 @@
 #define __ardour_meter_h__
 
 #include <vector>
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/processor.h"
 #include "pbd/fastlog.h"
+
+#include "ardour/kmeterdsp.h"
+#include "ardour/iec1ppmdsp.h"
+#include "ardour/iec2ppmdsp.h"
+#include "ardour/vumeterdsp.h"
 
 namespace ARDOUR {
 
@@ -30,34 +36,24 @@ class BufferSet;
 class ChanCount;
 class Session;
 
-class Metering {
-  public:
-	static void               update_meters ();
-	static PBD::Signal0<void> Meter;
-
-  private:
-	/* this object is not meant to be instantiated */
-	Metering();
-};
-
 /** Meters peaks on the input and stores them for access.
  */
-class PeakMeter : public Processor {
+class LIBARDOUR_API PeakMeter : public Processor {
 public:
         PeakMeter(Session& s, const std::string& name);
+        ~PeakMeter();
 
-	void meter();
 	void reset ();
 	void reset_max ();
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
 
 	/* special method for meter, to ensure that it can always handle the maximum
 	   number of streams in the route, no matter where we put it.
 	*/
 
-	void reset_max_channels (const ChanCount&);
+	void set_max_channels (const ChanCount&);
 
 	/* tell the meter than no matter how many channels it can handle,
 	   `in' is the number it is actually going be handling from
@@ -65,30 +61,25 @@ public:
 	*/
 
 	void reflect_inputs (const ChanCount& in);
+	void emit_configuration_changed ();
 
 	/** Compute peaks */
 	void run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pframes_t nframes, bool);
 
+	void activate ()   { }
+	void deactivate () { }
+
 	ChanCount input_streams () const { return current_meters; }
 	ChanCount output_streams () const { return current_meters; }
 
-	float peak_power (uint32_t n) {
-		if (n < _visible_peak_power.size()) {
-			return _visible_peak_power[n];
-		} else {
-			return minus_infinity();
-		}
-	}
+	float meter_level (uint32_t n, MeterType type);
 
-	float max_peak_power (uint32_t n) {
-		if (n < _max_peak_power.size()) {
-			return _max_peak_power[n];
-		} else {
-			return minus_infinity();
-		}
-	}
+	void set_type(MeterType t);
+	MeterType get_type() { return _meter_type; }
 
 	XMLNode& state (bool full);
+
+	PBD::Signal1<void, MeterType> TypeChanged;
 
 private:
 	friend class IO;
@@ -99,11 +90,21 @@ private:
 	 */
 	ChanCount current_meters;
 
-	std::vector<float> _peak_power;
-	std::vector<float> _visible_peak_power;
-	std::vector<float> _max_peak_power;
-};
+	bool               _reset_dpm;
+	bool               _reset_max;
 
+	uint32_t           _bufcnt;
+	std::vector<float> _peak_buffer; // internal, integrate
+	std::vector<float> _peak_power;  // includes accurate falloff, hence dB
+	std::vector<float> _max_peak_signal; // dB calculation is done on demand
+
+	std::vector<Kmeterdsp *> _kmeter;
+	std::vector<Iec1ppmdsp *> _iec1meter;
+	std::vector<Iec2ppmdsp *> _iec2meter;
+	std::vector<Vumeterdsp *> _vumeter;
+
+	MeterType _meter_type;
+};
 
 } // namespace ARDOUR
 

@@ -20,97 +20,124 @@
 #define EVORAL_RANGE_HPP
 
 #include <list>
+#include <assert.h>
+#include <iostream>
+#include "evoral/visibility.h"
+
+
 
 namespace Evoral {
 
-enum OverlapType {
+enum /*LIBEVORAL_API*/ OverlapType {
 	OverlapNone,      // no overlap
-	OverlapInternal,  // the overlap is 100% with the object
+	OverlapInternal,  // the overlap is 100% within the object
 	OverlapStart,     // overlap covers start, but ends within
 	OverlapEnd,       // overlap begins within and covers end
 	OverlapExternal   // overlap extends to (at least) begin+end
 };
 
 template<typename T>
-OverlapType coverage (T sa, T ea, T sb, T eb) {
+/*LIBEVORAL_API*/ OverlapType coverage (T sa, T ea, T sb, T eb) {
 	/* OverlapType returned reflects how the second (B)
-	   range overlaps the first (A).
+	 * range overlaps the first (A).
+	 *
+	 * The diagram shows the OverlapType of each possible relative
+	 * placement of A and B.
+	 *
+	 * Notes:
+	 *    Internal: the start and end points cannot coincide
+	 *    External: the start and end points can coincide
+	 *    Start: end points can coincide
+	 *    End: start points can coincide
+	 *
+	 * Internal disallows start and end point equality, and thus implies
+	 * that there are two disjoint portions of A which do not overlap B.
+	 *
+	 * A:    |---|
+	 * B starts before A
+	 * B: |-|          None
+	 * B: |--|         Start
+	 * B: |----|       Start
+	 * B: |------|     External
+	 * B: |--------|   External
+	 * B starts equal to A
+	 * B:    |-|       Start
+	 * B:    |---|     External
+	 * B:    |----|    External
+	 * B starts inside A
+	 * B:     |-|      Internal
+	 * B:     |--|     End
+	 * B:     |---|    End
+	 * B starts at end of A
+	 * B:        |--|  End
+	 * B starts after A
+	 * B:         |-|  None
+	 * A:    |---|
+	 */
 
-	   The diagrams show various relative placements
-	   of A and B for each OverlapType.
 
-	   Notes:
-	      Internal: the start points cannot coincide
-	      External: the start and end points can coincide
-	      Start: end points can coincide
-	      End: start points can coincide
-
-	   XXX Logically, Internal should disallow end
-	   point equality.
-	*/
-
-	/*
-	     |--------------------|   A
-	          |------|            B
-	        |-----------------|   B
-
-
-             "B is internal to A"
-
-	*/
-
-	if ((sb > sa) && (eb <= ea)) {
-		return OverlapInternal;
+	if (sa > ea) {
+		// seems we are sometimes called with negative length ranges
+		std::cerr << "a - start after end: " << sa << ", " << ea << std::endl;
+		return OverlapNone;
 	}
 
-	/*
-	     |--------------------|   A
-	   ----|                      B
-           -----------------------|   B
-	   --|                        B
-
-	     "B overlaps the start of A"
-
-	*/
-
-	if ((eb >= sa) && (eb <= ea)) {
-		return OverlapStart;
-	}
-	/*
-	     |---------------------|  A
-                   |----------------- B
-	     |----------------------- B
-                                   |- B
-
-            "B overlaps the end of A"
-
-	*/
-	if ((sb > sa) && (sb <= ea)) {
-		return OverlapEnd;
-	}
-	/*
-	     |--------------------|     A
-	   --------------------------  B
-	     |-----------------------  B
-	    ----------------------|    B
-             |--------------------|    B
-
-
-           "B overlaps all of A"
-	*/
-	if ((sa >= sb) && (sa <= eb) && (ea <= eb)) {
-		return OverlapExternal;
+	if (sb > eb) {
+		// seems we are sometimes called with negative length ranges
+		std::cerr << "b - start after end: " << sb << ", " << eb << std::endl;
+		return OverlapNone;
 	}
 
+	if (sb < sa) {  // B starts before A
+		if (eb < sa) {
+			return OverlapNone;
+		} else if (eb == sa) {
+			return OverlapStart;
+		} else { // eb > sa
+			if (eb < ea) {
+				return OverlapStart;
+			} else if (eb == ea) {
+				return OverlapExternal;
+			} else {
+				return OverlapExternal;
+			}
+		}
+	} else if (sb == sa) { // B starts equal to A
+		if (eb < ea) {
+			return OverlapStart;
+		} else if (eb == ea) {
+			return OverlapExternal;
+		} else { // eb > ea
+			return OverlapExternal;
+		}
+	} else { // sb > sa
+		if (eb < ea) {
+			return OverlapInternal;
+		} else if (eb == ea) {
+			return OverlapEnd;
+		} else { // eb > ea
+			if (sb < ea) { // B starts inside A
+				return OverlapEnd;
+			} else if (sb == ea) { // B starts at end of A
+				return OverlapEnd;
+			} else { // sb > ea, B starts after A
+				return OverlapNone;
+			}
+		}
+	}
+
+	std::cerr << "unknown overlap type!" << sa << ", " << ea << "; " << sb << ", " << eb << std::endl;
+	assert(!"unknown overlap type!");
 	return OverlapNone;
 }
 
 /** Type to describe a time range */
 template<typename T>
-struct Range {
+struct /*LIBEVORAL_API*/ Range {
 	Range (T f, T t) : from (f), to (t) {}
 	T from; ///< start of the range
-	T to;   ///< end of the range
+	T to;   ///< end of the range (inclusive: to lies inside the range)
+	bool empty() const { return from == to; }
 };
 
 template<typename T>	
@@ -119,7 +146,7 @@ bool operator== (Range<T> a, Range<T> b) {
 }
 
 template<typename T>
-class RangeList {
+class /*LIBEVORAL_API*/ RangeList {
 public:
 	RangeList () : _dirty (false) {}
 	
@@ -172,7 +199,7 @@ private:
 
 /** Type to describe the movement of a time range */
 template<typename T>
-struct RangeMove {
+struct /*LIBEVORAL_API*/ RangeMove {
 	RangeMove (T f, double l, T t) : from (f), length (l), to (t) {}
 	T         from;   ///< start of the range
 	double    length; ///< length of the range
@@ -189,7 +216,7 @@ RangeList<T> subtract (Range<T> range, RangeList<T> sub)
 	RangeList<T> result;
 	result.add (range);
 
-	if (sub.empty ()) {
+	if (sub.empty () || range.empty()) {
 		return result;
 	}
 
@@ -211,28 +238,33 @@ RangeList<T> subtract (Range<T> range, RangeList<T> sub)
 
 			switch (coverage (j->from, j->to, i->from, i->to)) {
 			case OverlapNone:
-				/* The thing we're subtracting does not overlap this bit of the result,
+				/* The thing we're subtracting (*i) does not overlap this bit of the result (*j),
 				   so pass it through.
 				*/
 				new_result.add (*j);
 				break;
 			case OverlapInternal:
-				/* Internal overlap of the thing we're subtracting from this bit of the result,
-				   so we might end up with two bits left over.
+				/* Internal overlap of the thing we're subtracting (*i) from this bit of the result,
+				   so we should end up with two bits of (*j) left over, from the start of (*j) to
+				   the start of (*i), and from the end of (*i) to the end of (*j).
 				*/
-				if (j->from < (i->from - 1)) {
-					new_result.add (Range<T> (j->from, i->from - 1));
-				}
-				if (j->to != i->to) {
-					new_result.add (Range<T> (i->to, j->to));
-				}
+				assert (j->from < i->from);
+				assert (j->to > i->to);
+				new_result.add (Range<T> (j->from, i->from - 1));
+				new_result.add (Range<T> (i->to + 1, j->to));
 				break;
 			case OverlapStart:
-				/* The bit we're subtracting overlaps the start of the bit of the result */
-				new_result.add (Range<T> (i->to, j->to - 1));
+				/* The bit we're subtracting (*i) overlaps the start of the bit of the result (*j),
+				 * so we keep only the part of of (*j) from after the end of (*i)
+				 */
+				assert (i->to < j->to);
+				new_result.add (Range<T> (i->to + 1, j->to));
 				break;
 			case OverlapEnd:
-				/* The bit we're subtracting overlaps the end of the bit of the result */
+				/* The bit we're subtracting (*i) overlaps the end of the bit of the result (*j),
+				 * so we keep only the part of of (*j) from before the start of (*i)
+				 */
+				assert (j->from < i->from);
 				new_result.add (Range<T> (j->from, i->from - 1));
 				break;
 			case OverlapExternal:

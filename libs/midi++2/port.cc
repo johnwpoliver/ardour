@@ -22,9 +22,6 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#include <jack/jack.h>
-#include <jack/midiport.h>
-
 #include "pbd/xml++.h"
 #include "pbd/error.h"
 #include "pbd/failed_constructor.h"
@@ -71,7 +68,7 @@ Port::init (string const & name, Flags flags)
 	_tagname = name;
 	_flags = flags;
 
-	_parser = new Parser (*this);
+	_parser = new Parser ();
 
 	for (int i = 0; i < 16; i++) {
 		_channel[i] = new Channel (i, *this);

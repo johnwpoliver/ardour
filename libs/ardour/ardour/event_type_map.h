@@ -21,33 +21,48 @@
 #ifndef __ardour_event_type_map_h__
 #define __ardour_event_type_map_h__
 
+#include <map>
 #include <string>
+
 #include "evoral/TypeMap.hpp"
 #include "evoral/ControlList.hpp"
+#include "evoral/ParameterDescriptor.hpp"
+
+#include "ardour/libardour_visibility.h"
 
 namespace ARDOUR {
+
+class URIMap;
 
 /** This is the interface Ardour provides to Evoral about what
  * parameter and event types/ranges/names etc. to use.
  */
-class EventTypeMap : public Evoral::TypeMap {
+class LIBARDOUR_API EventTypeMap : public Evoral::TypeMap {
 public:
+	static EventTypeMap& instance();
+
 	bool     type_is_midi(uint32_t type) const;
 	uint8_t  parameter_midi_type(const Evoral::Parameter& param) const;
 	uint32_t midi_event_type(uint8_t status) const;
 	Evoral::ControlList::InterpolationStyle interpolation_of(const Evoral::Parameter& param);
 
-	bool                 is_integer(const Evoral::Parameter& param) const;
-	Evoral::Parameter    new_parameter(uint32_t type, uint8_t channel=0, uint32_t id=0) const;
-	Evoral::Parameter    new_parameter(const std::string& str) const;
-	std::string          to_symbol(const Evoral::Parameter& param) const;
+	Evoral::Parameter from_symbol(const std::string& str) const;
+	std::string       to_symbol(const Evoral::Parameter& param) const;
 
-	bool                 is_midi_parameter(const Evoral::Parameter& param);
+	Evoral::ParameterDescriptor descriptor(const Evoral::Parameter& param) const;
 
-	static EventTypeMap& instance() { return event_type_map; }
+	void set_descriptor(const Evoral::Parameter&           param,
+	                    const Evoral::ParameterDescriptor& desc);
 
 private:
-	static EventTypeMap event_type_map;
+	typedef std::map<Evoral::Parameter, Evoral::ParameterDescriptor> Descriptors;
+
+	EventTypeMap(URIMap* uri_map) : _uri_map(uri_map) {}
+
+	URIMap*     _uri_map;
+	Descriptors _descriptors;
+
+	static EventTypeMap* event_type_map;
 };
 
 } // namespace ARDOUR

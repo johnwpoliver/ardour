@@ -33,11 +33,13 @@
 #include "location_ui.h"
 #include "prompter.h"
 #include "utils.h"
+#include "public_editor.h"
 
 #include "i18n.h"
 
 using namespace std;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace Gtkmm2ext;
@@ -163,6 +165,7 @@ LocationEditRow::LocationEditRow(Session * sess, Location * loc, int32_t num)
 
          set_location (loc);
          set_number (num);
+         cd_toggled(); // show/hide cd-track details
  }
 
  LocationEditRow::~LocationEditRow()
@@ -307,6 +310,10 @@ LocationEditRow::set_location (Location *loc)
 		end_clock.show();
 		length_clock.show();
 
+		if (location->is_cd_marker()) {
+			show_cd_track_details ();
+		}
+
 		ARDOUR_UI::instance()->set_tip (remove_button, _("Remove this range"));
 		ARDOUR_UI::instance()->set_tip (start_clock, _("Start time - middle click to locate here"));
 		ARDOUR_UI::instance()->set_tip (end_clock, _("End time - middle click to locate here"));
@@ -330,13 +337,15 @@ LocationEditRow::set_location (Location *loc)
 
 	--i_am_the_modifier;
 
-	location->start_changed.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::start_changed, this, _1), gui_context());
-	location->end_changed.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::end_changed, this, _1), gui_context());
-	location->name_changed.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::name_changed, this, _1), gui_context());
-	location->changed.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::location_changed, this, _1), gui_context());
-	location->FlagsChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::flags_changed, this, _1, _2), gui_context());
-	location->LockChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::lock_changed, this, _1), gui_context());
-	location->PositionLockStyleChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::position_lock_style_changed, this, _1), gui_context());
+        /* connect to per-location signals, since this row only cares about this location */
+
+	location->NameChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::name_changed, this), gui_context());
+        location->StartChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::start_changed, this), gui_context());
+        location->EndChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::end_changed, this), gui_context());
+        location->Changed.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::location_changed, this), gui_context());
+        location->FlagsChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::flags_changed, this), gui_context()); 
+        location->LockChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::lock_changed, this), gui_context());
+        location->PositionLockStyleChanged.connect (connections, invalidator (*this), boost::bind (&LocationEditRow::position_lock_style_changed, this), gui_context());
 }
 
 void
@@ -447,6 +456,34 @@ LocationEditRow::clock_changed (LocationPart part)
 }
 
 void
+LocationEditRow::show_cd_track_details ()
+{
+
+	if (location->cd_info.find("isrc") != location->cd_info.end()) {
+		isrc_entry.set_text(location->cd_info["isrc"]);
+	}
+	if (location->cd_info.find("performer") != location->cd_info.end()) {
+		performer_entry.set_text(location->cd_info["performer"]);
+	}
+	if (location->cd_info.find("composer") != location->cd_info.end()) {
+		composer_entry.set_text(location->cd_info["composer"]);
+	}
+	if (location->cd_info.find("scms") != location->cd_info.end()) {
+		scms_check_button.set_active(true);
+	}
+	if (location->cd_info.find("preemph") != location->cd_info.end()) {
+		preemph_check_button.set_active(true);
+	}
+
+
+	if (!cd_track_details_hbox.get_parent()) {
+		item_table.attach (cd_track_details_hbox, 0, 7, 1, 2, FILL | EXPAND, FILL, 4, 0);
+	}
+	// item_table.resize(2, 7);
+	cd_track_details_hbox.show_all();
+}
+
+void
 LocationEditRow::cd_toggled ()
 {
 	if (i_am_the_modifier || !location) {
@@ -467,29 +504,9 @@ LocationEditRow::cd_toggled ()
 
 	location->set_cd (cd_check_button.get_active(), this);
 
-	if (location->is_cd_marker() && !(location->is_mark())) {
+	if (location->is_cd_marker()) {
 
-		if (location->cd_info.find("isrc") != location->cd_info.end()) {
-			isrc_entry.set_text(location->cd_info["isrc"]);
-		}
-		if (location->cd_info.find("performer") != location->cd_info.end()) {
-			performer_entry.set_text(location->cd_info["performer"]);
-		}
-		if (location->cd_info.find("composer") != location->cd_info.end()) {
-			composer_entry.set_text(location->cd_info["composer"]);
-		}
-		if (location->cd_info.find("scms") != location->cd_info.end()) {
-			scms_check_button.set_active(true);
-		}
-		if (location->cd_info.find("preemph") != location->cd_info.end()) {
-			preemph_check_button.set_active(true);
-		}
-
-		if (!cd_track_details_hbox.get_parent()) {
-			item_table.attach (cd_track_details_hbox, 0, 7, 1, 2, FILL | EXPAND, FILL, 4, 0);
-		}
-		// item_table.resize(2, 7);
-		cd_track_details_hbox.show_all();
+		show_cd_track_details ();
 
 	} else if (cd_track_details_hbox.get_parent()){
 
@@ -575,7 +592,7 @@ LocationEditRow::preemph_toggled ()
 }
 
 void
-LocationEditRow::end_changed (ARDOUR::Location *)
+LocationEditRow::end_changed ()
 {
 	ENSURE_GUI_THREAD (*this, &LocationEditRow::end_changed, loc)
 
@@ -591,7 +608,7 @@ LocationEditRow::end_changed (ARDOUR::Location *)
 }
 
 void
-LocationEditRow::start_changed (ARDOUR::Location*)
+LocationEditRow::start_changed ()
 {
 	if (!location) return;
 
@@ -610,7 +627,7 @@ LocationEditRow::start_changed (ARDOUR::Location*)
 }
 
 void
-LocationEditRow::name_changed (ARDOUR::Location *)
+LocationEditRow::name_changed ()
 {
 	if (!location) return;
 
@@ -625,7 +642,7 @@ LocationEditRow::name_changed (ARDOUR::Location *)
 }
 
 void
-LocationEditRow::location_changed (ARDOUR::Location*)
+LocationEditRow::location_changed ()
 {
 
 	if (!location) return;
@@ -643,7 +660,7 @@ LocationEditRow::location_changed (ARDOUR::Location*)
 }
 
 void
-LocationEditRow::flags_changed (ARDOUR::Location*, void *)
+LocationEditRow::flags_changed ()
 {
 	if (!location) {
 		return;
@@ -659,7 +676,7 @@ LocationEditRow::flags_changed (ARDOUR::Location*, void *)
 }
 
 void
-LocationEditRow::lock_changed (ARDOUR::Location*)
+LocationEditRow::lock_changed ()
 {
 	if (!location) {
 		return;
@@ -675,7 +692,7 @@ LocationEditRow::lock_changed (ARDOUR::Location*)
 }
 
 void
-LocationEditRow::position_lock_style_changed (ARDOUR::Location*)
+LocationEditRow::position_lock_style_changed ()
 {
 	if (!location) {
 		return;
@@ -822,7 +839,9 @@ LocationUI::LocationUI ()
 
 LocationUI::~LocationUI()
 {
-        delete _clock_group;
+	loop_edit_row.unset_clock_group ();
+	punch_edit_row.unset_clock_group ();
+	delete _clock_group;
 }
 
 gint
@@ -837,12 +856,12 @@ LocationUI::do_location_remove (ARDOUR::Location *loc)
 		return FALSE;
 	}
 
-	_session->begin_reversible_command (_("remove marker"));
+	PublicEditor::instance().begin_reversible_command (_("remove marker"));
 	XMLNode &before = _session->locations()->get_state();
 	_session->locations()->remove (loc);
 	XMLNode &after = _session->locations()->get_state();
 	_session->add_command(new MementoCommand<Locations>(*(_session->locations()), &before, &after));
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 
 	return FALSE;
 }
@@ -943,7 +962,7 @@ LocationUI::location_removed (Location* location)
 }
 
 void
-LocationUI::map_locations (Locations::LocationList& locations)
+LocationUI::map_locations (const Locations::LocationList& locations)
 {
 	Locations::LocationList::iterator i;
 	gint n;
@@ -952,9 +971,8 @@ LocationUI::map_locations (Locations::LocationList& locations)
 	LocationSortByStart cmp;
 
 	temp.sort (cmp);
-	locations = temp;
 
-	for (n = 0, i = locations.begin(); i != locations.end(); ++n, ++i) {
+	for (n = 0, i = temp.begin(); i != temp.end(); ++n, ++i) {
 
 		Location* location = *i;
 
@@ -999,15 +1017,15 @@ LocationUI::add_new_location()
 		framepos_t where = _session->audible_frame();
 		_session->locations()->next_available_name(markername,"mark");
 		Location *location = new Location (*_session, where, where, markername, Location::IsMark);
-		if (Config->get_name_new_markers()) {
+		if (ARDOUR_UI::config()->get_name_new_markers()) {
 			newest_location = location;
 		}
-		_session->begin_reversible_command (_("add marker"));
+		PublicEditor::instance().begin_reversible_command (_("add marker"));
 		XMLNode &before = _session->locations()->get_state();
 		_session->locations()->add (location, true);
 		XMLNode &after = _session->locations()->get_state();
 		_session->add_command (new MementoCommand<Locations>(*(_session->locations()), &before, &after));
-		_session->commit_reversible_command ();
+		PublicEditor::instance().commit_reversible_command ();
 	}
 
 }
@@ -1021,12 +1039,12 @@ LocationUI::add_new_range()
 		framepos_t where = _session->audible_frame();
 		_session->locations()->next_available_name(rangename,"unnamed");
 		Location *location = new Location (*_session, where, where, rangename, Location::IsRangeMarker);
-		_session->begin_reversible_command (_("add range marker"));
+		PublicEditor::instance().begin_reversible_command (_("add range marker"));
 		XMLNode &before = _session->locations()->get_state();
 		_session->locations()->add (location, true);
 		XMLNode &after = _session->locations()->get_state();
 		_session->add_command (new MementoCommand<Locations>(*(_session->locations()), &before, &after));
-		_session->commit_reversible_command ();
+		PublicEditor::instance().commit_reversible_command ();
 	}
 }
 
@@ -1058,10 +1076,10 @@ LocationUI::set_session(ARDOUR::Session* s)
 	SessionHandlePtr::set_session (s);
 
 	if (_session) {
-		_session->locations()->changed.connect (_session_connections, invalidator (*this), boost::bind (&LocationUI::locations_changed, this, _1), gui_context());
-		_session->locations()->StateChanged.connect (_session_connections, invalidator (*this), boost::bind (&LocationUI::refresh_location_list, this), gui_context());
 		_session->locations()->added.connect (_session_connections, invalidator (*this), boost::bind (&LocationUI::location_added, this, _1), gui_context());
 		_session->locations()->removed.connect (_session_connections, invalidator (*this), boost::bind (&LocationUI::location_removed, this, _1), gui_context());
+		_session->locations()->changed.connect (_session_connections, invalidator (*this), boost::bind (&LocationUI::refresh_location_list, this), gui_context());
+
 		_clock_group->set_clock_mode (clock_mode_from_session_instant_xml ());
 	}
 
@@ -1069,17 +1087,6 @@ LocationUI::set_session(ARDOUR::Session* s)
 	punch_edit_row.set_session (s);
 
 	refresh_location_list ();
-}
-
-void
-LocationUI::locations_changed (Locations::Change c)
-{
-	/* removal is signalled by both a removed and a changed signal emission from Locations,
-	   so we don't need to refresh the list on a removal
-	*/
-	if (c != Locations::REMOVAL) {
-		refresh_location_list ();
-	}
 }
 
 void
@@ -1153,8 +1160,7 @@ LocationUIWindow::on_map ()
 bool
 LocationUIWindow::on_delete_event (GdkEventAny*)
 {
-	hide ();
-	return true;
+	return false;
 }
 
 void
@@ -1162,6 +1168,7 @@ LocationUIWindow::set_session (Session *s)
 {
 	ArdourWindow::set_session (s);
 	_ui.set_session (s);
+	_ui.show_all ();
 }
 
 void

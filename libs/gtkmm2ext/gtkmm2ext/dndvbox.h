@@ -18,12 +18,14 @@
 */
 
 #include <gtkmm/box.h>
+
+#include "gtkmm2ext/visibility.h"
 #include "gtkmm2ext/widget_state.h"
 
 namespace Gtkmm2ext {
 
 /** Parent class for children of a DnDVBox */	
-class DnDVBoxChild
+class /*LIBGTKMM2EXT_API*/ DnDVBoxChild
 {
 public:
 	virtual ~DnDVBoxChild () {}
@@ -39,11 +41,14 @@ public:
 
 	/** Set the child's visual state */
 	virtual void set_visual_state (VisualState, bool onoff) = 0;
+
+	/** @return True if the child can be selected in the list ( if you don't want it to copy/paste/drag then turn this off ) */
+	virtual bool is_selectable () const = 0;
 };
 
 /** A VBox whose contents can be dragged and dropped */
 template <class T>
-class DnDVBox : public Gtk::EventBox
+class /*LIBGTKMM2EXT_API*/ DnDVBox : public Gtk::EventBox
 {
 public:
 	DnDVBox () : _active (0), _drag_icon (0), _expecting_unwanted_button_event (false), _placeholder (0)
@@ -296,7 +301,7 @@ private:
 		/* make up an icon for the drag */
 		_drag_icon = new Gtk::Window (Gtk::WINDOW_POPUP);
 		
-		Gtk::Allocation a = child->widget().get_allocation ();
+		Gtk::Allocation a = child->action_widget().get_allocation ();
 		_drag_icon->set_size_request (a.get_width(), a.get_height());
 		
 		_drag_icon->signal_expose_event().connect (sigc::mem_fun (*this, &DnDVBox::icon_expose));
@@ -326,7 +331,7 @@ private:
 
 		cairo_t* cr = gdk_cairo_create (_drag_icon->get_window()->gobj ());
 
-		Glib::RefPtr<Gdk::Pixmap> p = _drag_child->widget().get_snapshot();
+		Glib::RefPtr<Gdk::Pixmap> p = _drag_child->action_widget().get_snapshot();
 		gdk_cairo_set_source_pixmap (cr, p->gobj(), 0, 0);
 		cairo_rectangle (cr, 0, 0, w, h);
 		cairo_fill (cr);
@@ -351,7 +356,7 @@ private:
 
 			/* dropped from ourselves onto ourselves */
 
-			T* child = *((T **) selection_data.get_data());
+			T* child = *((T * const *) selection_data.get_data());
 
 			if (drop.first == 0) {
 				_internal_vbox.reorder_child (child->widget(), -1);
@@ -563,6 +568,8 @@ private:
 	
 	void add_to_selection (T* child)
 	{
+		if ( !child->is_selectable() )
+			return;
 		_selection.push_back (child);
 		setup_child_state (child);
 	}

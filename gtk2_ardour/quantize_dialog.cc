@@ -57,7 +57,7 @@ QuantizeDialog::QuantizeDialog (PublicEditor& e)
 	, swing_adjustment (100.0, -130.0, 130.0, 1.0, 10.0)
 	, swing_spinner (swing_adjustment)
 	, swing_button (_("Swing"))
-	, threshold_adjustment (0.0, -1920.0, 1920.0, 1.0, 10.0) // XXX MAGIC TICK NUMBER FIX ME
+	, threshold_adjustment (0.0, -Timecode::BBT_Time::ticks_per_beat, Timecode::BBT_Time::ticks_per_beat, 1.0, 10.0)
 	, threshold_spinner (threshold_adjustment)
 	, threshold_label (_("Threshold (ticks)"))
 	, snap_start_button (_("Snap note start"))
@@ -131,11 +131,11 @@ QuantizeDialog::grid_size_to_musical_time (const string& txt) const
 	if (txt == "main grid") {
 		bool success;
 
-		Evoral::MusicalTime b = editor.get_grid_type_as_beats (success, 0);
+		Evoral::Beats b = editor.get_grid_type_as_beats (success, 0);
 		if (!success) {
 			return 1.0;
 		}
-		return (double) b;
+		return b.to_double();
 	}
 
 	if (txt == _("Beats/128")) {

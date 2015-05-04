@@ -19,12 +19,12 @@
 #ifndef EVORAL_EVENT_HPP
 #define EVORAL_EVENT_HPP
 
-#include <assert.h>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <stdint.h>
 
+#include "evoral/visibility.h"
 #include "evoral/types.hpp"
 
 /** If this is not defined, all methods of MidiEvent are RT safe
@@ -35,19 +35,21 @@
 
 namespace Evoral {
 
-event_id_t event_id_counter();
-event_id_t next_event_id();
-void init_event_id_counter(event_id_t n);
+LIBEVORAL_API event_id_t event_id_counter();
+LIBEVORAL_API event_id_t next_event_id();
+LIBEVORAL_API void init_event_id_counter(event_id_t n);
 
 /** An event (much like a type generic jack_midi_event_t)
  *
  * Template parameter Time is the type of the time stamp used for this event.
  */
 template<typename Time>
-class Event {
+class LIBEVORAL_API Event {
 public:
 #ifdef EVORAL_EVENT_ALLOC
-	Event (EventType type=0, Time time=0, uint32_t size=0, uint8_t* buf=NULL, bool alloc=false);
+	Event (EventType type=0, Time time=Time(), uint32_t size=0, uint8_t* buf=NULL, bool alloc=false);
+
+	Event (EventType type, Time time, uint32_t size, const uint8_t* buf);
 
 	/** Copy \a copy.
 	 *
@@ -113,11 +115,11 @@ public:
 	}
 
 	inline void clear() {
-		_type = 0;
-		_original_time = 0;
-		_nominal_time = 0;
-		_size = 0;
-		_buf  = NULL;
+		_type          = 0;
+		_original_time = Time();
+		_nominal_time  = Time();
+		_size          = 0;
+		_buf           = NULL;
 	}
 
 #else
@@ -153,11 +155,8 @@ protected:
 #endif
 };
 
-} // namespace Evoral
-
-
 template<typename Time>
-std::ostream& operator<<(std::ostream& o, const Evoral::Event<Time>& ev) {
+/*LIBEVORAL_API*/ std::ostream& operator<<(std::ostream& o, const Evoral::Event<Time>& ev) {
 	o << "Event #" << ev.id() << " type = " << ev.event_type() << " @ " << ev.time();
 	o << std::hex;
 	for (uint32_t n = 0; n < ev.size(); ++n) {
@@ -167,6 +166,7 @@ std::ostream& operator<<(std::ostream& o, const Evoral::Event<Time>& ev) {
 	return o;
 }
 
+} // namespace Evoral
 
 #endif // EVORAL_EVENT_HPP
 

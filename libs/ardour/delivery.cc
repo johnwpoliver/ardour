@@ -52,13 +52,15 @@ Delivery::Delivery (Session& s, boost::shared_ptr<IO> io, boost::shared_ptr<Pann
 	: IOProcessor(s, boost::shared_ptr<IO>(), (role_requires_output_ports (r) ? io : boost::shared_ptr<IO>()), name)
 	, _role (r)
 	, _output_buffers (new BufferSet())
-	, _current_gain (1.0)
+	, _current_gain (GAIN_COEFF_UNITY)
 	, _no_outs_cuz_we_no_monitor (false)
 	, _mute_master (mm)
 	, _no_panner_reset (false)
 {
 	if (pannable) {
-		_panshell = boost::shared_ptr<PannerShell>(new PannerShell (_name, _session, pannable));
+		bool is_send = false;
+		if (r & (Delivery::Send|Delivery::Aux)) is_send = true;
+		_panshell = boost::shared_ptr<PannerShell>(new PannerShell (_name, _session, pannable, is_send));
 	}
 
 	_display_to_user = false;
@@ -74,13 +76,15 @@ Delivery::Delivery (Session& s, boost::shared_ptr<Pannable> pannable, boost::sha
 	: IOProcessor(s, false, (role_requires_output_ports (r) ? true : false), name, "", DataType::AUDIO, (r == Send))
 	, _role (r)
 	, _output_buffers (new BufferSet())
-	, _current_gain (1.0)
+	, _current_gain (GAIN_COEFF_UNITY)
 	, _no_outs_cuz_we_no_monitor (false)
 	, _mute_master (mm)
 	, _no_panner_reset (false)
 {
 	if (pannable) {
-		_panshell = boost::shared_ptr<PannerShell>(new PannerShell (_name, _session, pannable));
+		bool is_send = false;
+		if (r & (Delivery::Send|Delivery::Aux)) is_send = true;
+		_panshell = boost::shared_ptr<PannerShell>(new PannerShell (_name, _session, pannable, is_send));
 	}
 
 	_display_to_user = false;
@@ -124,7 +128,7 @@ Delivery::display_name () const
 }
 
 bool
-Delivery::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
+Delivery::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 {
 	if (_role == Main) {
 
@@ -144,7 +148,7 @@ Delivery::can_support_io_configuration (const ChanCount& in, ChanCount& out) con
 			}
 		} else {
 			fatal << "programming error: this should never be reached" << endmsg;
-			/*NOTREACHED*/
+			abort(); /*NOTREACHED*/
 		}
 
 
@@ -165,7 +169,7 @@ Delivery::can_support_io_configuration (const ChanCount& in, ChanCount& out) con
 			}
 		} else {
 			fatal << "programming error: this should never be reached" << endmsg;
-			/*NOTREACHED*/
+			abort(); /*NOTREACHED*/
 		}
 
 	} else {
@@ -206,7 +210,7 @@ Delivery::configure_io (ChanCount in, ChanCount out)
 			if (_input->n_ports() != in) {
 				if (_input->n_ports() != ChanCount::ZERO) {
 					fatal << _name << " programming error: configure_io called with " << in << " and " << out << " with " << _input->n_ports() << " input ports" << endmsg;
-					/*NOTREACHED*/
+					abort(); /*NOTREACHED*/
 				} else {
 					/* I/O not yet configured */
 				}
@@ -245,7 +249,8 @@ Delivery::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pf
 	   processing pathway that wants to use this->output_buffers() for some reason.
 	*/
 
-	output_buffers().get_jack_port_addresses (ports, nframes);
+	// TODO delayline -- latency-compensation
+	output_buffers().get_backend_port_addresses (ports, nframes);
 
 	// this Delivery processor is not a derived type, and thus we assume
 	// we really can modify the buffers passed in (it is almost certainly
@@ -257,10 +262,9 @@ Delivery::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pf
 	if (tgain != _current_gain) {
 		/* target gain has changed */
 
-		Amp::apply_gain (bufs, nframes, _current_gain, tgain);
-		_current_gain = tgain;
+		_current_gain = Amp::apply_gain (bufs, _session.nominal_frame_rate(), nframes, _current_gain, tgain);
 
-	} else if (tgain == 0.0) {
+	} else if (tgain < GAIN_COEFF_SMALL) {
 
 		/* we were quiet last time, and we're still supposed to be quiet.
 		   Silence the outputs, and make sure the buffers are quiet too,
@@ -269,11 +273,11 @@ Delivery::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pf
 		_output->silence (nframes);
 		if (result_required) {
 			bufs.set_count (output_buffers().count ());
-			Amp::apply_simple_gain (bufs, nframes, 0.0);
+			Amp::apply_simple_gain (bufs, nframes, GAIN_COEFF_ZERO);
 		}
 		goto out;
 
-	} else if (tgain != 1.0) {
+	} else if (tgain != GAIN_COEFF_UNITY) {
 
 		/* target gain has not changed, but is not unity */
 		Amp::apply_simple_gain (bufs, nframes, tgain);
@@ -329,6 +333,9 @@ Delivery::state (bool full_state)
 
 	if (_panshell) {
 		node.add_child_nocopy (_panshell->get_state ());
+		if (_panshell->pannable()) {
+			node.add_child_nocopy (_panshell->pannable()->get_state ());
+		}
 	}
 
 	return node;
@@ -358,6 +365,11 @@ Delivery::set_state (const XMLNode& node, int version)
 
 	reset_panner ();
 
+	XMLNode* pannnode = node.child (X_("Pannable"));
+	if (_panshell && _panshell->panner() && pannnode) {
+		_panshell->pannable()->set_state (*pannnode, version);
+	}
+
 	return 0;
 }
 
@@ -385,12 +397,8 @@ Delivery::reset_panner ()
 	if (panners_legal) {
 		if (!_no_panner_reset) {
 
-			if (_panshell) {
+			if (_panshell && _role != Insert && _role != Listen) {
 				_panshell->configure_io (ChanCount (DataType::AUDIO, pans_required()), ChanCount (DataType::AUDIO, pan_outs()));
-				
-				if (_role == Main) {
-					_panshell->pannable()->set_panner (_panshell->panner());
-				}
 			}
 		}
 
@@ -403,12 +411,8 @@ Delivery::reset_panner ()
 void
 Delivery::panners_became_legal ()
 {
-	if (_panshell) {
+	if (_panshell && _role != Insert) {
 		_panshell->configure_io (ChanCount (DataType::AUDIO, pans_required()), ChanCount (DataType::AUDIO, pan_outs()));
-		
-		if (_role == Main) {
-			_panshell->pannable()->set_panner (_panshell->panner());
-		}
 	}
 
 	panner_legal_c.disconnect ();
@@ -494,7 +498,7 @@ Delivery::target_gain ()
 	/* if we've been requested to deactivate, our target gain is zero */
 
 	if (!_pending_active) {
-		return 0.0;
+		return GAIN_COEFF_ZERO;
 	}
 
 	/* if we've been told not to output because its a monitoring situation and
@@ -502,7 +506,7 @@ Delivery::target_gain ()
 	*/
 
 	if (_no_outs_cuz_we_no_monitor) {
-		return 0.0;
+		return GAIN_COEFF_ZERO;
 	}
 
         MuteMaster::MutePoint mp = MuteMaster::Main; // stupid gcc uninit warning
@@ -534,7 +538,7 @@ Delivery::target_gain ()
                    it gets its signal from the master out.
                 */
 
-                desired_gain = 0.0;
+                desired_gain = GAIN_COEFF_ZERO;
 
         }
 
@@ -552,7 +556,7 @@ Delivery::set_name (const std::string& name)
 {
 	bool ret = IOProcessor::set_name (name);
 
-	if (ret) {
+	if (ret && _panshell) {
 		ret = _panshell->set_name (name);
 	}
 

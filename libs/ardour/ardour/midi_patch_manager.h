@@ -35,7 +35,7 @@ namespace MIDI
 namespace Name
 {
 
-class MidiPatchManager : public PBD::ScopedConnectionList, public ARDOUR::SessionHandlePtr
+class LIBARDOUR_API MidiPatchManager : public PBD::ScopedConnectionList, public ARDOUR::SessionHandlePtr
 {
 	/// Singleton
 private:
@@ -46,7 +46,8 @@ private:
 	static MidiPatchManager* _manager;
 
 public:
-	typedef std::map<std::string, boost::shared_ptr<MIDINameDocument> > MidiNameDocuments;
+	typedef std::map<std::string, boost::shared_ptr<MIDINameDocument> >    MidiNameDocuments;
+	typedef std::map<std::string, MIDINameDocument::MasterDeviceNamesList> DeviceNamesByMaker;
 
 	virtual ~MidiPatchManager() { _manager = 0; }
 
@@ -72,7 +73,7 @@ public:
 		boost::shared_ptr<MIDI::Name::MasterDeviceNames> master_device = master_device_by_model(model);
 
 		if (master_device != 0 && custom_device_mode != "") {
-			return master_device->channel_name_set_by_device_mode_and_channel(custom_device_mode, channel);
+			return master_device->channel_name_set_by_channel(custom_device_mode, channel);
 		} else {
 			return boost::shared_ptr<ChannelNameSet>();
 		}
@@ -125,13 +126,16 @@ public:
 
 	std::list<std::string> custom_device_mode_names_by_model(std::string model_name) {
 		if (model_name != "") {
-			return master_device_by_model(model_name)->custom_device_mode_names();
-		} else {
-			return std::list<std::string>();
+			if (master_device_by_model(model_name)) {
+				return master_device_by_model(model_name)->custom_device_mode_names();
+			}
 		}
+		return std::list<std::string>();
 	}
 
 	const MasterDeviceNames::Models& all_models() const { return _all_models; }
+
+	const DeviceNamesByMaker& devices_by_manufacturer() const { return _devices_by_manufacturer; }
 
 private:
 	void session_going_away();
@@ -140,6 +144,7 @@ private:
 
 	MidiNameDocuments                       _documents;
 	MIDINameDocument::MasterDeviceNamesList _master_devices_by_model;
+	DeviceNamesByMaker                      _devices_by_manufacturer;
 	MasterDeviceNames::Models               _all_models;
 };
 

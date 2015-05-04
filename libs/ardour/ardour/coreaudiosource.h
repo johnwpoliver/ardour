@@ -28,7 +28,7 @@ using namespace std;
 
 namespace ARDOUR {
 
-class CoreAudioSource : public AudioFileSource {
+class LIBARDOUR_API CoreAudioSource : public AudioFileSource {
   public:
 	CoreAudioSource (ARDOUR::Session&, const XMLNode&);
 	CoreAudioSource (ARDOUR::Session&, const string& path, int chn, Flag);
@@ -43,9 +43,12 @@ class CoreAudioSource : public AudioFileSource {
 	void set_header_timeline_position () {};
 	bool clamped_at_unity () const { return false; }
 
+	void flush () {}
+
 	static int get_soundfile_info (string path, SoundFileInfo& _info, string& error_msg);
 
   protected:
+	void close ();
 	framecnt_t read_unlocked (Sample *dst, framepos_t start, framecnt_t cnt) const;
 	framecnt_t write_unlocked (Sample *, framecnt_t) { return 0; }
 

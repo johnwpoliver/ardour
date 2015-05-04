@@ -46,7 +46,7 @@
  *  options dialog.
  */
 
-namespace ARDOUR {
+namespace PBD {
 	class Configuration;
 }
 
@@ -169,16 +169,41 @@ public:
 		_button->set_sensitive (yn);
 	}
 
-        Gtk::Widget& tip_widget() { return *_button; }
+	Gtk::Widget& tip_widget() { return *_button; }
 
-private:
+protected:
 
-	void toggled ();
+	virtual void toggled ();
 
 	sigc::slot<bool>       _get; ///< slot to get the configuration variable's value
 	sigc::slot<bool, bool> _set;  ///< slot to set the configuration variable's value
 	Gtk::CheckButton*      _button; ///< UI button
 	Gtk::Label*            _label; ///< label for button, so we can use markup
+};
+
+class RouteDisplayBoolOption : public BoolOption
+{
+public:
+	RouteDisplayBoolOption (std::string const &, std::string const &, sigc::slot<bool>, sigc::slot<bool, bool>);
+protected:
+	virtual void toggled ();
+};
+
+/** Component which allows to add any GTK Widget - intended for single buttons and custom stateless objects */
+class FooOption : public OptionEditorComponent
+{
+public:
+	FooOption (Gtk::Widget *w) : _w (w) {}
+
+	void add_to_page (OptionEditorPage* p) {
+		add_widget_to_page (p, _w);
+	}
+
+	Gtk::Widget& tip_widget() { return *_w; }
+	void set_state_from_config () {}
+	void parameter_changed (std::string const &) {}
+private:
+	Gtk::Widget *_w;
 };
 
 /** Component which provides the UI to handle a string option using a GTK Entry */
@@ -189,17 +214,22 @@ public:
 	EntryOption (std::string const &, std::string const &, sigc::slot<std::string>, sigc::slot<bool, std::string>);
 	void set_state_from_config ();
 	void add_to_page (OptionEditorPage*);
+	void set_sensitive (bool);
+	void set_invalid_chars (std::string i) { _invalid = i; }
 
-        Gtk::Widget& tip_widget() { return *_entry; }
+	Gtk::Widget& tip_widget() { return *_entry; }
 
 private:
 
 	void activated ();
+	bool focus_out (GdkEventFocus*);
+	void filter_text (const Glib::ustring&, int*);
 
 	sigc::slot<std::string> _get; ///< slot to get the configuration variable's value
 	sigc::slot<bool, std::string> _set;  ///< slot to set the configuration variable's value
 	Gtk::Label* _label; ///< UI label
 	Gtk::Entry* _entry; ///< UI entry
+	std::string _invalid;
 };
 
 
@@ -227,9 +257,9 @@ public:
 		  _get (g),
 		  _set (s)
 	{
-		_label = manage (new Gtk::Label (n + ":"));
+		_label = Gtk::manage (new Gtk::Label (n + ":"));
 		_label->set_alignment (0, 0.5);
-		_combo = manage (new Gtk::ComboBoxText);
+		_combo = Gtk::manage (new Gtk::ComboBoxText);
 		_combo->signal_changed().connect (sigc::mem_fun (*this, &ComboOption::changed));
 	}
 
@@ -305,12 +335,37 @@ public:
 		)
 		: Option (i, n)
 	{
-		_label = manage (new Gtk::Label (n + ":"));
+		_label = Gtk::manage (new Gtk::Label (n + ":"));
 		_label->set_alignment (0, 0.5);
-		_hscale = manage (new Gtk::HScale(adj));
+		_hscale = Gtk::manage (new Gtk::HScale(adj));
+		_adj = NULL;
 	}
 
-	void set_state_from_config () { }
+	HSliderOption (
+		std::string const & i,
+		std::string const & n,
+		Gtk::Adjustment *adj,
+		sigc::slot<float> g,
+		sigc::slot<bool, float> s
+		)
+		: Option (i, n)
+		, _get (g)
+		, _set (s)
+		, _adj (adj)
+	{
+		_label = Gtk::manage (new Gtk::Label (n + ":"));
+		_label->set_alignment (0, 0.5);
+		_hscale = Gtk::manage (new Gtk::HScale(*_adj));
+		_adj->signal_value_changed().connect (sigc::mem_fun (*this, &HSliderOption::changed));
+	}
+
+	void set_state_from_config () {
+		if (_adj) _adj->set_value (_get());
+	}
+
+	void changed () {
+		if (_adj) _set (_adj->get_value ());
+	}
 
 	void add_to_page (OptionEditorPage* p)
 	{
@@ -322,10 +377,14 @@ public:
 	}
 
 	Gtk::Widget& tip_widget() { return *_hscale; }
+	Gtk::HScale& scale() { return *_hscale; }
 
 private:
+	sigc::slot<float> _get;
+	sigc::slot<bool, float> _set;
 	Gtk::Label* _label;
 	Gtk::HScale* _hscale;
+	Gtk::Adjustment* _adj;
 };
 
 /** Component which provides the UI to handle an enumerated option using a GTK ComboBox.
@@ -351,9 +410,9 @@ public:
 		  _get (g),
 		  _set (s)
 	{
-		_label = manage (new Gtk::Label (n + ":"));
+		_label = Gtk::manage (new Gtk::Label (n + ":"));
 		_label->set_alignment (0, 0.5);
-		_combo = manage (new Gtk::ComboBoxText);
+		_combo = Gtk::manage (new Gtk::ComboBoxText);
 		_combo->signal_changed().connect (sigc::mem_fun (*this, &ComboStringOption::changed));
 	}
 
@@ -447,6 +506,7 @@ public:
 	 *  @param page Page step for the spin button.
 	 *  @param unit Unit name.
 	 *  @param scale Scaling factor (such that for a value x in the spinbutton, x * scale is written to the config)
+	 *  @param digits Number of decimal digits to show.
 	 */
 	SpinOption (
 		std::string const & i,
@@ -458,25 +518,27 @@ public:
 		T step,
 		T page,
 		std::string const & unit = "",
-		float scale = 1
+		float scale = 1,
+		unsigned digits = 0
 		)
 		: Option (i, n),
 		  _get (g),
 		  _set (s),
 		  _scale (scale)
 	{
-		_label = manage (new Gtk::Label (n + ":"));
+		_label = Gtk::manage (new Gtk::Label (n + ":"));
 		_label->set_alignment (0, 0.5);
 
-		_spin = manage (new Gtk::SpinButton);
+		_spin = Gtk::manage (new Gtk::SpinButton);
 		_spin->set_range (min, max);
 		_spin->set_increments (step, page);
+		_spin->set_digits(digits);
 
-		_box = manage (new Gtk::HBox);
+		_box = Gtk::manage (new Gtk::HBox);
 		_box->pack_start (*_spin, true, true);
 		_box->set_spacing (4);
 		if (unit.length()) {
-			_box->pack_start (*manage (new Gtk::Label (unit)), false, false);
+			_box->pack_start (*Gtk::manage (new Gtk::Label (unit)), false, false);
 		}
 
 		_spin->signal_value_changed().connect (sigc::mem_fun (*this, &SpinOption::changed));
@@ -562,7 +624,7 @@ public:
         Gtk::Widget& tip_widget() { return _file_chooser; }
 
 private:
-	void file_set ();
+	void selection_changed ();
 	void current_folder_set ();
 	
 	sigc::slot<std::string> _get; ///< slot to get the configuration variable's value
@@ -588,18 +650,19 @@ public:
 class OptionEditor : public ArdourWindow
 {
 public:
-	OptionEditor (ARDOUR::Configuration *, std::string const &);
+	OptionEditor (PBD::Configuration *, std::string const &);
 	~OptionEditor ();
 
 	void add_option (std::string const &, OptionEditorComponent *);
-
+	void add_page (std::string const &, Gtk::Widget& page_widget);
+	
 	void set_current_page (std::string const &);
 
 protected:
 
 	virtual void parameter_changed (std::string const &);
-
-	ARDOUR::Configuration* _config;
+	
+	PBD::Configuration* _config;
 
 private:
 

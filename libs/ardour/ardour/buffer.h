@@ -23,6 +23,7 @@
 
 #include <boost/utility.hpp>
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/data_type.h"
 
@@ -38,7 +39,7 @@ namespace ARDOUR {
  *
  * To actually read/write buffer contents, use the appropriate derived class.
  */
-class Buffer : public boost::noncopyable
+class LIBARDOUR_API Buffer : public boost::noncopyable
 {
 public:
 	virtual ~Buffer() {}
@@ -46,22 +47,14 @@ public:
 	/** Factory function */
 	static Buffer* create(DataType type, size_t capacity);
 
-	/** Maximum capacity of buffer.
-	 * Note in some cases the entire buffer may not contain valid data, use size. */
+	/** Maximum capacity of buffer. */
 	size_t capacity() const { return _capacity; }
-
-	/** Amount of valid data in buffer.  Use this over capacity almost always. */
-	size_t size() const { return _size; }
-
-	/** Return true if the buffer contains no data, false otherwise */
-	virtual bool empty() const { return _size == 0; }
 
 	/** Type of this buffer.
 	 * Based on this you can static cast a Buffer* to the desired type. */
 	DataType type() const { return _type; }
 
 	bool silent() const { return _silent; }
-	void set_is_silent(bool yn) { _silent = yn; }
 
 	/** Reallocate the buffer used internally to handle at least @a size_t units of data.
 	 *
@@ -80,13 +73,12 @@ public:
 	virtual void merge_from (const Buffer& src, framecnt_t len, framecnt_t dst_offset = 0, framecnt_t src_offset = 0) = 0;
 
   protected:
-	Buffer(DataType type, size_t capacity)
-		: _type(type), _capacity(capacity), _size(0), _silent(true)
+	Buffer(DataType type)
+		: _type(type), _capacity(0), _silent (true)
 	{}
 
 	DataType  _type;
 	pframes_t _capacity;
-	pframes_t _size;
 	bool      _silent;
 };
 

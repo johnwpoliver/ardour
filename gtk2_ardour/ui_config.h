@@ -24,60 +24,26 @@
 #include <ostream>
 #include <iostream>
 
+#include <boost/function.hpp>
+#include <boost/bind.hpp>
+
 #include "pbd/stateful.h"
 #include "pbd/xml++.h"
-#include "ardour/configuration_variable.h"
+#include "pbd/configuration_variable.h"
 
-template<class T>
-class UIConfigVariable : public ARDOUR::ConfigVariableBase
-{
-  public:
-	UIConfigVariable (std::string str) : ARDOUR::ConfigVariableBase (str) {}
-	UIConfigVariable (std::string str, T val) : ARDOUR::ConfigVariableBase (str), value (val) {}
+#include "canvas/colors.h"
 
-	bool set (T val) {
-		if (val == value) {
-			return false;
-		}
-		value = val;
-		return true;
-	}
-
-	T get() const {
-		return value;
-	}
-
-	std::string get_as_string () const {
-		std::stringstream ss;
-		ss << std::hex;
-		ss.fill('0');
-		ss.width(8);
-		ss << value;
-		return ss.str ();
-	}
-
-	void set_from_string (std::string const & s) {
-		std::stringstream ss;
-		ss << std::hex;
-		ss << s;
-		ss >> value;
-	}
-
-  protected:
-	T get_for_save() { return value; }
-	T value;
-};
+#include "utils.h"
 
 class UIConfiguration : public PBD::Stateful
 {
-  public:
+    public:
 	UIConfiguration();
 	~UIConfiguration();
 
-	std::map<std::string,UIConfigVariable<uint32_t> *> canvas_colors;
+	static UIConfiguration* instance() { return _instance; }
 
-	bool dirty () const;
-	void set_dirty ();
+	void load_rc_file (bool themechange, bool allow_own = true);
 
 	int load_state ();
 	int save_state ();
@@ -87,24 +53,74 @@ class UIConfiguration : public PBD::Stateful
 	XMLNode& get_state (void);
 	XMLNode& get_variables (std::string);
 	void set_variables (const XMLNode&);
-	void pack_canvasvars ();
 
-	uint32_t color_by_name (const std::string&);
+	typedef std::map<std::string,ArdourCanvas::Color> Colors;
+	typedef std::map<std::string,std::string> ColorAliases;
+	typedef std::map<std::string,ArdourCanvas::SVAModifier> Modifiers;
 
-	sigc::signal<void,const char*> ParameterChanged;
+	Colors         colors;
+	ColorAliases   color_aliases;
+	Modifiers      modifiers;
 
-#undef  UI_CONFIG_VARIABLE
-#undef  CANVAS_VARIABLE
-#define UI_CONFIG_VARIABLE(Type,var,name,val) UIConfigVariable<Type> var;
-#define CANVAS_VARIABLE(var,name) UIConfigVariable<uint32_t> var;
+	void set_alias (std::string const & name, std::string const & alias);
+	void set_color (const std::string& name, ArdourCanvas::Color);
+	void set_modifier (std::string const &, ArdourCanvas::SVAModifier svam);
+	
+	std::string color_as_alias (ArdourCanvas::Color c);
+	ArdourCanvas::Color quantized (ArdourCanvas::Color) const;
+
+	ArdourCanvas::Color color (const std::string&, bool* failed = 0) const;
+	ArdourCanvas::Color color_mod (std::string const & color, std::string const & modifier) const;
+	ArdourCanvas::Color color_mod (const ArdourCanvas::Color& color, std::string const & modifier) const;
+	ArdourCanvas::HSV  color_hsv (const std::string&) const;
+	ArdourCanvas::SVAModifier modifier (const std::string&) const;
+		
+        sigc::signal<void,std::string> ParameterChanged;
+	void map_parameters (boost::function<void (std::string)>&);
+
+	void parameter_changed (std::string);
+	
+#undef UI_CONFIG_VARIABLE
+#define UI_CONFIG_VARIABLE(Type,var,name,value) \
+	Type get_##var () const { return var.get(); } \
+	bool set_##var (Type val) { bool ret = var.set (val); if (ret) { ParameterChanged (name); } return ret;  }
 #include "ui_config_vars.h"
-#include "canvas_vars.h"
 #undef  UI_CONFIG_VARIABLE
-#undef  CANVAS_VARIABLE
+#define CANVAS_FONT_VARIABLE(var,name) \
+	Pango::FontDescription get_##var () const { return ARDOUR_UI_UTILS::sanitized_font (var.get()); } \
+	bool set_##var (const std::string& val) { bool ret = var.set (val); if (ret) { ParameterChanged (name); } return ret;  }
+#include "canvas_vars.h"
+#undef CANVAS_FONT_VARIABLE
 
   private:
+	/* declare variables */
+
+#undef  UI_CONFIG_VARIABLE
+#define UI_CONFIG_VARIABLE(Type,var,name,value) PBD::ConfigVariable<Type> var;
+#include "ui_config_vars.h"
+#undef UI_CONFIG_VARIABLE
+
+#define CANVAS_FONT_VARIABLE(var,name) PBD::ConfigVariable<std::string> var;
+#include "canvas_vars.h"
+#undef CANVAS_FONT_VARIABLE
+
 	XMLNode& state ();
 	bool _dirty;
+	bool aliases_modified;
+	bool colors_modified;
+	bool modifiers_modified;
+	
+	static UIConfiguration* _instance;
+
+	int store_color_theme ();
+	void load_color_aliases (XMLNode const &);
+	void load_colors (XMLNode const &);
+	void load_modifiers (XMLNode const &);
+	void reset_gtk_theme ();
+	void colors_changed ();
+	int load_color_theme (bool allow_own=true);
+
+	uint32_t block_save;
 };
 
 #endif /* __ardour_ui_configuration_h__ */

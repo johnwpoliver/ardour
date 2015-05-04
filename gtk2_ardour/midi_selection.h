@@ -20,24 +20,33 @@
 #ifndef __ardour_gtk_midi_selection_h__
 #define __ardour_gtk_midi_selection_h__
 
-#include <list>
-#include "pbd/signals.h"
+#include "region_selection.h"
 
 class MidiRegionView;
 class MidiCutBuffer;
 class RegionView;
 
-class MidiRegionSelection : public std::list<MidiRegionView*>
+class MidiRegionSelection : public RegionSelection
 {
 public:
 	MidiRegionSelection ();
-	MidiRegionSelection (MidiRegionSelection const &);
+	MidiRegionSelection (const MidiRegionSelection&);
 
-private:
-	void remove_it (RegionView *);	
-	PBD::ScopedConnection _death_connection;
+	MidiRegionSelection& operator= (const MidiRegionSelection&);
 };
 
-struct MidiNoteSelection   : std::list<MidiCutBuffer*> {};
+struct MidiNoteSelection : std::list<MidiCutBuffer*> {
+public:
+	const_iterator
+	get_nth(size_t nth) const {
+		size_t count = 0;
+		for (const_iterator m = begin(); m != end(); ++m) {
+			if (count++ == nth) {
+				return m;
+			}
+		}
+		return end();
+	}
+};
 
 #endif /* __ardour_gtk_midi_selection_h__ */

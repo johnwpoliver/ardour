@@ -70,12 +70,24 @@ class AudioClock : public CairoWidget, public ARDOUR::SessionHandlePtr
 	void set_bbt_reference (framepos_t);
         void set_is_duration (bool);
 
+	void copy_text_to_clipboard () const;
+
 	std::string name() const { return _name; }
 
 	framepos_t current_time (framepos_t position = 0) const;
 	framepos_t current_duration (framepos_t position = 0) const;
 	void set_session (ARDOUR::Session *s);
         void set_negative_allowed (bool yn); 
+
+	/** Alter cairo scaling during rendering. 
+	 *
+	 * Used by clocks that resize themselves
+	 * to fit any given space. Can lead
+	 * to font distortion.
+	 */
+	void set_scale (double x, double y);
+	
+	static void print_minsec (framepos_t, char* buf, size_t bufsize, float frame_rate);
 
 	sigc::signal<void> ValueChanged;
 	sigc::signal<void> mode_changed;
@@ -85,11 +97,23 @@ class AudioClock : public CairoWidget, public ARDOUR::SessionHandlePtr
 	static std::vector<AudioClock*> clocks;
 
   protected:
-	void render (cairo_t*);
+	void render (cairo_t*, cairo_rectangle_t*);
+	bool get_is_duration () const { return is_duration; } ;
 
 	virtual void build_ops_menu ();
 	Gtk::Menu  *ops_menu;
 
+	bool on_button_press_event (GdkEventButton *ev);
+	bool on_button_release_event(GdkEventButton *ev);
+	bool is_lower_layout_click(int y) const {
+		return y > upper_height + separator_height;
+	}
+	bool is_right_layout_click(int x) const {
+		return x > x_leading_padding + get_left_rect_width() + separator_height;
+	}
+	double get_left_rect_width() const {
+	       return round (((get_width() - separator_height) * mode_based_info_ratio) + 0.5);
+	}
   private:
 	Mode             _mode;
 	std::string      _name;
@@ -175,8 +199,6 @@ class AudioClock : public CairoWidget, public ARDOUR::SessionHandlePtr
 	bool on_key_press_event (GdkEventKey *);
 	bool on_key_release_event (GdkEventKey *);
 	bool on_scroll_event (GdkEventScroll *ev);
-	bool on_button_press_event (GdkEventButton *ev);
-	bool on_button_release_event(GdkEventButton *ev);
 	void on_style_changed (const Glib::RefPtr<Gtk::Style>&);
 	void on_size_request (Gtk::Requisition* req);
 	bool on_motion_notify_event (GdkEventMotion *ev);
@@ -219,7 +241,7 @@ class AudioClock : public CairoWidget, public ARDOUR::SessionHandlePtr
 	ARDOUR::framecnt_t parse_as_bbt_distance (const std::string&);
 	ARDOUR::framecnt_t parse_as_frames_distance (const std::string&);
 	
-	void set_font ();
+	void set_font (Pango::FontDescription);
 	void set_colors ();
 	void show_edit_status (int length);
 	int  merge_input_and_edit_string ();
@@ -230,6 +252,9 @@ class AudioClock : public CairoWidget, public ARDOUR::SessionHandlePtr
 
 	double bg_r, bg_g, bg_b, bg_a;
 	double cursor_r, cursor_g, cursor_b, cursor_a;
+
+	double xscale;
+	double yscale;
 };
 
 #endif /* __audio_clock_h__ */

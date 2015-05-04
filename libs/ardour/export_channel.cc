@@ -117,7 +117,7 @@ RegionExportChannelFactory::RegionExportChannelFactory (Session * session, Audio
 	: region (region)
 	, track (track)
 	, type (type)
-	, frames_per_cycle (session->engine().frames_per_cycle ())
+	, frames_per_cycle (session->engine().samples_per_cycle ())
 	, buffers_up_to_date (false)
 	, region_start (region.position())
 	, position (region_start)
@@ -131,7 +131,7 @@ RegionExportChannelFactory::RegionExportChannelFactory (Session * session, Audio
 
 		mixdown_buffer.reset (new Sample [frames_per_cycle]);
 		gain_buffer.reset (new Sample [frames_per_cycle]);
-		memset (gain_buffer.get(), 1.0, sizeof (Sample) * frames_per_cycle);
+		std::fill_n (gain_buffer.get(), frames_per_cycle, Sample (1.0));
 
 		break;
 	  case Processed:
@@ -187,11 +187,12 @@ RegionExportChannelFactory::update_buffers (framecnt_t frames)
 		assert (mixdown_buffer && gain_buffer);
 		for (size_t channel = 0; channel < n_channels; ++channel) {
 			memset (mixdown_buffer.get(), 0, sizeof (Sample) * frames);
+			buffers.get_audio (channel).silence(frames);
 			region.read_at (buffers.get_audio (channel).data(), mixdown_buffer.get(), gain_buffer.get(), position, frames, channel);
 		}
 		break;
 	case Processed:
-		track.export_stuff (buffers, position, frames, track.main_outs(), true, true);
+		track.export_stuff (buffers, position, frames, track.main_outs(), true, true, false);
 		break;
 	default:
 		throw ExportFailed ("Unhandled type in ExportChannelFactory::update_buffers");
@@ -239,7 +240,11 @@ RouteExportChannel::read (Sample const *& data, framecnt_t frames) const
 {
 	assert(processor);
 	AudioBuffer const & buffer = processor->get_capture_buffers().get_audio (channel);
-	assert (frames <= (framecnt_t) buffer.size());
+#ifndef NDEBUG
+	(void) frames;
+#else
+	assert (frames <= (framecnt_t) buffer.capacity());
+#endif
 	data = buffer.data();
 }
 

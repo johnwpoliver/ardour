@@ -24,7 +24,6 @@
 
 #include "ardour/location.h"
 #include "enums.h"
-#include "simplerect.h"
 #include "streamview.h"
 #include "time_axis_view_item.h"
 #include "route_time_axis.h"
@@ -61,11 +60,15 @@ class AutomationStreamView : public StreamView
 
 	void clear ();
 
-	void get_selectables (ARDOUR::framepos_t, ARDOUR::framepos_t, double, double, std::list<Selectable*> &);
+	void get_selectables (ARDOUR::framepos_t, ARDOUR::framepos_t, double, double, std::list<Selectable*> &, bool within = false);
 	void set_selected_points (PointSelection &);
 
 	std::list<boost::shared_ptr<AutomationLine> > get_lines () const;
-	boost::shared_ptr<AutomationLine> paste_line (ARDOUR::framepos_t);
+
+	bool paste (framepos_t                                pos,
+	            unsigned                                  paste_count,
+	            float                                     times,
+	            boost::shared_ptr<ARDOUR::AutomationList> list);
 
   private:
 	void setup_rec_box ();

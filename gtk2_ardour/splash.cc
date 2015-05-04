@@ -48,7 +48,7 @@ Splash::Splash ()
 	
 	std::string splash_file;
 
-	if (!find_file_in_search_path (ardour_data_search_path(), "splash.png", splash_file)) {
+	if (!find_file (ardour_data_search_path(), "splash.png", splash_file)) {
                 cerr << "Cannot find splash screen image file\n";
 		throw failed_constructor();
 	}
@@ -100,7 +100,7 @@ Splash::~Splash ()
 void
 Splash::pop_back_for (Gtk::Window& win)
 {
-#ifdef __APPLE__
+#if defined  __APPLE__ || defined PLATFORM_WINDOWS
         /* April 2013: window layering on OS X is a bit different to X Window. at present,
            the "restack()" functionality in GDK will only operate on windows in the same
            "level" (e.g. two normal top level windows, or two utility windows) and will not
@@ -108,7 +108,12 @@ Splash::pop_back_for (Gtk::Window& win)
            is not going to work.
 
            So for OS X, we just hide ourselves.
+
+					 Oct 2014: The Windows situation is similar, although it should be possible
+					 to play tricks with gdk's set_type_hint() or directly hack things using
+					 SetWindowLong() and UpdateLayeredWindow()
         */
+        (void) win;
         hide();
 #else
 	set_keep_above (false);
@@ -120,12 +125,10 @@ void
 Splash::pop_front ()
 {
 
-#ifdef __APPLE__
+#if defined  __APPLE__ || defined PLATFORM_WINDOWS
         if (get_window()) {
                 show ();
         }
-#else
-	set_keep_above (true);
 #endif
 }
 
@@ -223,6 +226,8 @@ Splash::message (const string& msg)
 	str += Glib::Markup::escape_text (msg);
 	str += "</b>";
 
+        show ();
+
 	layout->set_markup (str);
 	Glib::RefPtr<Gdk::Window> win = darea.get_window();
 	
@@ -234,11 +239,6 @@ Splash::message (const string& msg)
 		} else {
 			darea.queue_draw ();
 		}
-
-                while (!expose_done) {
-                        gtk_main_iteration ();
-                }
-		gdk_display_flush (gdk_display_get_default());
 	}
 }
 

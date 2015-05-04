@@ -23,9 +23,12 @@
    This is to cut down on the compile times.  It also helps with my sanity.
 */
 
-#include "ardour/session.h"
 #include "ardour/audioengine.h"
 #include "ardour/automation_watch.h"
+#include "ardour/control_protocol_manager.h"
+#include "ardour/profile.h"
+#include "ardour/session.h"
+#include "control_protocol/control_protocol.h"
 
 #include "actions.h"
 #include "add_route_dialog.h"
@@ -39,6 +42,7 @@
 #include "keyeditor.h"
 #include "location_ui.h"
 #include "main_clock.h"
+#include "meter_patterns.h"
 #include "midi_tracer.h"
 #include "mixer_ui.h"
 #include "public_editor.h"
@@ -51,6 +55,9 @@
 #include "sfdb_ui.h"
 #include "theme_manager.h"
 #include "time_info_box.h"
+#include "timers.h"
+
+#include <gtkmm2ext/keyboard.h>
 
 #include "i18n.h"
 
@@ -65,16 +72,8 @@ ARDOUR_UI::set_session (Session *s)
 {
 	SessionHandlePtr::set_session (s);
 
-	if (audio_port_matrix) {
-		audio_port_matrix->set_session (s);
-	}
-
-	if (midi_port_matrix) {
-		midi_port_matrix->set_session (s);
-	}
-
-
 	if (!_session) {
+		WM::Manager::instance().set_session (s);
 		/* Session option editor cannot exist across change-of-session */
 		session_option_editor.drop_window ();
 		/* Ditto for AddVideoDialog */
@@ -94,8 +93,9 @@ ARDOUR_UI::set_session (Session *s)
 		}
 	}
 
-	AutomationWatch::instance().set_session (s);
 	WM::Manager::instance().set_session (s);
+
+	AutomationWatch::instance().set_session (s);
 
 	if (shuttle_box) {
 		shuttle_box->set_session (s);
@@ -146,12 +146,9 @@ ARDOUR_UI::set_session (Session *s)
 
 	setup_session_options ();
 
-	Blink.connect (sigc::mem_fun(*this, &ARDOUR_UI::transport_rec_enable_blink));
-	Blink.connect (sigc::mem_fun(*this, &ARDOUR_UI::solo_blink));
-	Blink.connect (sigc::mem_fun(*this, &ARDOUR_UI::sync_blink));
-	Blink.connect (sigc::mem_fun(*this, &ARDOUR_UI::audition_blink));
-	Blink.connect (sigc::mem_fun(*this, &ARDOUR_UI::feedback_blink));
+	blink_connection = Timers::blink_connect (sigc::mem_fun(*this, &ARDOUR_UI::blink_handler));
 
+	_session->SaveSessionRequested.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::save_session_at_its_request, this, _1), gui_context());
 	_session->RecordStateChanged.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::record_state_changed, this), gui_context());
 	_session->StepEditStatusChange.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::step_edit_status_change, this, _1), gui_context());
 	_session->TransportStateChange.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::map_transport_state, this), gui_context());
@@ -163,10 +160,6 @@ ARDOUR_UI::set_session (Session *s)
 	_session->locations()->added.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::handle_locations_change, this, _1), gui_context());
 	_session->locations()->removed.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::handle_locations_change, this, _1), gui_context());
 	_session->config.ParameterChanged.connect (_session_connections, MISSING_INVALIDATOR, boost::bind (&ARDOUR_UI::session_parameter_changed, this, _1), gui_context ());
-
-#ifdef HAVE_JACK_SESSION
-	engine->JackSessionEvent.connect (*_session, MISSING_INVALIDATOR, boost::bind (&Session::jack_session_event, _session, _1), gui_context());
-#endif
 
 	/* Clocks are on by default after we are connected to a session, so show that here.
 	*/
@@ -183,15 +176,66 @@ ARDOUR_UI::set_session (Session *s)
 	Glib::signal_idle().connect (sigc::mem_fun (*this, &ARDOUR_UI::first_idle));
 
 	start_clocking ();
-	start_blinking ();
 
 	map_transport_state ();
 
-	second_connection = Glib::signal_timeout().connect (sigc::mem_fun(*this, &ARDOUR_UI::every_second), 1000);
-	point_one_second_connection = Glib::signal_timeout().connect (sigc::mem_fun(*this, &ARDOUR_UI::every_point_one_seconds), 100);
-	point_zero_one_second_connection = Glib::signal_timeout().connect (sigc::mem_fun(*this, &ARDOUR_UI::every_point_zero_one_seconds), 40);
+	second_connection = Timers::second_connect (sigc::mem_fun(*this, &ARDOUR_UI::every_second));
+	point_one_second_connection = Timers::rapid_connect (sigc::mem_fun(*this, &ARDOUR_UI::every_point_one_seconds));
+	point_zero_something_second_connection = Timers::super_rapid_connect (sigc::mem_fun(*this, &ARDOUR_UI::every_point_zero_something_seconds));
+	set_fps_timeout_connection();
 
 	update_format ();
+
+	if (meter_box.get_parent()) {
+		transport_tearoff_hbox.remove (meter_box);
+		transport_tearoff_hbox.remove (editor_meter_peak_display);
+	}
+
+	if (editor_meter) {
+		meter_box.remove(*editor_meter);
+		delete editor_meter;
+		editor_meter = 0;
+		editor_meter_peak_display.hide();
+	}
+
+	if (meter_box.get_parent()) {
+		transport_tearoff_hbox.remove (meter_box);
+		transport_tearoff_hbox.remove (editor_meter_peak_display);
+	}
+
+	if (_session && 
+	    _session->master_out() && 
+	    _session->master_out()->n_outputs().n(DataType::AUDIO) > 0) {
+
+		if (!ARDOUR::Profile->get_trx()) {
+			editor_meter = new LevelMeterHBox(_session);
+			editor_meter->set_meter (_session->master_out()->shared_peak_meter().get());
+			editor_meter->clear_meters();
+			editor_meter->set_type (_session->master_out()->meter_type());
+			editor_meter->setup_meters (30, 12, 6);
+			editor_meter->show();
+			meter_box.pack_start(*editor_meter);
+		}
+
+		ArdourMeter::ResetAllPeakDisplays.connect (sigc::mem_fun(*this, &ARDOUR_UI::reset_peak_display));
+		ArdourMeter::ResetRoutePeakDisplays.connect (sigc::mem_fun(*this, &ARDOUR_UI::reset_route_peak_display));
+		ArdourMeter::ResetGroupPeakDisplays.connect (sigc::mem_fun(*this, &ARDOUR_UI::reset_group_peak_display));
+
+		editor_meter_peak_display.set_name ("meterbridge peakindicator");
+		editor_meter_peak_display.unset_flags (Gtk::CAN_FOCUS);
+		editor_meter_peak_display.set_size_request (std::max(9.f, rintf(8.f * ui_scale)), -1);
+		editor_meter_peak_display.set_corner_radius (3.0);
+
+		editor_meter_max_peak = -INFINITY;
+		editor_meter_peak_display.signal_button_release_event().connect (sigc::mem_fun(*this, &ARDOUR_UI::editor_meter_peak_button_release), false);
+
+		if (ARDOUR_UI::config()->get_show_editor_meter() && !ARDOUR::Profile->get_trx()) {
+			transport_tearoff_hbox.pack_start (meter_box, false, false);
+			transport_tearoff_hbox.pack_start (editor_meter_peak_display, false, false);
+			meter_box.show();
+			editor_meter_peak_display.show();
+		}
+	}
 }
 
 int
@@ -217,29 +261,52 @@ ARDOUR_UI::unload_session (bool hide_stuff)
 		}
 	}
 
+	{
+		// tear down session specific CPI (owned by rc_config_editor which can remain)
+		ControlProtocolManager& m = ControlProtocolManager::instance ();
+		for (std::list<ControlProtocolInfo*>::iterator i = m.control_protocol_info.begin(); i != m.control_protocol_info.end(); ++i) {
+			if (*i && (*i)->protocol && (*i)->protocol->has_editor ()) {
+				(*i)->protocol->tear_down_gui ();
+			}
+		}
+	}
+
 	if (hide_stuff) {
 		editor->hide ();
 		mixer->hide ();
-		theme_manager->hide ();
+		meterbridge->hide ();
+		audio_port_matrix->hide();
+		midi_port_matrix->hide();
+		route_params->hide();
 	}
 
 	second_connection.disconnect ();
 	point_one_second_connection.disconnect ();
-	point_oh_five_second_connection.disconnect ();
-	point_zero_one_second_connection.disconnect();
+	point_zero_something_second_connection.disconnect();
+	fps_connection.disconnect();
+
+	if (editor_meter) {
+		meter_box.remove(*editor_meter);
+		delete editor_meter;
+		editor_meter = 0;
+		editor_meter_peak_display.hide();
+	}
 
 	ActionManager::set_sensitive (ActionManager::session_sensitive_actions, false);
 
 	rec_button.set_sensitive (false);
 
-	ARDOUR_UI::instance()->video_timeline->close_session();
+	WM::Manager::instance().set_session ((ARDOUR::Session*) 0);
 
-	stop_blinking ();
+	if (ARDOUR_UI::instance()->video_timeline) {
+		ARDOUR_UI::instance()->video_timeline->close_session();
+	}
+
 	stop_clocking ();
 
 	/* drop everything attached to the blink signal */
 
-	Blink.clear ();
+	blink_connection.disconnect ();
 
 	delete _session;
 	_session = 0;
@@ -269,7 +336,9 @@ ARDOUR_UI::goto_editor_window ()
 	editor->show_window ();
 	editor->present ();
 	/* mixer should now be on top */
-	WM::Manager::instance().set_transient_for (editor);
+	if (ARDOUR_UI::config()->get_transients_follow_front()) {
+		WM::Manager::instance().set_transient_for (editor);
+	}
 	_mixer_on_top = false;
 }
 
@@ -289,7 +358,7 @@ ARDOUR_UI::goto_mixer_window ()
 		screen = Gdk::Screen::get_default();
 	}
 	
-	if (screen && screen->get_height() < 700) {
+	if (g_getenv ("ARDOUR_LOVES_STUPID_TINY_SCREENS") == 0 && screen && screen->get_height() < 700) {
 		Gtk::MessageDialog msg (_("This screen is not tall enough to display the mixer window"));
 		msg.run ();
 		return;
@@ -298,7 +367,9 @@ ARDOUR_UI::goto_mixer_window ()
 	mixer->show_window ();
 	mixer->present ();
 	/* mixer should now be on top */
-	WM::Manager::instance().set_transient_for (mixer);
+	if (ARDOUR_UI::config()->get_transients_follow_front()) {
+		WM::Manager::instance().set_transient_for (mixer);
+	}
 	_mixer_on_top = true;
 }
 
@@ -316,6 +387,23 @@ ARDOUR_UI::toggle_mixer_window ()
 		goto_mixer_window ();
 	} else {
 		mixer->hide ();
+	}
+}
+
+void
+ARDOUR_UI::toggle_meterbridge ()
+{
+	Glib::RefPtr<Action> act = ActionManager::get_action (X_("Common"), X_("toggle-meterbridge"));
+	if (!act) {
+		return;
+	}
+
+	Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic (act);
+
+	if (tact->get_active()) {
+		meterbridge->show_window ();
+	} else {
+		meterbridge->hide_window (NULL);
 	}
 }
 
@@ -481,4 +569,34 @@ ARDOUR_UI::main_window_state_event_handler (GdkEventWindowState* ev, bool window
 	}
 
 	return false;
+}
+
+bool
+ARDOUR_UI::editor_meter_peak_button_release (GdkEventButton* ev)
+{
+	if (ev->button == 1 && Gtkmm2ext::Keyboard::modifier_state_equals (ev->state, Gtkmm2ext::Keyboard::PrimaryModifier|Gtkmm2ext::Keyboard::TertiaryModifier)) {
+		ArdourMeter::ResetAllPeakDisplays ();
+	} else if (ev->button == 1 && Gtkmm2ext::Keyboard::modifier_state_equals (ev->state, Gtkmm2ext::Keyboard::PrimaryModifier)) {
+		if (_session->master_out()) {
+			ArdourMeter::ResetGroupPeakDisplays (_session->master_out()->route_group());
+		}
+	} else if (_session->master_out()) {
+		ArdourMeter::ResetRoutePeakDisplays (_session->master_out().get());
+	}
+	return false;
+}
+
+void
+ARDOUR_UI::toggle_mixer_space()
+{
+	Glib::RefPtr<Action> act = ActionManager::get_action ("Common", "ToggleMaximalMixer");
+
+	if (act) {
+		Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic(act);
+		if (tact->get_active()) {
+			mixer->maximise_mixer_space ();
+		} else {
+			mixer->restore_mixer_space ();
+		}
+	}
 }

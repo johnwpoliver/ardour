@@ -20,17 +20,25 @@
 
 #include "ardour/export_handler.h"
 
+#include <glib/gstdio.h>
 #include <glibmm.h>
 #include <glibmm/convert.h>
 
 #include "pbd/convert.h"
 
+#include "ardour/audiofile_tagger.h"
+#include "ardour/debug.h"
 #include "ardour/export_graph_builder.h"
 #include "ardour/export_timespan.h"
 #include "ardour/export_channel_configuration.h"
 #include "ardour/export_status.h"
 #include "ardour/export_format_specification.h"
 #include "ardour/export_filename.h"
+#include "ardour/soundcloud_upload.h"
+#include "ardour/system_exec.h"
+#include "pbd/openuri.h"
+#include "pbd/basename.h"
+#include "ardour/session_metadata.h"
 
 #include "i18n.h"
 
@@ -275,27 +283,101 @@ ExportHandler::process_normalize ()
 }
 
 void
+ExportHandler::command_output(std::string output, size_t size)
+{
+	std::cerr << "command: " << size << ", " << output << std::endl;
+	info << output << endmsg;
+}
+
+void
 ExportHandler::finish_timespan ()
 {
 	while (config_map.begin() != timespan_bounds.second) {
 
 		ExportFormatSpecPtr fmt = config_map.begin()->second.format;
+		std::string filename = config_map.begin()->second.filename->get_path(fmt);
 
 		if (fmt->with_cue()) {
-			export_cd_marker_file (current_timespan, fmt, config_map.begin()->second.filename->get_path(fmt), CDMarkerCUE);
-		} 
-
-		if (fmt->with_toc()) {
-			export_cd_marker_file (current_timespan, fmt, config_map.begin()->second.filename->get_path(fmt), CDMarkerTOC);
+			export_cd_marker_file (current_timespan, fmt, filename, CDMarkerCUE);
 		}
 
+		if (fmt->with_toc()) {
+			export_cd_marker_file (current_timespan, fmt, filename, CDMarkerTOC);
+		}
+
+		if (fmt->with_mp4chaps()) {
+			export_cd_marker_file (current_timespan, fmt, filename, MP4Chaps);
+		}
+
+		if (fmt->tag()) {
+			AudiofileTagger::tag_file(filename, *SessionMetadata::Metadata());
+		}
+
+		if (!fmt->command().empty()) {
+
+#if 0			// would be nicer with C++11 initialiser...
+			std::map<char, std::string> subs {
+				{ 'f', filename },
+				{ 'd', Glib::path_get_dirname(filename)  + G_DIR_SEPARATOR },
+				{ 'b', PBD::basename_nosuffix(filename) },
+				...
+			};
+#endif
+
+			PBD::ScopedConnection command_connection;
+			std::map<char, std::string> subs;
+			subs.insert (std::pair<char, std::string> ('f', filename));
+			subs.insert (std::pair<char, std::string> ('d', Glib::path_get_dirname (filename) + G_DIR_SEPARATOR));
+			subs.insert (std::pair<char, std::string> ('b', PBD::basename_nosuffix (filename)));
+			subs.insert (std::pair<char, std::string> ('s', session.path ()));
+			subs.insert (std::pair<char, std::string> ('n', session.name ()));
+
+			ARDOUR::SystemExec *se = new ARDOUR::SystemExec(fmt->command(), subs);
+			se->ReadStdout.connect_same_thread(command_connection, boost::bind(&ExportHandler::command_output, this, _1, _2));
+			if (se->start (2) == 0) {
+				// successfully started
+				while (se->is_running ()) {
+					// wait for system exec to terminate
+					Glib::usleep (1000);
+				}
+			} else {
+				error << "post-export hook failed! " << fmt->command() << endmsg;
+			}
+			delete (se);
+		}
+
+		if (fmt->soundcloud_upload()) {
+			SoundcloudUploader *soundcloud_uploader = new SoundcloudUploader;
+			std::string token = soundcloud_uploader->Get_Auth_Token(soundcloud_username, soundcloud_password);
+			DEBUG_TRACE (DEBUG::Soundcloud, string_compose(
+						"uploading %1 - username=%2, password=%3, token=%4",
+						filename, soundcloud_username, soundcloud_password, token) );
+			std::string path = soundcloud_uploader->Upload (
+					filename,
+					PBD::basename_nosuffix(filename), // title
+					token,
+					soundcloud_make_public,
+					soundcloud_downloadable,
+					this);
+
+			if (path.length() != 0) {
+				info << string_compose ( _("File %1 uploaded to %2"), filename, path) << endmsg;
+				if (soundcloud_open_page) {
+					DEBUG_TRACE (DEBUG::Soundcloud, string_compose ("opening %1", path) );
+					open_uri(path.c_str());  // open the soundcloud website to the new file
+				}
+			} else {
+				error << _("upload to Soundcloud failed. Perhaps your email or password are incorrect?\n") << endmsg;
+			}
+			delete soundcloud_uploader;
+		}
 		config_map.erase (config_map.begin());
 	}
 
 	start_timespan ();
 }
 
-/*** CD Marker sutff ***/
+/*** CD Marker stuff ***/
 
 struct LocationSortByStart {
     bool operator() (Location *a, Location *b) {
@@ -324,6 +406,11 @@ ExportHandler::export_cd_marker_file (ExportTimespanPtr timespan, ExportFormatSp
 			header_func = &ExportHandler::write_cue_header;
 			track_func = &ExportHandler::write_track_info_cue;
 			index_func = &ExportHandler::write_index_info_cue;
+			break;
+		case MP4Chaps:
+			header_func = &ExportHandler::write_mp4ch_header;
+			track_func = &ExportHandler::write_track_info_mp4ch;
+			index_func = &ExportHandler::write_index_info_mp4ch;
 			break;
 		default:
 			return;
@@ -361,8 +448,8 @@ ExportHandler::export_cd_marker_file (ExportTimespanPtr timespan, ExportFormatSp
 
 		/* Start actual marker stuff */
 
-		framepos_t last_end_time = timespan->get_start(), last_start_time = timespan->get_start();
-		status.track_position = last_start_time - timespan->get_start();
+		framepos_t last_end_time = timespan->get_start();
+		status.track_position = 0;
 
 		for (i = temp.begin(); i != temp.end(); ++i) {
 
@@ -393,20 +480,17 @@ ExportHandler::export_cd_marker_file (ExportTimespanPtr timespan, ExportFormatSp
 				if (nexti != temp.end()) {
 					status.track_duration = (*nexti)->start() - last_end_time;
 
-					last_start_time = (*i)->start();
 					last_end_time = (*nexti)->start();
 				} else {
 					// this was the last marker, use timespan end
 					status.track_duration = timespan->get_end() - last_end_time;
 
-					last_start_time = (*i)->start();
 					last_end_time = timespan->get_end();
 				}
 			} else {
 				// range
 				status.track_duration = (*i)->end() - last_end_time;
 
-				last_start_time = (*i)->start();
 				last_end_time = (*i)->end();
 			}
 
@@ -415,27 +499,32 @@ ExportHandler::export_cd_marker_file (ExportTimespanPtr timespan, ExportFormatSp
 
 	} catch (std::exception& e) {
 		error << string_compose (_("an error occured while writing a TOC/CUE file: %1"), e.what()) << endmsg;
-		::unlink (filepath.c_str());
+		::g_unlink (filepath.c_str());
 	} catch (Glib::Exception& e) {
 		error << string_compose (_("an error occured while writing a TOC/CUE file: %1"), e.what()) << endmsg;
-		::unlink (filepath.c_str());
+		::g_unlink (filepath.c_str());
 	}
 }
 
 string
 ExportHandler::get_cd_marker_filename(std::string filename, CDMarkerFormat format)
 {
-	/* do not strip file suffix because there may be more than one format, 
+	/* do not strip file suffix because there may be more than one format,
 	   and we do not want the CD marker file from one format to overwrite
 	   another (e.g. foo.wav.cue > foo.aiff.cue)
 	*/
 
 	switch (format) {
-	  case CDMarkerTOC:
+	case CDMarkerTOC:
 		return filename + ".toc";
-	  case CDMarkerCUE:
+	case CDMarkerCUE:
 		return filename + ".cue";
-	  default:
+	case MP4Chaps:
+	{
+		unsigned lastdot = filename.find_last_of('.');
+		return filename.substr(0,lastdot) + ".chapters.txt";
+	}
+	default:
 		return filename + ".marker"; // Should not be reached when actually creating a file
 	}
 }
@@ -445,10 +534,25 @@ ExportHandler::write_cue_header (CDMarkerStatus & status)
 {
 	string title = status.timespan->name().compare ("Session") ? status.timespan->name() : (string) session.name();
 
+	// Album metadata
+	string barcode      = SessionMetadata::Metadata()->barcode();
+	string album_artist = SessionMetadata::Metadata()->album_artist();
+	string album_title  = SessionMetadata::Metadata()->album();
+
 	status.out << "REM Cue file generated by " << PROGRAM_NAME << endl;
+
+	if (barcode != "")
+		status.out << "CATALOG " << barcode << endl;
+
+	if (album_artist != "")
+		status.out << "PERFORMER " << cue_escape_cdtext (album_artist) << endl;
+
+	if (album_title != "")
+		title = album_title;
+
 	status.out << "TITLE " << cue_escape_cdtext (title) << endl;
 
-	/*  The original cue sheet sepc metions five file types
+	/*  The original cue sheet spec mentions five file types
 		WAVE, AIFF,
 		BINARY   = "header-less" audio (44.1 kHz, 16 Bit, little endian),
 		MOTOROLA = "header-less" audio (44.1 kHz, 16 Bit, big endian),
@@ -481,10 +585,28 @@ ExportHandler::write_toc_header (CDMarkerStatus & status)
 {
 	string title = status.timespan->name().compare ("Session") ? status.timespan->name() : (string) session.name();
 
+	// Album metadata
+	string barcode      = SessionMetadata::Metadata()->barcode();
+	string album_artist = SessionMetadata::Metadata()->album_artist();
+	string album_title  = SessionMetadata::Metadata()->album();
+
+	if (barcode != "")
+		status.out << "CATALOG " << barcode << endl;
+
+	if (album_title != "")
+		title = album_title;
+
 	status.out << "CD_DA" << endl;
 	status.out << "CD_TEXT {" << endl << "  LANGUAGE_MAP {" << endl << "    0 : EN" << endl << "  }" << endl;
 	status.out << "  LANGUAGE 0 {" << endl << "    TITLE " << toc_escape_cdtext (title) << endl ;
-	status.out << "    PERFORMER \"\"" << endl << "  }" << endl << "}" << endl;
+	status.out << "    PERFORMER \"" << toc_escape_cdtext (album_artist) << "\"" << endl;
+	status.out << "  }" << endl << "}" << endl;
+}
+
+void
+ExportHandler::write_mp4ch_header (CDMarkerStatus & status)
+{
+	status.out << "00:00:00.000 Intro" << endl;
 }
 
 void
@@ -591,6 +713,14 @@ ExportHandler::write_track_info_toc (CDMarkerStatus & status)
 	status.out << "START" << buf << endl;
 }
 
+void ExportHandler::write_track_info_mp4ch (CDMarkerStatus & status)
+{
+	gchar buf[18];
+
+	frames_to_chapter_marks_string(buf, status.track_start_frame);
+	status.out << buf << " " << status.marker->name() << endl;
+}
+
 void
 ExportHandler::write_index_info_cue (CDMarkerStatus & status)
 {
@@ -614,6 +744,11 @@ ExportHandler::write_index_info_toc (CDMarkerStatus & status)
 }
 
 void
+ExportHandler::write_index_info_mp4ch (CDMarkerStatus & status)
+{
+}
+
+void
 ExportHandler::frames_to_cd_frames_string (char* buf, framepos_t when)
 {
 	framecnt_t remainder;
@@ -626,6 +761,23 @@ ExportHandler::frames_to_cd_frames_string (char* buf, framepos_t when)
 	remainder -= secs * fr;
 	frames = remainder / (fr / 75);
 	sprintf (buf, " %02d:%02d:%02d", mins, secs, frames);
+}
+
+void
+ExportHandler::frames_to_chapter_marks_string (char* buf, framepos_t when)
+{
+	framecnt_t remainder;
+	framecnt_t fr = session.nominal_frame_rate();
+	int hours, mins, secs, msecs;
+
+	hours = when / (3600 * fr);
+	remainder = when - (hours * 3600 * fr);
+	mins = remainder / (60 * fr);
+	remainder -= mins * 60 * fr;
+	secs = remainder / fr;
+	remainder -= secs * fr;
+	msecs = (remainder * 1000) / fr;
+	sprintf (buf, "%02d:%02d:%02d.%03d", hours, mins, secs, msecs);
 }
 
 std::string

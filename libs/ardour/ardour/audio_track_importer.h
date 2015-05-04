@@ -34,19 +34,16 @@ namespace ARDOUR {
 class AudioPlaylistImportHandler;
 class AudioPlaylistImporter;
 
-class AudioTrackImportHandler : public ElementImportHandler
+class LIBARDOUR_API AudioTrackImportHandler : public ElementImportHandler
 {
   public:
 	AudioTrackImportHandler (XMLTree const & source, Session & session, AudioPlaylistImportHandler & pl_handler);
 	virtual ~AudioTrackImportHandler () {}
 	virtual std::string get_info () const;
-
-  private:
-	AudioPlaylistImportHandler & pl_handler;
 };
 
 
-class AudioTrackImporter : public ElementImporter
+class LIBARDOUR_API AudioTrackImporter : public ElementImporter
 {
   public:
 	AudioTrackImporter (XMLTree const & source,

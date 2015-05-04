@@ -22,16 +22,28 @@
 #include <map>
 
 #include "timecode/time.h"
+#include "timecode/bbt_time.h"
+
 #include "pbd/error.h"
+
 #include "midi++/mmc.h"
 #include "midi++/port.h"
-#include "midi++/jack_midi_port.h"
 #include "midi++/parser.h"
-#include "midi++/manager.h"
+
+#ifndef __INT_MAX__   // 'ssize_t' won't be defined yet
+typedef long ssize_t;
+#endif
 
 using namespace std;
 using namespace MIDI;
 using namespace PBD;
+
+/**
+ * As libtimecode is linked statically to libmidi++ this
+ * is necessary to pull in all the symbols from libtimecode
+ * so they are exported for other users of libtimecode.
+ */
+double tmp = Timecode::BBT_Time::ticks_per_beat;
 
 static std::map<int,string> mmc_cmd_map;
 static void build_mmc_cmd_map ()
@@ -195,16 +207,21 @@ static void build_mmc_cmd_map ()
 	mmc_cmd_map.insert (newpair);
 }
 
-
-MachineControl::MachineControl (Manager* m, jack_client_t* jack)
+MachineControl::MachineControl ()
 {
 	build_mmc_cmd_map ();
 
 	_receive_device_id = 0x7f;
 	_send_device_id = 0x7f;
+}
 
-	_input_port = m->add_port (new JackMIDIPort ("MMC in", Port::IsInput, jack));
-	_output_port = m->add_port (new JackMIDIPort ("MMC out", Port::IsOutput, jack));
+void
+MachineControl::set_ports (MIDI::Port* ip, MIDI::Port* op)
+{
+	port_connections.drop_connections ();
+
+	_input_port = ip;
+	_output_port = op;
 
 	_input_port->parser()->mmc.connect_same_thread (port_connections, boost::bind (&MachineControl::process_mmc_message, this, _1, _2, _3));
 	_input_port->parser()->start.connect_same_thread (port_connections, boost::bind (&MachineControl::spp_start, this));
@@ -213,19 +230,19 @@ MachineControl::MachineControl (Manager* m, jack_client_t* jack)
 }
 
 void
-MachineControl::set_receive_device_id (byte id)
+MachineControl::set_receive_device_id (MIDI::byte id)
 {
 	_receive_device_id = id & 0x7f;
 }
 
 void
-MachineControl::set_send_device_id (byte id)
+MachineControl::set_send_device_id (MIDI::byte id)
 {
 	_send_device_id = id & 0x7f;
 }
 
 bool
-MachineControl::is_mmc (byte *sysex_buf, size_t len)
+MachineControl::is_mmc (MIDI::byte *sysex_buf, size_t len)
 {
 	if (len < 4 || len > 48) {
 		return false;
@@ -244,7 +261,7 @@ MachineControl::is_mmc (byte *sysex_buf, size_t len)
 }
 
 void
-MachineControl::process_mmc_message (Parser &, byte *msg, size_t len)
+MachineControl::process_mmc_message (Parser &, MIDI::byte *msg, size_t len)
 {
 	size_t skiplen;
 	byte *mmc_msg;
@@ -267,7 +284,7 @@ MachineControl::process_mmc_message (Parser &, byte *msg, size_t len)
 	cerr << endl;
 #endif
 
-	if (msg[1] != 0x7f && msg[1] != _receive_device_id) {
+	if (_receive_device_id != 0x7f && msg[1] != 0x7f && msg[1] != _receive_device_id) {
 		return;
 	}
 
@@ -451,7 +468,7 @@ MachineControl::process_mmc_message (Parser &, byte *msg, size_t len)
 }		
 
 int
-MachineControl::do_masked_write (byte *msg, size_t len)
+MachineControl::do_masked_write (MIDI::byte *msg, size_t len)
 {
 	/* return the number of bytes "consumed" */
 
@@ -477,7 +494,7 @@ MachineControl::do_masked_write (byte *msg, size_t len)
 }
 
 void
-MachineControl::write_track_status (byte *msg, size_t /*len*/, byte reg)
+MachineControl::write_track_status (MIDI::byte *msg, size_t /*len*/, MIDI::byte reg)
 {
 	size_t n;
 	ssize_t base_track;
@@ -566,7 +583,7 @@ MachineControl::write_track_status (byte *msg, size_t /*len*/, byte reg)
 }
 
 int
-MachineControl::do_locate (byte *msg, size_t /*msglen*/)
+MachineControl::do_locate (MIDI::byte *msg, size_t /*msglen*/)
 {
 	if (msg[2] == 0) {
 		warning << "MIDI::MMC: locate [I/F] command not supported"
@@ -581,7 +598,7 @@ MachineControl::do_locate (byte *msg, size_t /*msglen*/)
 }
 
 int
-MachineControl::do_step (byte *msg, size_t /*msglen*/)
+MachineControl::do_step (MIDI::byte *msg, size_t /*msglen*/)
 {
 	int steps = msg[2] & 0x3f;
 
@@ -594,7 +611,7 @@ MachineControl::do_step (byte *msg, size_t /*msglen*/)
 }
 
 int
-MachineControl::do_shuttle (byte *msg, size_t /*msglen*/)
+MachineControl::do_shuttle (MIDI::byte *msg, size_t /*msglen*/)
 {
 	size_t forward;
 	byte sh = msg[2];
@@ -634,7 +651,7 @@ MachineControl::enable_send (bool yn)
  *  @param c command.
  */
 void
-MachineControl::send (MachineControlCommand const & c)
+MachineControl::send (MachineControlCommand const & c, timestamp_t when)
 {
 	if (_output_port == 0 || !_enable_send) {
 		// cerr << "Not delivering MMC " << _mmc->port() << " - " << session_send_mmc << endl;
@@ -644,7 +661,7 @@ MachineControl::send (MachineControlCommand const & c)
 	MIDI::byte buffer[32];
 	MIDI::byte* b = c.fill_buffer (this, buffer);
 
-	if (_output_port->midimsg (buffer, b - buffer, 0)) {
+	if (_output_port->midimsg (buffer, b - buffer, when)) {
 		error << "MMC: cannot send command" << endmsg;
 	}
 }
@@ -693,7 +710,7 @@ MachineControlCommand::fill_buffer (MachineControl* mmc, MIDI::byte* b) const
 	if (_command == MachineControl::cmdLocate) {
 		*b++ = 0x6; // byte count
 		*b++ = 0x1; // "TARGET" subcommand
-		*b++ = _time.hours;
+		*b++ = _time.hours % 24;
 		*b++ = _time.minutes;
 		*b++ = _time.seconds;
 		*b++ = _time.frames;

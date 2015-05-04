@@ -25,22 +25,31 @@
 #include <ctime>
 #include <list>
 
+#include "pbd/convert.h"
 #include "pbd/stl_delete.h"
 #include "pbd/xml++.h"
 #include "pbd/enumwriter.h"
 
 #include "ardour/location.h"
+#include "ardour/midi_scene_change.h"
 #include "ardour/session.h"
 #include "ardour/audiofilesource.h"
 #include "ardour/tempo.h"
 
 #include "i18n.h"
 
-#define SUFFIX_MAX 32
-
 using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
+
+PBD::Signal0<void> Location::scene_changed;
+PBD::Signal1<void,Location*> Location::name_changed;
+PBD::Signal1<void,Location*> Location::end_changed;
+PBD::Signal1<void,Location*> Location::start_changed;
+PBD::Signal1<void,Location*> Location::flags_changed;
+PBD::Signal1<void,Location*> Location::lock_changed;
+PBD::Signal1<void,Location*> Location::position_lock_style_changed;
+PBD::Signal1<void,Location*> Location::changed;
 
 Location::Location (Session& s)
 	: SessionHandleRef (s)
@@ -87,6 +96,8 @@ Location::Location (const Location& other)
 
 	assert (_start >= 0);
 	assert (_end >= 0);
+
+	/* scene change is NOT COPIED */
 }
 
 Location::Location (Session& s, const XMLNode& node)
@@ -134,6 +145,8 @@ Location::operator= (const Location& other)
 	_bbt_end = other._bbt_end;
 	_flags = other._flags;
 	_position_lock_style = other._position_lock_style;
+	
+	/* XXX need to copy scene change */
 
 	/* copy is not locked even if original was */
 
@@ -145,6 +158,18 @@ Location::operator= (const Location& other)
 	assert (_end >= 0);
 
 	return this;
+}
+
+/** Set location name
+ */
+
+void
+Location::set_name (const std::string& str)
+{ 
+        _name = str; 
+
+        name_changed (this); /* EMIT SIGNAL */
+        NameChanged  (); /* EMIT SIGNAL */
 }
 
 /** Set start position.
@@ -178,14 +203,29 @@ Location::set_start (framepos_t s, bool force, bool allow_bbt_recompute)
 			}
 
 			start_changed (this); /* EMIT SIGNAL */
+			StartChanged (); /* EMIT SIGNAL */
 			end_changed (this); /* EMIT SIGNAL */
+			EndChanged (); /* EMIT SIGNAL */
+		}
+
+		/* moving the start (position) of a marker with a scene change
+		   requires an update in the Scene Changer.
+		*/
+
+		if (_scene_change) {
+			scene_changed (); /* EMIT SIGNAL */
 		}
 
 		assert (_start >= 0);
 		assert (_end >= 0);
 
 		return 0;
-	}
+	} else if (!force) {
+                /* range locations must exceed a minimum duration */
+                if (_end - s < Config->get_range_location_minimum()) {
+                        return -1;
+                }
+        }
 
 	if (s != _start) {
 
@@ -196,6 +236,8 @@ Location::set_start (framepos_t s, bool force, bool allow_bbt_recompute)
 			recompute_bbt_from_frames ();
 		}
 		start_changed (this); /* EMIT SIGNAL */
+		StartChanged (); /* EMIT SIGNAL */
+				
 		if (is_session_range ()) {
 			Session::StartTimeChanged (old); /* EMIT SIGNAL */
 			AudioFileSource::set_header_position_offset (s);
@@ -209,7 +251,7 @@ Location::set_start (framepos_t s, bool force, bool allow_bbt_recompute)
 
 /** Set end position.
  *  @param s New end.
- *  @param force true to force setting, even if the given new start is after the current end.
+ *  @param force true to force setting, even if the given new end is before the current start.
  *  @param allow_bbt_recompute True to recompute BBT end time from the new given end time.
  */
 int
@@ -237,13 +279,20 @@ Location::set_end (framepos_t e, bool force, bool allow_bbt_recompute)
 				recompute_bbt_from_frames ();
 			}
 			start_changed (this); /* EMIT SIGNAL */
+			StartChanged (); /* EMIT SIGNAL */
 			end_changed (this); /* EMIT SIGNAL */
+			EndChanged (); /* EMIT SIGNAL */
 		}
 
 		assert (_start >= 0);
 		assert (_end >= 0);
 
 		return 0;
+        } else if (!force) {
+                /* range locations must exceed a minimum duration */
+                if (e - _start < Config->get_range_location_minimum()) {
+                        return -1;
+                }
 	}
 
 	if (e != _end) {
@@ -254,7 +303,9 @@ Location::set_end (framepos_t e, bool force, bool allow_bbt_recompute)
 		if (allow_bbt_recompute) {
 			recompute_bbt_from_frames ();
 		}
+
 		end_changed(this); /* EMIT SIGNAL */
+		EndChanged(); /* EMIT SIGNAL */
 
 		if (is_session_range()) {
 			Session::EndTimeChanged (old); /* EMIT SIGNAL */
@@ -267,22 +318,97 @@ Location::set_end (framepos_t e, bool force, bool allow_bbt_recompute)
 }
 
 int
-Location::set (framepos_t start, framepos_t end, bool allow_bbt_recompute)
+Location::set (framepos_t s, framepos_t e, bool allow_bbt_recompute)
 {
-	if (start < 0 || end < 0) {
+	if (s < 0 || e < 0) {
 		return -1;
 	}
 
 	/* check validity */
-	if (((is_auto_punch() || is_auto_loop()) && start >= end) || (!is_mark() && start > end)) {
+	if (((is_auto_punch() || is_auto_loop()) && s >= e) || (!is_mark() && s > e)) {
 		return -1;
 	}
 
-	/* now we know these values are ok, so force-set them */
-	int const s = set_start (start, true, allow_bbt_recompute);
-	int const e = set_end (end, true, allow_bbt_recompute);
+        bool start_change = false;
+        bool end_change = false;
 
-	return (s == 0 && e == 0) ? 0 : -1;
+	if (is_mark()) {
+
+		if (_start != s) {
+			_start = s;
+			_end = s;
+
+			if (allow_bbt_recompute) {
+				recompute_bbt_from_frames ();
+			}
+
+                        start_change = true;
+                        end_change = true;
+		}
+
+		assert (_start >= 0);
+		assert (_end >= 0);
+
+	} else {
+
+                /* range locations must exceed a minimum duration */
+                if (e - s < Config->get_range_location_minimum()) {
+                        return -1;
+                }
+                
+                if (s != _start) {
+
+                        framepos_t const old = _start;
+                        _start = s;
+
+                        if (allow_bbt_recompute) {
+                                recompute_bbt_from_frames ();
+                        }
+
+                        start_change = true;
+                        
+                        if (is_session_range ()) {
+                                Session::StartTimeChanged (old); /* EMIT SIGNAL */
+                                AudioFileSource::set_header_position_offset (s);
+                        }
+                }
+                        
+                 
+                if (e != _end) {
+                        
+                        framepos_t const old = _end;
+                        _end = e;
+
+                        if (allow_bbt_recompute) {
+                                recompute_bbt_from_frames ();
+                        }
+                        
+                        end_change = true;
+
+                        if (is_session_range()) {
+                                Session::EndTimeChanged (old); /* EMIT SIGNAL */
+                        }
+                }
+
+                assert (_end >= 0);
+        }
+
+        if (start_change) {
+                start_changed(this); /* EMIT SIGNAL */
+                StartChanged(); /* EMIT SIGNAL */
+        }
+
+        if (end_change) {
+                end_changed(this); /* EMIT SIGNAL */
+                EndChanged(); /* EMIT SIGNAL */
+        }
+
+        if (start_change && end_change) {
+                changed (this);
+                Changed ();
+        }
+
+        return 0;
 }
 
 int
@@ -302,6 +428,7 @@ Location::move_to (framepos_t pos)
 		recompute_bbt_from_frames ();
 
 		changed (this); /* EMIT SIGNAL */
+		Changed (); /* EMIT SIGNAL */
 	}
 
 	assert (_start >= 0);
@@ -311,58 +438,85 @@ Location::move_to (framepos_t pos)
 }
 
 void
-Location::set_hidden (bool yn, void *src)
+Location::set_hidden (bool yn, void*)
 {
 	if (set_flag_internal (yn, IsHidden)) {
-		 FlagsChanged (this, src); /* EMIT SIGNAL */
+		 flags_changed (this); /* EMIT SIGNAL */
+                 FlagsChanged ();
 	}
 }
 
 void
-Location::set_cd (bool yn, void *src)
+Location::set_cd (bool yn, void*)
 {
 	// XXX this really needs to be session start
 	// but its not available here - leave to GUI
 
-	if (_start == 0) {
+	if (yn && _start == 0) {
 		error << _("You cannot put a CD marker at this position") << endmsg;
 		return;
 	}
 
 	if (set_flag_internal (yn, IsCDMarker)) {
-		 FlagsChanged (this, src); /* EMIT SIGNAL */
+		 flags_changed (this); /* EMIT SIGNAL */
+                 FlagsChanged ();
 	}
 }
 
 void
-Location::set_is_range_marker (bool yn, void *src)
+Location::set_is_range_marker (bool yn, void*)
 {
        if (set_flag_internal (yn, IsRangeMarker)) {
-                FlagsChanged (this, src); /* EMIT SIGNAL */
+               flags_changed (this);
+                FlagsChanged (); /* EMIT SIGNAL */
        }
 }
 
 void
-Location::set_auto_punch (bool yn, void *src)
+Location::set_skip (bool yn)
+{
+        if (is_range_marker() && length() > 0) {
+                if (set_flag_internal (yn, IsSkip)) {
+                        flags_changed (this);
+                        FlagsChanged ();
+                }
+        }
+}
+
+void
+Location::set_skipping (bool yn)
+{
+        if (is_range_marker() && is_skip() && length() > 0) {
+                if (set_flag_internal (yn, IsSkipping)) {
+                        flags_changed (this);
+                        FlagsChanged ();
+                }
+        }
+}
+
+void
+Location::set_auto_punch (bool yn, void*)
 {
 	if (is_mark() || _start == _end) {
 		return;
 	}
 
 	if (set_flag_internal (yn, IsAutoPunch)) {
-		 FlagsChanged (this, src); /* EMIT SIGNAL */
+		 flags_changed (this); /* EMIT SIGNAL */
+		 FlagsChanged (); /* EMIT SIGNAL */
 	}
 }
 
 void
-Location::set_auto_loop (bool yn, void *src)
+Location::set_auto_loop (bool yn, void*)
 {
 	if (is_mark() || _start == _end) {
 		return;
 	}
 
 	if (set_flag_internal (yn, IsAutoLoop)) {
-		 FlagsChanged (this, src); /* EMIT SIGNAL */
+		 flags_changed (this); /* EMIT SIGNAL */
+		 FlagsChanged (); /* EMIT SIGNAL */
 	}
 }
 
@@ -431,11 +585,15 @@ Location::get_state ()
 	node->add_property ("locked", (_locked ? "yes" : "no"));
 	node->add_property ("position-lock-style", enum_2_string (_position_lock_style));
 
+	if (_scene_change) {
+		node->add_child_nocopy (_scene_change->get_state());
+	}
+
 	return *node;
 }
 
 int
-Location::set_state (const XMLNode& node, int /*version*/)
+Location::set_state (const XMLNode& node, int version)
 {
 	const XMLProperty *prop;
 
@@ -521,9 +679,16 @@ Location::set_state (const XMLNode& node, int /*version*/)
 		_position_lock_style = PositionLockStyle (string_2_enum (prop->value(), _position_lock_style));
 	}
 
+	XMLNode* scene_child = find_named_node (node, SceneChange::xml_node_name);
+	
+	if (scene_child) {
+		_scene_change = SceneChange::factory (*scene_child, version);
+	}
+
 	recompute_bbt_from_frames ();
 
 	changed (this); /* EMIT SIGNAL */
+	Changed (); /* EMIT SIGNAL */
 
 	assert (_start >= 0);
 	assert (_end >= 0);
@@ -542,7 +707,8 @@ Location::set_position_lock_style (PositionLockStyle ps)
 
 	recompute_bbt_from_frames ();
 
-	PositionLockStyleChanged (this); /* EMIT SIGNAL */
+	position_lock_style_changed (this); /* EMIT SIGNAL */
+	PositionLockStyleChanged (); /* EMIT SIGNAL */
 }
 
 void
@@ -571,14 +737,24 @@ void
 Location::lock ()
 {
 	_locked = true;
-	LockChanged (this);
+	lock_changed (this);
+	LockChanged ();
 }
 
 void
 Location::unlock ()
 {
 	_locked = false;
-	LockChanged (this);
+	lock_changed (this);
+	LockChanged ();
+}
+
+void
+Location::set_scene_change (boost::shared_ptr<SceneChange>  sc)
+{
+	_scene_change = sc;
+
+	scene_changed (); /* EMIT SIGNAL */
 }
 
 /*---------------------------------------------------------------------- */
@@ -621,33 +797,55 @@ int
 Locations::next_available_name(string& result,string base)
 {
 	LocationList::iterator i;
-	Location* location;
-	string temp;
 	string::size_type l;
 	int suffix;
 	char buf[32];
-	bool available[SUFFIX_MAX+1];
+        std::map<uint32_t,bool> taken;
+        uint32_t n;
 
 	result = base;
-	for (int k=1; k<SUFFIX_MAX; k++) {
-		available[k] = true;
-	}
-	l = base.length();
-	for (i = locations.begin(); i != locations.end(); ++i) {
-		location =* i;
-		temp = location->name();
-		if (l && !temp.find(base,0)) {
-			suffix = atoi(temp.substr(l,3).c_str());
-			if (suffix) available[suffix] = false;
-		}
-	}
-	for (int k=1; k<=SUFFIX_MAX; k++) {
-		if (available[k]) {
-			snprintf (buf, 31, "%d", k);
-			result += buf;
-			return 1;
-		}
-	}
+        l = base.length();
+
+        if (!base.empty()) {
+                
+                /* find all existing names that match "base", and store
+                   the numeric part of them (if any) in the map "taken"
+                */
+
+                for (i = locations.begin(); i != locations.end(); ++i) {
+
+                        const string& temp ((*i)->name());
+                        
+                        if (!temp.find (base,0)) {
+
+                                if ((suffix = atoi (temp.substr(l,3))) != 0) {
+                                        taken.insert (make_pair (suffix,true));
+                                }
+                        }
+                }
+        }
+
+        /* Now search for an un-used suffix to add to "base". This
+           will find "holes" in the numbering sequence when a location
+           was deleted.
+
+           This must start at 1, both for human-numbering reasons
+           and also because the call to atoi() above would return 
+           zero if there is no recognizable numeric suffix, causing
+           "base 0" not to be inserted into the "taken" map.
+        */
+
+        n = 1; 
+
+        while (n < UINT32_MAX) {
+                if (taken.find (n) == taken.end()) {
+                        snprintf (buf, sizeof(buf), "%d", n);
+                        result += buf;
+                        return 1;
+                }
+                ++n;
+        }
+                
 	return 0;
 }
 
@@ -675,6 +873,7 @@ Locations::clear ()
 			++tmp;
 
 			if (!(*i)->is_session_range()) {
+				delete *i;
 				locations.erase (i);
 			}
 
@@ -684,7 +883,7 @@ Locations::clear ()
 		current_location = 0;
 	}
 
-	changed (OTHER); /* EMIT SIGNAL */
+	changed (); /* EMIT SIGNAL */
 	current_changed (0); /* EMIT SIGNAL */
 }
 
@@ -700,14 +899,15 @@ Locations::clear_markers ()
 			++tmp;
 
 			if ((*i)->is_mark() && !(*i)->is_session_range()) {
+				delete *i;
 				locations.erase (i);
 			}
 
 			i = tmp;
 		}
 	}
-
-	changed (OTHER); /* EMIT SIGNAL */
+        
+	changed (); /* EMIT SIGNAL */
 }
 
 void
@@ -722,7 +922,19 @@ Locations::clear_ranges ()
 			tmp = i;
 			++tmp;
 
+			/* We do not remove these ranges as part of this
+			 * operation
+			 */
+
+			if ((*i)->is_auto_punch() ||
+			    (*i)->is_auto_loop() ||
+			    (*i)->is_session_range()) {
+				i = tmp;
+				continue;
+			}
+
 			if (!(*i)->is_mark()) {
+				delete *i;
 				locations.erase (i);
 
 			}
@@ -733,7 +945,7 @@ Locations::clear_ranges ()
 		current_location = 0;
 	}
 
-	changed (OTHER); /* EMIT SIGNAL */
+        changed ();
 	current_changed (0); /* EMIT SIGNAL */
 }
 
@@ -779,6 +991,7 @@ Locations::remove (Location *loc)
 
 		for (i = locations.begin(); i != locations.end(); ++i) {
 			if ((*i) == loc) {
+				delete *i;
 				locations.erase (i);
 				was_removed = true;
 				if (current_location == loc) {
@@ -793,19 +1006,11 @@ Locations::remove (Location *loc)
 	if (was_removed) {
 
 		removed (loc); /* EMIT SIGNAL */
-
+                
 		if (was_current) {
 			 current_changed (0); /* EMIT SIGNAL */
 		}
-
-		changed (REMOVAL); /* EMIT_SIGNAL */
 	}
-}
-
-void
-Locations::location_changed (Location* /*loc*/)
-{
-	changed (OTHER); /* EMIT SIGNAL */
 }
 
 XMLNode&
@@ -908,6 +1113,30 @@ Locations::set_state (const XMLNode& node, int version)
 			}
 		}
 
+		/* We may have some unused locations in the old list. */
+		for (LocationList::iterator i = locations.begin(); i != locations.end(); ) {
+			LocationList::iterator tmp = i;
+			++tmp;
+
+			LocationList::iterator n = new_locations.begin();
+			bool found = false;
+
+			while (n != new_locations.end ()) {
+				if ((*i)->id() == (*n)->id()) {
+					found = true;
+					break;
+				}
+				++n;
+			}
+
+			if (!found) {
+				delete *i;
+				locations.erase (i);
+			}
+
+			i = tmp;
+		}
+
 		locations = new_locations;
 
 		if (locations.size()) {
@@ -917,7 +1146,7 @@ Locations::set_state (const XMLNode& node, int version)
 		}
 	}
 
-	changed (OTHER); /* EMIT SIGNAL */
+	changed (); /* EMIT SIGNAL */
 
 	return 0;
 }
@@ -970,6 +1199,44 @@ Locations::first_mark_before (framepos_t frame, bool include_special_ranges)
 	}
 
 	return -1;
+}
+
+Location*
+Locations::mark_at (framepos_t pos, framecnt_t slop) const
+{
+	Glib::Threads::Mutex::Lock lm (lock);
+	Location* closest = 0;
+	frameoffset_t mindelta = max_framepos;
+	frameoffset_t delta;
+
+	/* locations are not necessarily stored in linear time order so we have
+	 * to iterate across all of them to find the one closest to a give point.
+	 */
+
+	for (LocationList::const_iterator i = locations.begin(); i != locations.end(); ++i) {
+
+		if ((*i)->is_mark()) {
+			if (pos > (*i)->start()) { 
+				delta = pos - (*i)->start();
+			} else {
+				delta = (*i)->start() - pos;
+			}
+			
+			if (slop == 0 && delta == 0) {
+				/* special case: no slop, and direct hit for position */
+				return *i;
+			}
+
+			if (delta <= slop) {
+				if (delta < mindelta) {
+					closest = *i;
+					mindelta = delta;
+				}
+			}
+		}
+	}
+
+	return closest;
 }
 
 framepos_t
@@ -1146,3 +1413,4 @@ Locations::find_all_between (framepos_t start, framepos_t end, LocationList& ll,
 		}
 	}
 }
+

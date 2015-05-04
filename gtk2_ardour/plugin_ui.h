@@ -47,10 +47,12 @@
 
 #include "ardour/types.h"
 #include "ardour/plugin.h"
+#include "ardour/variant.h"
 
-#include "automation_controller.h"
 #include "ardour_button.h"
+#include "ardour_dropdown.h"
 #include "ardour_window.h"
+#include "automation_controller.h"
 
 namespace ARDOUR {
 	class PluginInsert;
@@ -102,7 +104,8 @@ class PlugUIBase : public virtual sigc::trackable, public PBD::ScopedConnectionL
 	virtual void on_window_hide() {}
 
 	virtual void forward_key_event (GdkEventKey*) {}
-        virtual bool non_gtk_gui() const { return false; }
+	virtual void grab_focus () {}
+  virtual bool non_gtk_gui() const { return false; }
 
 	sigc::signal<void,bool> KeyboardFocused;
 
@@ -113,15 +116,15 @@ class PlugUIBase : public virtual sigc::trackable, public PBD::ScopedConnectionL
 	/* UI elements that can subclasses can add to their widgets */
 
 	/** a ComboBoxText which lists presets and manages their selection */
-	Gtk::ComboBoxText _preset_combo;
+	ArdourDropdown _preset_combo;
 	/** a label which has a * in if the current settings are different from the preset being shown */
 	Gtk::Label _preset_modified;
 	/** a button to add a preset */
-	Gtk::Button add_button;
+	ArdourButton add_button;
 	/** a button to save the current settings as a new user preset */
-	Gtk::Button save_button;
+	ArdourButton save_button;
 	/** a button to delete the current preset (if it is a user one) */
-	Gtk::Button delete_button;
+	ArdourButton delete_button;
 	/** a button to bypass the plugin */
 	ArdourButton bypass_button;
 	/** a button to acquire keyboard focus */
@@ -130,10 +133,16 @@ class PlugUIBase : public virtual sigc::trackable, public PBD::ScopedConnectionL
 	Gtk::Expander description_expander;
 	/** an expander containing the plugin analysis graph */
 	Gtk::Expander plugin_analysis_expander;
-	/** a label indicating the plugin latency */
-	Gtk::Label latency_label;
 	/** a button which, when clicked, opens the latency GUI */
-	Gtk::Button latency_button;
+	ArdourButton latency_button;
+	/** a button which sets all controls' automation setting to Manual */
+	ArdourButton automation_manual_all_button;
+	/** a button which sets all controls' automation setting to Play */
+	ArdourButton automation_play_all_button;
+    /** a button which sets all controls' automation setting to Write */
+	ArdourButton automation_write_all_button;
+	/** a button which sets all controls' automation setting to Touch */
+	ArdourButton automation_touch_all_button;
 	
 	void set_latency_label ();
 
@@ -147,7 +156,7 @@ class PlugUIBase : public virtual sigc::trackable, public PBD::ScopedConnectionL
 	Gtk::Image* focus_in_image;
 	int _no_load_preset;
 
-	virtual void preset_selected ();
+	virtual void preset_selected (ARDOUR::Plugin::PresetRecord preset);
 	void add_plugin_setting ();
 	void save_plugin_setting ();
 	void delete_plugin_setting ();
@@ -207,7 +216,7 @@ class GenericPluginUI : public PlugUIBase, public Gtk::VBox
 		bool            max_unbound;
 		bool packed;
 
-		MeterInfo (int /*i*/) {
+		MeterInfo () {
 			meter = 0;
 			packed = false;
 			min = 1.0e10;
@@ -225,15 +234,15 @@ class GenericPluginUI : public PlugUIBase, public Gtk::VBox
 	/* FIXME: Unify with AutomationController */
 	struct ControlUI : public Gtk::HBox {
 
-		uint32_t port_index;
-		boost::shared_ptr<ARDOUR::AutomationControl> control;
+		const Evoral::Parameter parameter() const { return param; }
 
-		Evoral::Parameter parameter() { return control->parameter(); }
+		Evoral::Parameter                            param;
+		boost::shared_ptr<ARDOUR::AutomationControl> control;
 
 		/* input */
 
 		Gtk::ComboBoxText*                      combo;
-		boost::shared_ptr<ARDOUR::Plugin::ScalePoints> scale_points;
+		boost::shared_ptr<ARDOUR::ScalePoints>  scale_points;
 		Gtk::ToggleButton*                      button;
 		boost::shared_ptr<AutomationController> controller;
 		Gtkmm2ext::ClickBox*                    clickbox;
@@ -241,6 +250,7 @@ class GenericPluginUI : public PlugUIBase, public Gtk::VBox
 		bool                                    update_pending;
 		char                                    ignore_change;
 		Gtk::Button                             automate_button;
+		Gtk::FileChooserButton*                 file_button;
 
 		/* output */
 
@@ -251,32 +261,45 @@ class GenericPluginUI : public PlugUIBase, public Gtk::VBox
 		Gtk::VBox*     vbox;
 		MeterInfo*     meterinfo;
 
-		ControlUI ();
+		ControlUI (const Evoral::Parameter& param);
 		~ControlUI ();
 	};
 
 	std::vector<ControlUI*>   input_controls;
+	std::vector<ControlUI*>   input_controls_with_automation;
 	std::vector<ControlUI*>   output_controls;
 	sigc::connection screen_update_connection;
 	void output_update();
 
 	void build ();
-	ControlUI* build_control_ui (guint32 port_index, boost::shared_ptr<ARDOUR::AutomationControl>);
+	ControlUI* build_control_ui (const Evoral::Parameter&                     param,
+	                             const ARDOUR::ParameterDescriptor&           desc,
+	                             boost::shared_ptr<ARDOUR::AutomationControl> mcontrol,
+	                             float                                        value,
+	                             bool                                         is_input);
+
 	void ui_parameter_changed (ControlUI* cui);
 	void toggle_parameter_changed (ControlUI* cui);
 	void update_control_display (ControlUI* cui);
 	void control_port_toggled (ControlUI* cui);
 	void control_combo_changed (ControlUI* cui);
 
-	void astate_clicked (ControlUI*, uint32_t parameter);
+	void astate_clicked (ControlUI*);
 	void automation_state_changed (ControlUI*);
 	void set_automation_state (ARDOUR::AutoState state, ControlUI* cui);
-	void start_touch (ControlUI*);
-	void stop_touch (ControlUI*);
+	void set_all_automation (ARDOUR::AutoState state);
 
 	/* XXX: remove */
 	void print_parameter (char *buf, uint32_t len, uint32_t param);
 	bool integer_printer (char* buf, Gtk::Adjustment &, ControlUI *);
+	bool midinote_printer(char* buf, Gtk::Adjustment &, ControlUI *);
+
+	void set_property (const ARDOUR::ParameterDescriptor& desc,
+	                   Gtk::FileChooserButton*            widget);
+	void property_changed (uint32_t key, const ARDOUR::Variant& value);
+
+	typedef std::map<uint32_t, Gtk::FileChooserButton*> PropertyControls;
+	PropertyControls _property_controls;
 };
 
 class PluginUIWindow : public ArdourWindow

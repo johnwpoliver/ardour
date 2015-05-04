@@ -21,7 +21,6 @@
 #endif
 
 #include <cstdio>
-#include <lrdf.h>
 #include <map>
 
 #include <algorithm>
@@ -37,6 +36,7 @@
 
 #include "ardour/plugin_manager.h"
 #include "ardour/plugin.h"
+#include "ardour/utils.h"
 
 #include "ardour_ui.h"
 #include "plugin_selector.h"
@@ -73,6 +73,7 @@ PluginSelector::PluginSelector (PluginManager& mgr)
 	in_row_change = false;
 
 	manager.PluginListChanged.connect (plugin_list_changed_connection, invalidator (*this), boost::bind (&PluginSelector::build_plugin_menu, this), gui_context());
+	manager.PluginListChanged.connect (plugin_list_changed_connection, invalidator (*this), boost::bind (&PluginSelector::refill, this), gui_context());
 	build_plugin_menu ();
 
 	plugin_model = Gtk::ListStore::create (plugin_columns);
@@ -186,6 +187,7 @@ PluginSelector::PluginSelector (PluginManager& mgr)
 	btn_add->signal_clicked().connect(sigc::mem_fun(*this, &PluginSelector::btn_add_clicked));
 	btn_remove->signal_clicked().connect(sigc::mem_fun(*this, &PluginSelector::btn_remove_clicked));
 	added_list.get_selection()->signal_changed().connect (sigc::mem_fun(*this, &PluginSelector::added_list_selection_changed));
+	added_list.signal_button_press_event().connect_notify (mem_fun(*this, &PluginSelector::added_row_clicked));
 
 	refill ();
 }
@@ -199,6 +201,13 @@ void
 PluginSelector::row_activated(Gtk::TreeModel::Path, Gtk::TreeViewColumn*)
 {
 	btn_add_clicked();
+}
+
+void
+PluginSelector::added_row_clicked(GdkEventButton* event)
+{
+	if (event->type == GDK_2BUTTON_PRESS)
+		btn_remove_clicked();
 }
 
 bool
@@ -310,9 +319,17 @@ PluginSelector::refiller (const PluginInfoList& plugs, const::std::string& filte
 			string::size_type pos = 0;
 
 			/* stupid LADSPA creator strings */
-
+#ifdef PLATFORM_WINDOWS
+			while (pos < creator.length() && creator[pos] > -2 && creator[pos] < 256 && (isalnum (creator[pos]) || isspace (creator[pos]))) ++pos;
+#else
 			while (pos < creator.length() && (isalnum (creator[pos]) || isspace (creator[pos]))) ++pos;
-			creator = creator.substr (0, pos);
+#endif
+			// If there were too few characters to create a
+			// meaningful name, mark this creator as 'Unknown'
+			if (creator.length()<2 || pos<3)
+				creator = "Unknown";
+			else
+				creator = creator.substr (0, pos);
 
 			newrow[plugin_columns.creator] = creator;
 
@@ -433,7 +450,6 @@ void
 PluginSelector::btn_update_clicked()
 {
 	manager.refresh ();
-	refill();
 }
 
 void
@@ -538,13 +554,13 @@ struct PluginMenuCompareByCreator {
     bool operator() (PluginInfoPtr a, PluginInfoPtr b) const {
 	    int cmp;
 
-	    cmp = strcasecmp (a->creator.c_str(), b->creator.c_str());
+	    cmp = cmp_nocase_utf8 (a->creator, b->creator);
 
 	    if (cmp < 0) {
 		    return true;
 	    } else if (cmp == 0) {
 		    /* same creator ... compare names */
-		    if (strcasecmp (a->name.c_str(), b->name.c_str()) < 0) {
+		    if (cmp_nocase_utf8 (a->name, b->name) < 0) {
 			    return true;
 		    }
 	    }
@@ -556,7 +572,7 @@ struct PluginMenuCompareByName {
     bool operator() (PluginInfoPtr a, PluginInfoPtr b) const {
 	    int cmp;
 
-	    cmp = strcasecmp (a->name.c_str(), b->name.c_str());
+	    cmp = cmp_nocase_utf8 (a->name, b->name);
 
 	    if (cmp < 0) {
 		    return true;
@@ -574,13 +590,13 @@ struct PluginMenuCompareByCategory {
     bool operator() (PluginInfoPtr a, PluginInfoPtr b) const {
 	    int cmp;
 
-	    cmp = strcasecmp (a->category.c_str(), b->category.c_str());
+	    cmp = cmp_nocase_utf8 (a->category, b->category);
 
 	    if (cmp < 0) {
 		    return true;
 	    } else if (cmp == 0) {
 		    /* same category ... compare names */
-		    if (strcasecmp (a->name.c_str(), b->name.c_str()) < 0) {
+		    if (cmp_nocase_utf8 (a->name, b->name) < 0) {
 			    return true;
 		    }
 	    }
@@ -681,8 +697,21 @@ PluginSelector::create_by_creator_menu (ARDOUR::PluginInfoList& all_plugs)
 
 		/* stupid LADSPA creator strings */
 		string::size_type pos = 0;
+#ifdef PLATFORM_WINDOWS
+		while (pos < creator.length() && creator[pos]>(-2) && creator[pos]<256 && (isprint (creator[pos]))) ++pos;
+#else
 		while (pos < creator.length() && (isalnum (creator[pos]) || isspace (creator[pos]))) ++pos;
-		creator = creator.substr (0, pos);
+#endif
+
+		// Check to see if we found any invalid characters.
+		if (creator.length() != pos) {
+			// If there were too few characters to create a
+			// meaningful name, mark this creator as 'Unknown'
+			if (pos<3)
+				creator = "Unknown?";
+			else
+				creator = creator.substr (0, pos);
+		}
 
 		SubmenuMap::iterator x;
 		Gtk::Menu* submenu;

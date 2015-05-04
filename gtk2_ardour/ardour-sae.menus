@@ -297,9 +297,6 @@
 	       <menu action="LatchMenu">
                      <menuitem action='LatchedSolo'/>
 	       </menu>
-	       <menu action="Link">
-	       	     <menuitem action='link-region-and-track-selection'/> 
-	       </menu>
                <menu action='ZoomFocusMenu'>
                    <menuitem action='zoom-focus-playhead'/>
                    <menuitem action='zoom-focus-edit'/>
@@ -320,6 +317,7 @@
 		   <menuitem action='set-mouse-mode-object'/>
 		   <menuitem action='set-mouse-mode-zoom'/>
 		   <menuitem action='set-mouse-mode-timefx'/>
+		   <menuitem action='set-mouse-mode-content'/>
 		   <separator/>
 		   <menuitem action='cycle-edit-point'/>
 		   <menuitem action='cycle-edit-point-with-marker'/>

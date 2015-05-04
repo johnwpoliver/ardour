@@ -31,7 +31,6 @@
 #include "rhythm_ferret.h"
 #include "audio_region_view.h"
 #include "editor.h"
-#include "utils.h"
 #include "time_axis_view.h"
 
 #include "i18n.h"
@@ -274,7 +273,7 @@ RhythmFerret::get_note_onset_function ()
 	fatal << string_compose (_("programming error: %1 (%2)"), X_("illegal note onset function string"), txt)
 	      << endmsg;
 
-	/*NOTREACHED*/
+	abort(); /*NOTREACHED*/
 	return -1;
 }
 
@@ -353,7 +352,7 @@ RhythmFerret::do_split_action ()
 
 	editor.EditorFreeze(); /* Emit signal */
 
-	_session->begin_reversible_command (_("split regions (rhythm ferret)"));
+	editor.begin_reversible_command (_("split regions (rhythm ferret)"));
 
 	/* Merge the transient positions for regions in consideration */
 	AnalysisFeatureList merged_features;
@@ -382,7 +381,7 @@ RhythmFerret::do_split_action ()
 		i = tmp;
 	}
 
-	_session->commit_reversible_command ();
+	editor.commit_reversible_command ();
 
 	editor.EditorThaw(); /* Emit signal */
 }

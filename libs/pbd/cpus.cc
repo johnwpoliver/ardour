@@ -28,9 +28,15 @@
 #include <stddef.h>
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#elif defined(PLATFORM_WINDOWS)
+#include <windows.h>
 #endif
 
 #include "pbd/cpus.h"
+
+#if defined(COMPILER_MSVC) && !defined(PTW32_VERSION)
+#include <ardourext/pthread.h>  // Gets us 'PTW32_VERSION'
+#endif
 
 uint32_t
 hardware_concurrency()
@@ -44,6 +50,10 @@ hardware_concurrency()
 #elif defined(HAVE_UNISTD) && defined(_SC_NPROCESSORS_ONLN)
         int const count=sysconf(_SC_NPROCESSORS_ONLN);
         return (count>0)?count:0;
+#elif defined(PLATFORM_WINDOWS)
+		SYSTEM_INFO sys_info;
+		GetSystemInfo( &sys_info );
+		return sys_info.dwNumberOfProcessors;
 #else
         return 0;
 #endif

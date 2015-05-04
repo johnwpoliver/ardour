@@ -34,7 +34,7 @@
 
 #include "ardour/export_profile_manager.h"
 #include "ardour/export_format_specification.h"
-#include "ardour/export_formats_search_path.h"
+#include "ardour/search_paths.h"
 #include "ardour/export_timespan.h"
 #include "ardour/export_channel_configuration.h"
 #include "ardour/export_filename.h"
@@ -61,7 +61,6 @@ ExportProfileManager::ExportProfileManager (Session & s, ExportType type)
   , handler (s.get_export_handler())
   , session (s)
 
-  , session_range (new Location (s))
   , ranges (new LocationList ())
   , single_range_mode (false)
 
@@ -115,17 +114,22 @@ ExportProfileManager::ExportProfileManager (Session & s, ExportType type)
 
 ExportProfileManager::~ExportProfileManager ()
 {
-	XMLNode * instant_xml (new XMLNode (xml_node_name));
-	serialize_profile (*instant_xml);
-	session.add_instant_xml (*instant_xml, false);
+	XMLNode * extra_xml (new XMLNode (xml_node_name));
+	serialize_profile (*extra_xml);
+	session.add_extra_xml (*extra_xml);
 }
 
 void
 ExportProfileManager::load_profile ()
 {
-	XMLNode * instant_node = session.instant_xml (xml_node_name);
-	if (instant_node) {
-		set_state (*instant_node);
+	XMLNode * extra_node = session.extra_xml (xml_node_name);
+	/* Legacy sessions used Session instant.xml for this */
+	if (!extra_node) {
+		extra_node = session.instant_xml (xml_node_name);
+	}
+
+	if (extra_node) {
+		set_state (*extra_node);
 	} else {
 		XMLNode empty_node (xml_node_name);
 		set_state (empty_node);
@@ -333,8 +337,7 @@ ExportProfileManager::find_file (std::string const & pattern)
 {
 	vector<std::string> found;
 
-	Glib::PatternSpec pattern_spec (pattern);
-	find_matching_files_in_search_path (search_path, pattern_spec, found);
+	find_files_matching_pattern (found, search_path, pattern);
 
 	return found;
 }
@@ -385,13 +388,16 @@ ExportProfileManager::init_timespans (XMLNodeList nodes)
 	}
 
 	if (timespans.empty()) {
-		TimespanStatePtr state (new TimespanState (session_range, selection_range, ranges));
+		TimespanStatePtr state (new TimespanState (selection_range, ranges));
 		timespans.push_back (state);
 
 		// Add session as default selection
+		Location * session_range = session.locations()->session_range_location();
+		if (!session_range) { return false; }
+
 		ExportTimespanPtr timespan = handler->add_timespan();
 		timespan->set_name (session_range->name());
-		timespan->set_range_id ("session");
+		timespan->set_range_id (session_range->id().to_s());
 		timespan->set_range (session_range->start(), session_range->end());
 		state->timespans->push_back (timespan);
 		return false;
@@ -403,7 +409,7 @@ ExportProfileManager::init_timespans (XMLNodeList nodes)
 ExportProfileManager::TimespanStatePtr
 ExportProfileManager::deserialize_timespan (XMLNode & root)
 {
-	TimespanStatePtr state (new TimespanState (session_range, selection_range, ranges));
+	TimespanStatePtr state (new TimespanState (selection_range, ranges));
 	XMLProperty const * prop;
 
 	XMLNodeList spans = root.children ("Range");
@@ -413,21 +419,30 @@ ExportProfileManager::deserialize_timespan (XMLNode & root)
 		if (!prop) { continue; }
 		string id = prop->value();
 
+		Location * location = 0;
 		for (LocationList::iterator it = ranges->begin(); it != ranges->end(); ++it) {
-			if ((!id.compare ("session") && *it == session_range.get()) ||
-			    (!id.compare ("selection") && *it == selection_range.get()) ||
-			    (!id.compare ((*it)->id().to_s()))) {
-				ExportTimespanPtr timespan = handler->add_timespan();
-				timespan->set_name ((*it)->name());
-				timespan->set_range_id (id);
-				timespan->set_range ((*it)->start(), (*it)->end());
-				state->timespans->push_back (timespan);
+			if ((id == "selection" && *it == selection_range.get()) ||
+			    (id == (*it)->id().to_s())) {
+				location = *it;
+				break;
 			}
 		}
+
+		if (!location) { continue; }
+
+		ExportTimespanPtr timespan = handler->add_timespan();
+		timespan->set_name (location->name());
+		timespan->set_range_id (location->id().to_s());
+		timespan->set_range (location->start(), location->end());
+		state->timespans->push_back (timespan);
 	}
 
 	if ((prop = root.property ("format"))) {
 		state->time_format = (TimeFormat) string_2_enum (prop->value(), TimeFormat);
+	}
+
+	if (state->timespans->empty()) {
+		return TimespanStatePtr();
 	}
 
 	return state;
@@ -440,7 +455,6 @@ ExportProfileManager::serialize_timespan (TimespanStatePtr state)
 	XMLNode * span;
 
 	update_ranges ();
-
 	for (TimespanList::iterator it = state->timespans->begin(); it != state->timespans->end(); ++it) {
 		if ((span = root.add_child ("Range"))) {
 			span->add_property ("id", (*it)->range_id());
@@ -463,9 +477,10 @@ ExportProfileManager::update_ranges () {
 
 	/* Session */
 
-	session_range->set_name (_("Session"));
-	session_range->set (session.current_start_frame(), session.current_end_frame());
-	ranges->push_back (session_range.get());
+	Location * session_range = session.locations()->session_range_location();
+	if (session_range) {
+		ranges->push_back (session_range);
+	}
 
 	/* Selection */
 
@@ -633,6 +648,7 @@ ExportProfileManager::get_new_format (ExportFormatSpecPtr original)
 	ExportFormatSpecPtr format;
 	if (original) {
 		format.reset (new ExportFormatSpecification (*original));
+		std::cerr << "After new format created from original, format has id [" << format->id().to_s() << ']' << std::endl;
 	} else {
 		format = handler->add_format();
 		format->set_name (_("empty format"));
@@ -674,7 +690,7 @@ ExportProfileManager::FormatStatePtr
 ExportProfileManager::deserialize_format (XMLNode & root)
 {
 	XMLProperty * prop;
-	UUID id;
+	PBD::UUID id;
 
 	if ((prop = root.property ("id"))) {
 		id = prop->value();
@@ -713,8 +729,20 @@ ExportProfileManager::load_formats ()
 void
 ExportProfileManager::load_format_from_disk (std::string const & path)
 {
-	XMLTree const tree (path);
-	ExportFormatSpecPtr format = handler->add_format (*tree.root());
+	XMLTree tree;
+
+	if (!tree.read (path)) {
+		error << string_compose (_("Cannot load export format from %1"), path) << endmsg;
+		return;
+	}
+
+	XMLNode* root = tree.root();
+	if (!root) {
+		error << string_compose (_("Cannot export format read from %1"), path) << endmsg;
+		return;
+	}
+
+	ExportFormatSpecPtr format = handler->add_format (*root);
 
 	/* Handle id to filename mapping and don't add duplicates to list */
 

@@ -31,8 +31,11 @@
 #include "ardour/midi_track.h"
 #include "ardour/pan_controllable.h"
 #include "ardour/pannable.h"
+#include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/session.h"
+#include "ardour/uri_map.h"
+#include "ardour/value_as_string.h"
 
 #include "i18n.h"
 
@@ -137,16 +140,20 @@ Automatable::add_control(boost::shared_ptr<Evoral::Control> ac)
 	Evoral::Parameter param = ac->parameter();
 
 	boost::shared_ptr<AutomationList> al = boost::dynamic_pointer_cast<AutomationList> (ac->list ());
-	assert (al);
 
-	al->automation_state_changed.connect_same_thread (
-		_list_connections, boost::bind (&Automatable::automation_list_automation_state_changed, this, ac->parameter(), _1)
-		);
+	if (al) {
+		al->automation_state_changed.connect_same_thread (
+			_list_connections,
+			boost::bind (&Automatable::automation_list_automation_state_changed,
+			             this, ac->parameter(), _1));
+	}
 
 	ControlSet::add_control (ac);
-	_can_automate_list.insert (param);
 
-	automation_list_automation_state_changed (param, al->automation_state ()); // sync everything up
+	if (al) {
+		_can_automate_list.insert (param);
+		automation_list_automation_state_changed (param, al->automation_state ()); // sync everything up
+	}
 }
 
 string
@@ -156,6 +163,10 @@ Automatable::describe_parameter (Evoral::Parameter param)
 
 	if (param == Evoral::Parameter(GainAutomation)) {
 		return _("Fader");
+	} else if (param.type() == TrimAutomation) {
+		return _("Trim");
+	} else if (param.type() == MuteAutomation) {
+		return _("Mute");
 	} else if (param.type() == MidiCCAutomation) {
 		return string_compose("Controller %1 [%2]", param.id(), int(param.channel()) + 1);
 	} else if (param.type() == MidiPgmChangeAutomation) {
@@ -164,6 +175,10 @@ Automatable::describe_parameter (Evoral::Parameter param)
 		return string_compose("Bender [%1]", int(param.channel()) + 1);
 	} else if (param.type() == MidiChannelPressureAutomation) {
 		return string_compose("Pressure [%1]", int(param.channel()) + 1);
+#ifdef LV2_SUPPORT
+	} else if (param.type() == PluginPropertyAutomation) {
+		return string_compose("Property %1", URIMap::instance().id_to_uri(param.id()));
+#endif
 	} else {
 		return EventTypeMap::instance().to_symbol(param);
 	}
@@ -201,7 +216,7 @@ Automatable::set_automation_xml_state (const XMLNode& node, Evoral::Parameter le
 			const XMLProperty* id_prop = (*niter)->property("automation-id");
 
 			Evoral::Parameter param = (id_prop
-					? EventTypeMap::instance().new_parameter(id_prop->value())
+					? EventTypeMap::instance().from_symbol(id_prop->value())
 					: legacy_param);
 
 			if (param.type() == NullAutomation) {
@@ -245,7 +260,7 @@ Automatable::get_automation_xml_state ()
 
 	for (Controls::iterator li = controls().begin(); li != controls().end(); ++li) {
 		boost::shared_ptr<AutomationList> l = boost::dynamic_pointer_cast<AutomationList>(li->second->list());
-		if (!l->empty()) {
+		if (l && !l->empty()) {
 			node->add_child_nocopy (l->get_state ());
 		}
 	}
@@ -354,53 +369,72 @@ void
 Automatable::transport_stopped (framepos_t now)
 {
 	for (Controls::iterator li = controls().begin(); li != controls().end(); ++li) {
+		boost::shared_ptr<AutomationControl> c =
+			boost::dynamic_pointer_cast<AutomationControl>(li->second);
+		if (!c) {
+			continue;
+		}
 
-		boost::shared_ptr<AutomationControl> c
-				= boost::dynamic_pointer_cast<AutomationControl>(li->second);
-                if (c) {
-                        boost::shared_ptr<AutomationList> l
-				= boost::dynamic_pointer_cast<AutomationList>(c->list());
+		boost::shared_ptr<AutomationList> l =
+			boost::dynamic_pointer_cast<AutomationList>(c->list());
+		if (!l) {
+			continue;
+		}
 
-                        if (l) {
-				/* Stop any active touch gesture just before we mark the write pass
-				   as finished.  If we don't do this, the transport can end up stopped with
-				   an AutomationList thinking that a touch is still in progress and,
-				   when the transport is re-started, a touch will magically
-				   be happening without it ever have being started in the usual way.
-				*/
-				l->stop_touch (true, now);
-                                l->write_pass_finished (now);
+		/* Stop any active touch gesture just before we mark the write pass
+		   as finished.  If we don't do this, the transport can end up stopped with
+		   an AutomationList thinking that a touch is still in progress and,
+		   when the transport is re-started, a touch will magically
+		   be happening without it ever have being started in the usual way.
+		*/
+		l->stop_touch (true, now);
+		l->write_pass_finished (now, Config->get_automation_thinning_factor());
 
-                                if (l->automation_playback()) {
-                                        c->set_value(c->list()->eval(now));
-                                }
+		if (l->automation_playback()) {
+			c->set_value(c->list()->eval(now));
+		}
 
-                                if (l->automation_state() == Write) {
-                                        l->set_automation_state (Touch);
-                                }
-                        }
-                }
+		if (l->automation_state() == Write) {
+			l->set_automation_state (Touch);
+		}
 	}
 }
 
 boost::shared_ptr<Evoral::Control>
 Automatable::control_factory(const Evoral::Parameter& param)
 {
-	boost::shared_ptr<AutomationList> list(new AutomationList(param));
-	Evoral::Control* control = NULL;
+	Evoral::Control*                  control   = NULL;
+	bool                              make_list = true;
+	ParameterDescriptor               desc(param);
+	boost::shared_ptr<AutomationList> list;
 	if (param.type() >= MidiCCAutomation && param.type() <= MidiChannelPressureAutomation) {
 		MidiTrack* mt = dynamic_cast<MidiTrack*>(this);
 		if (mt) {
 			control = new MidiTrack::MidiControl(mt, param);
-		} else {
-			warning << "MidiCCAutomation for non-MidiTrack" << endl;
+			make_list = false;  // No list, this is region "automation"
 		}
 	} else if (param.type() == PluginAutomation) {
 		PluginInsert* pi = dynamic_cast<PluginInsert*>(this);
 		if (pi) {
-			control = new PluginInsert::PluginControl(pi, param);
+			pi->plugin(0)->get_parameter_descriptor(param.id(), desc);
+			control = new PluginInsert::PluginControl(pi, param, desc);
 		} else {
 			warning << "PluginAutomation for non-Plugin" << endl;
+		}
+	} else if (param.type() == PluginPropertyAutomation) {
+		PluginInsert* pi = dynamic_cast<PluginInsert*>(this);
+		if (pi) {
+			desc = pi->plugin(0)->get_property_descriptor(param.id());
+			if (desc.datatype != Variant::NOTHING) {
+				if (!Variant::type_is_numeric(desc.datatype)) {
+					make_list = false;  // Can't automate non-numeric data yet
+				} else {
+					list = boost::shared_ptr<AutomationList>(new AutomationList(param, desc));
+				}
+				control = new PluginInsert::PluginPropertyControl(pi, param, desc, list);
+			}
+		} else {
+			warning << "PluginPropertyAutomation for non-Plugin" << endl;
 		}
 	} else if (param.type() == GainAutomation) {
 		Amp* amp = dynamic_cast<Amp*>(this);
@@ -408,6 +442,13 @@ Automatable::control_factory(const Evoral::Parameter& param)
 			control = new Amp::GainControl(X_("gaincontrol"), _a_session, amp, param);
 		} else {
 			warning << "GainAutomation for non-Amp" << endl;
+		}
+	} else if (param.type() == TrimAutomation) {
+		Amp* amp = dynamic_cast<Amp*>(this);
+		if (amp) {
+			control = new Amp::GainControl(X_("trimcontrol"), _a_session, amp, param);
+		} else {
+			warning << "TrimAutomation for non-Amp" << endl;
 		}
 	} else if (param.type() == PanAzimuthAutomation || param.type() == PanWidthAutomation || param.type() == PanElevationAutomation) {
 		Pannable* pannable = dynamic_cast<Pannable*>(this);
@@ -418,11 +459,14 @@ Automatable::control_factory(const Evoral::Parameter& param)
 		}
 	}
 
-	if (!control) {
-		control = new AutomationControl(_a_session, param);
+	if (make_list && !list) {
+		list = boost::shared_ptr<AutomationList>(new AutomationList(param, desc));
 	}
 
-	control->set_list(list);
+	if (!control) {
+		control = new AutomationControl(_a_session, param, desc, list);
+	}
+
 	return boost::shared_ptr<Evoral::Control>(control);
 }
 
@@ -448,19 +492,5 @@ Automatable::clear_controls ()
 string
 Automatable::value_as_string (boost::shared_ptr<AutomationControl> ac) const
 {
-	std::stringstream s;
-
-        /* this is a the default fallback for this virtual method. Derived Automatables
-           are free to override this to display the values of their parameters/controls
-           in different ways.
-        */
-
-	// Hack to display CC as integer value, rather than double
-	if (ac->parameter().type() == MidiCCAutomation) {
-		s << lrint (ac->get_value());
-	} else {
-		s << std::fixed << std::setprecision(3) << ac->get_value();
-	}
-
-	return s.str ();
+	return ARDOUR::value_as_string(ac->desc(), ac->get_value());
 }

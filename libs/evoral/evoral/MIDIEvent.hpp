@@ -21,8 +21,11 @@
 
 #include <cmath>
 #include <boost/shared_ptr.hpp>
+
+#include "evoral/visibility.h"
 #include "evoral/Event.hpp"
 #include "evoral/midi_events.h"
+
 #ifdef EVORAL_MIDI_XML
 class XMLNode;
 #endif
@@ -36,7 +39,7 @@ namespace Evoral {
  * valid MIDI data for these functions to make sense.
  */
 template<typename Time>
-class MIDIEvent : public Event<Time> {
+class /*LIBEVORAL_API*/ MIDIEvent : public Event<Time> {
 public:
 	MIDIEvent(EventType type=0, Time time=0, uint32_t size=0, uint8_t* buf=NULL, bool alloc=false)
 		: Event<Time>(type, time, size, buf, alloc)
@@ -100,6 +103,21 @@ public:
 	inline bool     is_mtc_full()             const {
 		return this->size() == 10    && this->_buf[0] == 0xf0 && this->_buf[1] == 0x7f && 
 		       this->_buf[3] == 0x01 && this->_buf[4] == 0x01;
+	}
+
+	inline uint16_t value() const {
+		switch (type()) {
+		case MIDI_CMD_CONTROL:
+			return cc_value();
+		case MIDI_CMD_BENDER:
+			return pitch_bender_value();
+		case MIDI_CMD_NOTE_PRESSURE:
+			return aftertouch();
+		case MIDI_CMD_CHANNEL_PRESSURE:
+			return channel_pressure();
+		default:
+			return 0;
+		}
 	}
 };
 

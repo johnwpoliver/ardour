@@ -38,7 +38,6 @@
 #include "enums.h"
 #include "editing.h"
 #include "route_time_axis.h"
-#include "canvas.h"
 
 namespace ARDOUR {
 	class Session;
@@ -77,9 +76,6 @@ class AudioTimeAxisView : public RouteTimeAxisView
 	/* Overridden from parent to store display state */
 	guint32 show_at (double y, int& nth, Gtk::VBox *parent);
 
-        void enter_internal_edit_mode ();
-        void leave_internal_edit_mode ();
-
 	void create_automation_child (const Evoral::Parameter& param, bool show);
 
 	void first_idle ();
@@ -99,18 +95,7 @@ class AudioTimeAxisView : public RouteTimeAxisView
 
 	void hide ();
 
-	void gain_hidden ();
-	void pan_hidden ();
-
-	void ensure_pan_views (bool show = true);
 	void update_control_names ();
-
-	void update_gain_track_visibility ();
-	void update_pan_track_visibility ();
-
-	Gtk::CheckMenuItem* gain_automation_item;
-	std::list<boost::shared_ptr<AutomationTimeAxisView> > pan_tracks;
-	Gtk::CheckMenuItem* pan_automation_item;
 };
 
 #endif /* __ardour_audio_time_axis_h__ */

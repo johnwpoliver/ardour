@@ -36,19 +36,21 @@
 
 #include <boost/algorithm/string/erase.hpp>
 
-#include "pbd/error.h"
-#include "pbd/boost_debug.h"
-#include "pbd/pathscanner.h"
-#include "pbd/stl_delete.h"
 #include "pbd/basename.h"
-#include "pbd/stacktrace.h"
-#include "pbd/file_utils.h"
+#include "pbd/boost_debug.h"
 #include "pbd/convert.h"
-#include "pbd/strsplit.h"
+#include "pbd/convert.h"
+#include "pbd/error.h"
+#include "pbd/file_utils.h"
+#include "pbd/md5.h"
+#include "pbd/search_path.h"
+#include "pbd/stacktrace.h"
+#include "pbd/stl_delete.h"
 #include "pbd/unwind.h"
 
 #include "ardour/amp.h"
 #include "ardour/analyser.h"
+#include "ardour/async_midi_port.h"
 #include "ardour/audio_buffer.h"
 #include "ardour/audio_diskstream.h"
 #include "ardour/audio_port.h"
@@ -66,6 +68,8 @@
 #include "ardour/debug.h"
 #include "ardour/filename_extensions.h"
 #include "ardour/graph.h"
+#include "ardour/midiport_manager.h"
+#include "ardour/scene_changer.h"
 #include "ardour/midi_track.h"
 #include "ardour/midi_ui.h"
 #include "ardour/operations.h"
@@ -79,18 +83,21 @@
 #include "ardour/region_factory.h"
 #include "ardour/route_graph.h"
 #include "ardour/route_group.h"
+#include "ardour/route_sorters.h"
 #include "ardour/send.h"
 #include "ardour/session.h"
 #include "ardour/session_directory.h"
 #include "ardour/session_playlists.h"
 #include "ardour/smf_source.h"
 #include "ardour/source_factory.h"
+#include "ardour/speakers.h"
+#include "ardour/tempo.h"
+#include "ardour/track.h"
+#include "ardour/user_bundle.h"
 #include "ardour/utils.h"
 
 #include "midi++/port.h"
-#include "midi++/jack_midi_port.h"
 #include "midi++/mmc.h"
-#include "midi++/manager.h"
 
 #include "i18n.h"
 
@@ -106,6 +113,7 @@ using namespace PBD;
 
 bool Session::_disable_all_loaded_plugins = false;
 
+PBD::Signal1<int,uint32_t> Session::AudioEngineSetupRequired;
 PBD::Signal1<void,std::string> Session::Dialog;
 PBD::Signal0<int> Session::AskAboutPendingState;
 PBD::Signal2<int, framecnt_t, framecnt_t> Session::AskAboutSampleRateMismatch;
@@ -121,6 +129,7 @@ PBD::Signal0<void> Session::FeedbackDetected;
 PBD::Signal0<void> Session::SuccessfulGraphSort;
 PBD::Signal2<void,std::string,std::string> Session::VersionMismatch;
 
+const framecnt_t Session::bounce_chunk_size = 65536;
 static void clean_up_session_event (SessionEvent* ev) { delete ev; }
 const SessionEvent::RTeventCallback Session::rt_cleanup (clean_up_session_event);
 
@@ -130,69 +139,209 @@ Session::Session (AudioEngine &eng,
                   const string& snapshot_name,
                   BusProfile* bus_profile,
                   string mix_template)
-	: _engine (eng)
+	: playlists (new SessionPlaylists)
+	, _engine (eng)
+	, process_function (&Session::process_with_events)
+	, _bounce_processing_active (false)
+	, waiting_for_sync_offset (false)
+	, _base_frame_rate (0)
+	, _current_frame_rate (0)
+	, _nominal_frame_rate (0)
+	, transport_sub_state (0)
+	, _record_status (Disabled)
+	, _transport_frame (0)
+	, _session_range_location (0)
+	, _slave (0)
+	, _silent (false)
+	, _transport_speed (0)
+	, _default_transport_speed (1.0)
+	, _last_transport_speed (0)
 	, _target_transport_speed (0.0)
+	, auto_play_legal (false)
+	, _last_slave_transport_frame (0)
+	, maximum_output_latency (0)
 	, _requested_return_frame (-1)
+	, current_block_size (0)
+	, _worst_output_latency (0)
+	, _worst_input_latency (0)
+ 	, _worst_track_latency (0)
+	, _have_captured (false)
+	, _non_soloed_outs_muted (false)
+	, _listen_cnt (0)
+	, _solo_isolated_cnt (0)
+	, _writable (false)
+	, _was_seamless (Config->get_seamless_loop ())
 	, _under_nsm_control (false)
-	, _session_dir (new SessionDirectory(fullpath))
+	, _xrun_count (0)
+	, delta_accumulator_cnt (0)
+	, average_slave_delta (1800) // !!! why 1800 ???
+	, average_dir (0)
+	, have_first_delta_accumulator (false)
+	, _slave_state (Stopped)
+	, post_export_sync (false)
+	, post_export_position (0)
+	, _exporting (false)
+	, _export_started (false)
+	, _export_rolling (false)
+	, _pre_export_mmc_enabled (false)
+	, _name (snapshot_name)
+	, _is_new (true)
+	, _send_qf_mtc (false)
+	, _pframes_since_last_mtc (0)
+	, session_midi_feedback (0)
+	, play_loop (false)
+	, loop_changing (false)
+	, last_loopend (0)
+	, _session_dir (new SessionDirectory (fullpath))
+	, _current_snapshot_name (snapshot_name)	  
 	, state_tree (0)
-	, _state_of_the_state (Clean)
+	, state_was_pending (false)
+	, _state_of_the_state (StateOfTheState(CannotSave|InitialConnecting|Loading))
+	, _suspend_save (0)
+	, _save_queued (false)
+	, _last_roll_location (0)
+	, _last_roll_or_reversal_location (0)
+	, _last_record_location (0)
+	, pending_locate_roll (false)
+	, pending_locate_frame (0)
+	, pending_locate_flush (false)
+	, pending_abort (false)
+	, pending_auto_loop (false)
 	, _butler (new Butler (*this))
 	, _post_transport_work (0)
+	,  cumulative_rf_motion (0)
+	, rf_scale (1.0)
+	, _locations (new Locations (*this))
+	, _ignore_skips_updates (false)
+	, _rt_thread_active (false)
+	, _rt_emit_pending (false)
+	, step_speed (0)
+	, outbound_mtc_timecode_frame (0)
+	, next_quarter_frame_to_send (-1)
+	, _frames_per_timecode_frame (0)
+	, _frames_per_hour (0)
+	, _timecode_frames_per_hour (0)
+	, last_timecode_valid (false)
+	, last_timecode_when (0)
 	, _send_timecode_update (false)
+	, ltc_encoder (0)
+	, ltc_enc_buf(0)
+	, ltc_buf_off (0)
+	, ltc_buf_len (0)
+	, ltc_speed (0)
+	, ltc_enc_byte (0)
+	, ltc_enc_pos (0)
+	, ltc_enc_cnt (0)
+	, ltc_enc_off (0)
+	, restarting (false)
+	, ltc_prev_cycle (0)
+	, ltc_timecode_offset (0)
+	, ltc_timecode_negative_offset (false)
+	, midi_control_ui (0)
+	, _tempo_map (0)
 	, _all_route_group (new RouteGroup (*this, "all"))
 	, routes (new RouteList)
+	, _adding_routes_in_progress (false)
+	, destructive_index (0)
+	, _track_number_decimals(1)
+	, solo_update_disabled (false)
+	, default_fade_steepness (0)
+	, default_fade_msecs (0)
 	, _total_free_4k_blocks (0)
 	, _total_free_4k_blocks_uncertain (false)
+	, no_questions_about_missing_files (false)
+	, _playback_load (0)
+	, _capture_load (0)
 	, _bundles (new BundleList)
 	, _bundle_xml_node (0)
 	, _current_trans (0)
+	, _clicking (false)
 	, click_data (0)
 	, click_emphasis_data (0)
+	, click_length (0)
+	, click_emphasis_length (0)
+	, _clicks_cleared (0)
+	, _play_range (false)
 	, main_outs (0)
+	, first_file_data_format_reset (true)
+	, first_file_header_format_reset (true)
+	, have_looped (false)
 	, _have_rec_enabled_track (false)
+	, _step_editors (0)
 	, _suspend_timecode_transmission (0)
+	,  _speakers (new Speakers)
+	, _order_hint (-1)
+	, ignore_route_processor_changes (false)
+	, _scene_changer (0)
+	, _midi_ports (0)
+	, _mmc (0)
 {
-	_locations = new Locations (*this);
-	ltc_encoder = NULL;
+	uint32_t sr = 0;
 
-	if (how_many_dsp_threads () > 1) {
-		/* For now, only create the graph if we are using >1 DSP threads, as
-		   it is a bit slower than the old code with 1 thread.
-		*/
-		_process_graph.reset (new Graph (*this));
-	}
+	pthread_mutex_init (&_rt_emit_mutex, 0);
+	pthread_cond_init (&_rt_emit_cond, 0);
 
-	playlists.reset (new SessionPlaylists);
-
-	_all_route_group->set_active (true, this);
-
-	interpolation.add_channel_to (0, 0);
-
-	if (!eng.connected()) {
-		throw failed_constructor();
-	}
-
-	n_physical_outputs = _engine.n_physical_outputs ();
-	n_physical_inputs =  _engine.n_physical_inputs ();
-
-	first_stage_init (fullpath, snapshot_name);
-
-	_is_new = !Glib::file_test (_path, Glib::FileTest (G_FILE_TEST_EXISTS | G_FILE_TEST_IS_DIR));
-
+	pre_engine_init (fullpath);
+	
 	if (_is_new) {
+		if (ensure_engine (sr)) {
+			destroy ();
+			throw failed_constructor ();
+		}
+
 		if (create (mix_template, bus_profile)) {
+			destroy ();
+			throw failed_constructor ();
+		}
+
+		/* if a mix template was provided, then ::create() will
+		 * have copied it into the session and we need to load it
+		 * so that we have the state ready for ::set_state()
+		 * after the engine is started.
+		 *
+		 * Note that we do NOT try to get the sample rate from
+		 * the template at this time, though doing so would
+		 * be easy if we decided this was an appropriate part
+		 * of a template.
+		 */
+
+		if (!mix_template.empty() && load_state (_current_snapshot_name)) {
+			throw failed_constructor ();
+		}
+
+		/* load default session properties - if any */
+		config.load_state();
+
+	} else {
+
+		if (load_state (_current_snapshot_name)) {
+			throw failed_constructor ();
+		}
+	
+		/* try to get sample rate from XML state so that we
+		 * can influence the SR if we set up the audio
+		 * engine.
+		 */
+
+		if (state_tree) {
+			const XMLProperty* prop;
+			if ((prop = state_tree->root()->property (X_("sample-rate"))) != 0) {		
+				sr = atoi (prop->value());
+			}
+		}
+
+		if (ensure_engine (sr)) {
 			destroy ();
 			throw failed_constructor ();
 		}
 	}
 
-	if (second_stage_init ()) {
+	if (post_engine_init ()) {
 		destroy ();
 		throw failed_constructor ();
 	}
 
-	store_recent_sessions(_name, _path);
+	store_recent_sessions (_name, _path);
 
 	bool was_dirty = dirty();
 
@@ -209,6 +358,18 @@ Session::Session (AudioEngine &eng,
 	EndTimeChanged.connect_same_thread (*this, boost::bind (&Session::end_time_changed, this, _1));
 
 	_is_new = false;
+
+	emit_thread_start ();
+
+	/* hook us up to the engine since we are now completely constructed */
+
+	BootMessage (_("Connect to engine"));
+
+	_engine.set_session (this);
+	_engine.reset_timebase ();
+
+	BootMessage (_("Session loading complete"));
+
 }
 
 Session::~Session ()
@@ -217,6 +378,85 @@ Session::~Session ()
 	ST.dump ("ST.dump");
 #endif	
 	destroy ();
+}
+
+int
+Session::ensure_engine (uint32_t desired_sample_rate)
+{
+	if (_engine.current_backend() == 0) {
+		/* backend is unknown ... */
+		boost::optional<int> r = AudioEngineSetupRequired (desired_sample_rate);
+		if (r.get_value_or (-1) != 0) {
+			return -1;
+		}
+	} else if (_engine.setup_required()) {
+		/* backend is known, but setup is needed */
+		boost::optional<int> r = AudioEngineSetupRequired (desired_sample_rate);
+		if (r.get_value_or (-1) != 0) {
+			return -1;
+		}
+	} else if (!_engine.running()) {
+		if (_engine.start()) {
+			return -1;
+		}
+	}
+
+	/* at this point the engine should be running
+	*/
+
+	if (!_engine.running()) {
+		return -1;
+	}
+
+	return immediately_post_engine ();
+
+}
+
+int
+Session::immediately_post_engine ()
+{
+	/* Do various initializations that should take place directly after we
+	 * know that the engine is running, but before we either create a
+	 * session or set state for an existing one.
+	 */
+	 
+	if (how_many_dsp_threads () > 1) {
+		/* For now, only create the graph if we are using >1 DSP threads, as
+		   it is a bit slower than the old code with 1 thread.
+		*/
+		_process_graph.reset (new Graph (*this));
+	}
+
+	/* every time we reconnect, recompute worst case output latencies */
+
+	_engine.Running.connect_same_thread (*this, boost::bind (&Session::initialize_latencies, this));
+
+	if (synced_to_engine()) {
+		_engine.transport_stop ();
+	}
+
+	if (config.get_jack_time_master()) {
+		_engine.transport_locate (_transport_frame);
+	}
+
+	try {
+		BootMessage (_("Set up LTC"));
+		setup_ltc ();
+		BootMessage (_("Set up Click"));
+		setup_click ();
+		BootMessage (_("Set up standard connections"));
+		setup_bundles ();
+	}
+
+	catch (failed_constructor& err) {
+		return -1;
+	}
+
+	/* TODO, connect in different thread. (PortRegisteredOrUnregistered may be in RT context)
+	 * can we do that? */
+	 _engine.PortRegisteredOrUnregistered.connect_same_thread (*this, boost::bind (&Session::setup_bundles, this));
+
+	return 0;
 }
 
 void
@@ -253,6 +493,7 @@ Session::destroy ()
 	/* clear state tree so that no references to objects are held any more */
 
 	delete state_tree;
+	state_tree = 0;
 
 	/* reset dynamic state version back to default */
 
@@ -262,8 +503,12 @@ Session::destroy ()
 	delete _butler;
 	_butler = 0;
 	
-	delete midi_control_ui;
 	delete _all_route_group;
+
+	DEBUG_TRACE (DEBUG::Destruction, "delete route groups\n");
+	for (list<RouteGroup *>::iterator i = _route_groups.begin(); i != _route_groups.end(); ++i) {
+		delete *i;
+	}
 
 	if (click_data != default_click) {
 		delete [] click_data;
@@ -274,6 +519,14 @@ Session::destroy ()
 	}
 
 	clear_clicks ();
+
+	/* need to remove auditioner before monitoring section
+	 * otherwise it is re-connected */
+	auditioner.reset ();
+
+	/* drop references to routes held by the monitoring section
+	 * specifically _monitor_out aux/listen references */
+	remove_monitor_section();
 
 	/* clear out any pending dead wood from RCU managed objects */
 
@@ -294,7 +547,6 @@ Session::destroy ()
 
 	/* reset these three references to special routes before we do the usual route delete thing */
 
-	auditioner.reset ();
 	_master_out.reset ();
 	_monitor_out.reset ();
 
@@ -312,25 +564,34 @@ Session::destroy ()
 	}
 	routes.flush ();
 
-	DEBUG_TRACE (DEBUG::Destruction, "delete sources\n");
-	for (SourceMap::iterator i = sources.begin(); i != sources.end(); ++i) {
-		DEBUG_TRACE(DEBUG::Destruction, string_compose ("Dropping for source %1 ; pre-ref = %2\n", i->second->name(), i->second.use_count()));
-		i->second->drop_references ();
-	}
+	{
+		DEBUG_TRACE (DEBUG::Destruction, "delete sources\n");
+		Glib::Threads::Mutex::Lock lm (source_lock);
+		for (SourceMap::iterator i = sources.begin(); i != sources.end(); ++i) {
+			DEBUG_TRACE(DEBUG::Destruction, string_compose ("Dropping for source %1 ; pre-ref = %2\n", i->second->name(), i->second.use_count()));
+			i->second->drop_references ();
+		}
 
-	sources.clear ();
-
-	DEBUG_TRACE (DEBUG::Destruction, "delete route groups\n");
-	for (list<RouteGroup *>::iterator i = _route_groups.begin(); i != _route_groups.end(); ++i) {
-
-		delete *i;
+		sources.clear ();
 	}
 
 	/* not strictly necessary, but doing it here allows the shared_ptr debugging to work */
 	playlists.reset ();
 
-	delete _locations;
+	emit_thread_terminate ();
 
+	pthread_cond_destroy (&_rt_emit_cond);
+	pthread_mutex_destroy (&_rt_emit_mutex);
+
+	delete _scene_changer; _scene_changer = 0;
+	delete midi_control_ui; midi_control_ui = 0;
+
+	delete _mmc; _mmc = 0;
+	delete _midi_ports; _midi_ports = 0;
+	delete _locations; _locations = 0;
+
+	delete _tempo_map;
+	
 	DEBUG_TRACE (DEBUG::Destruction, "Session::destroy() done\n");
 
 #ifdef BOOST_SP_ENABLE_DEBUG_HOOKS
@@ -339,134 +600,124 @@ Session::destroy ()
 }
 
 void
-Session::when_engine_running ()
+Session::setup_ltc ()
 {
-	string first_physical_output;
-
-	BootMessage (_("Set block size and sample rate"));
-
-	set_block_size (_engine.frames_per_cycle());
-	set_frame_rate (_engine.frame_rate());
-
-	BootMessage (_("Using configuration"));
-
-	boost::function<void (std::string)> ff (boost::bind (&Session::config_changed, this, _1, false));
-	boost::function<void (std::string)> ft (boost::bind (&Session::config_changed, this, _1, true));
-
-	Config->map_parameters (ff);
-	config.map_parameters (ft);
-
-	/* every time we reconnect, recompute worst case output latencies */
-
-	_engine.Running.connect_same_thread (*this, boost::bind (&Session::initialize_latencies, this));
-
-	if (synced_to_jack()) {
-		_engine.transport_stop ();
+	XMLNode* child = 0;
+	
+	_ltc_input.reset (new IO (*this, X_("LTC In"), IO::Input));
+	_ltc_output.reset (new IO (*this, X_("LTC Out"), IO::Output));
+	
+	if (state_tree && (child = find_named_node (*state_tree->root(), X_("LTC In"))) != 0) {
+		_ltc_input->set_state (*(child->children().front()), Stateful::loading_state_version);
+	} else {
+		{
+			Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock ());
+			_ltc_input->ensure_io (ChanCount (DataType::AUDIO, 1), true, this);
+		}
+		reconnect_ltc_input ();
 	}
-
-	if (config.get_jack_time_master()) {
-		_engine.transport_locate (_transport_frame);
+	
+	if (state_tree && (child = find_named_node (*state_tree->root(), X_("LTC Out"))) != 0) {
+		_ltc_output->set_state (*(child->children().front()), Stateful::loading_state_version);
+	} else {
+		{
+			Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock ());
+			_ltc_output->ensure_io (ChanCount (DataType::AUDIO, 1), true, this);
+		}
+		reconnect_ltc_output ();
 	}
+	
+	/* fix up names of LTC ports because we don't want the normal
+	 * IO style of NAME/TYPE-{in,out}N
+	 */
+	
+	_ltc_input->nth (0)->set_name (X_("LTC-in"));
+	_ltc_output->nth (0)->set_name (X_("LTC-out"));
+}
 
+void
+Session::setup_click ()
+{
 	_clicking = false;
+	_click_io.reset (new ClickIO (*this, X_("Click")));
+	_click_gain.reset (new Amp (*this));
+	_click_gain->activate ();
+	if (state_tree) {
+		setup_click_state (state_tree->root());
+	} else {
+		setup_click_state (0);
+	}
+}
 
-	try {
-		XMLNode* child = 0;
+void
+Session::setup_click_state (const XMLNode* node)
+{	
+	const XMLNode* child = 0;
+	
+	if (node && (child = find_named_node (*node, "Click")) != 0) {
 		
-		_ltc_input.reset (new IO (*this, _("LTC In"), IO::Input));
-		_ltc_output.reset (new IO (*this, _("LTC Out"), IO::Output));
+		/* existing state for Click */
+		int c = 0;
 
-		if (state_tree && (child = find_named_node (*state_tree->root(), "LTC-In")) != 0) {
-			_ltc_input->set_state (*(child->children().front()), Stateful::loading_state_version);
+		if (Stateful::loading_state_version < 3000) {
+			c = _click_io->set_state_2X (*child->children().front(), Stateful::loading_state_version, false);
 		} else {
-			{
-				Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock ());
-				_ltc_input->ensure_io (ChanCount (DataType::AUDIO, 1), true, this);
-			}
-			reconnect_ltc_input ();
-		}
-
-		if (state_tree && (child = find_named_node (*state_tree->root(), "LTC-Out")) != 0) {
-			_ltc_output->set_state (*(child->children().front()), Stateful::loading_state_version);
-		} else {
-			{
-				Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock ());
-				_ltc_output->ensure_io (ChanCount (DataType::AUDIO, 1), true, this);
-			}
-			reconnect_ltc_output ();
-		}
-						
-		/* fix up names of LTC ports because we don't want the normal
-		 * IO style of NAME/TYPE-{in,out}N
-		 */
-		
-		_ltc_input->nth (0)->set_name (_("LTC-in"));
-		_ltc_output->nth (0)->set_name (_("LTC-out"));
-
-		_click_io.reset (new ClickIO (*this, "click"));
-		_click_gain.reset (new Amp (*this));
-		_click_gain->activate ();
-
-		if (state_tree && (child = find_named_node (*state_tree->root(), "Click")) != 0) {
-
-			/* existing state for Click */
-			int c = 0;
-
-			if (Stateful::loading_state_version < 3000) {
-				c = _click_io->set_state_2X (*child->children().front(), Stateful::loading_state_version, false);
-			} else {
-				const XMLNodeList& children (child->children());
-				XMLNodeList::const_iterator i = children.begin();
-				if ((c = _click_io->set_state (**i, Stateful::loading_state_version)) == 0) {
-					++i;
-					if (i != children.end()) {
-						c = _click_gain->set_state (**i, Stateful::loading_state_version);
-					}
+			const XMLNodeList& children (child->children());
+			XMLNodeList::const_iterator i = children.begin();
+			if ((c = _click_io->set_state (**i, Stateful::loading_state_version)) == 0) {
+				++i;
+				if (i != children.end()) {
+					c = _click_gain->set_state (**i, Stateful::loading_state_version);
 				}
 			}
+		}
 			
-			if (c == 0) {
-				_clicking = Config->get_clicking ();
-
-			} else {
-
-				error << _("could not setup Click I/O") << endmsg;
-				_clicking = false;
-			}
-
+		if (c == 0) {
+			_clicking = Config->get_clicking ();
 
 		} else {
 
-			/* default state for Click: dual-mono to first 2 physical outputs */
+			error << _("could not setup Click I/O") << endmsg;
+			_clicking = false;
+		}
 
-			vector<string> outs;
-			_engine.get_physical_outputs (DataType::AUDIO, outs);
 
-			for (uint32_t physport = 0; physport < 2; ++physport) {
-				if (outs.size() > physport) {
-					if (_click_io->add_port (outs[physport], this)) {
-						// relax, even though its an error
-					}
+	} else {
+
+		/* default state for Click: dual-mono to first 2 physical outputs */
+
+		vector<string> outs;
+		_engine.get_physical_outputs (DataType::AUDIO, outs);
+
+		for (uint32_t physport = 0; physport < 2; ++physport) {
+			if (outs.size() > physport) {
+				if (_click_io->add_port (outs[physport], this)) {
+					// relax, even though its an error
 				}
 			}
+		}
 
-			if (_click_io->n_ports () > ChanCount::ZERO) {
-				_clicking = Config->get_clicking ();
-			}
+		if (_click_io->n_ports () > ChanCount::ZERO) {
+			_clicking = Config->get_clicking ();
 		}
 	}
+}
 
-	catch (failed_constructor& err) {
-		error << _("cannot setup Click I/O") << endmsg;
+void
+Session::setup_bundles ()
+{
+
+	{
+		RCUWriter<BundleList> writer (_bundles);
+		boost::shared_ptr<BundleList> b = writer.get_copy ();
+		for (BundleList::iterator i = b->begin(); i != b->end();) {
+			if (boost::dynamic_pointer_cast<UserBundle>(*i)) {
+				++i;
+				continue;
+			}
+			i = b->erase(i);
+		}
 	}
-
-	BootMessage (_("Compute I/O Latencies"));
-
-	if (_clicking) {
-		// XXX HOW TO ALERT UI TO THIS ? DO WE NEED TO?
-	}
-
-	BootMessage (_("Set up standard connections"));
 
 	vector<string> inputs[DataType::num_types];
 	vector<string> outputs[DataType::num_types];
@@ -487,13 +738,18 @@ Session::when_engine_running ()
 
 	for (uint32_t np = 0; np < outputs[DataType::AUDIO].size(); ++np) {
 		char buf[32];
-		snprintf (buf, sizeof (buf), _("out %" PRIu32), np+1);
+		std::string pn = _engine.get_pretty_name_by_name (outputs[DataType::AUDIO][np]);
+		if (!pn.empty()) {
+			snprintf (buf, sizeof (buf), _("out %s"), pn.substr(0,12).c_str());
+		} else {
+			snprintf (buf, sizeof (buf), _("out %" PRIu32), np+1);
+		}
 
 		boost::shared_ptr<Bundle> c (new Bundle (buf, true));
 		c->add_channel (_("mono"), DataType::AUDIO);
 		c->set_port (0, outputs[DataType::AUDIO][np]);
 
-		add_bundle (c);
+		add_bundle (c, false);
 	}
 
 	/* stereo output bundles */
@@ -508,7 +764,7 @@ Session::when_engine_running ()
 			c->add_channel (_("R"), DataType::AUDIO);
 			c->set_port (1, outputs[DataType::AUDIO][np + 1]);
 
-			add_bundle (c);
+			add_bundle (c, false);
 		}
 	}
 
@@ -516,13 +772,18 @@ Session::when_engine_running ()
 
 	for (uint32_t np = 0; np < inputs[DataType::AUDIO].size(); ++np) {
 		char buf[32];
-		snprintf (buf, sizeof (buf), _("in %" PRIu32), np+1);
+		std::string pn = _engine.get_pretty_name_by_name (inputs[DataType::AUDIO][np]);
+		if (!pn.empty()) {
+			snprintf (buf, sizeof (buf), _("in %s"), pn.substr(0,12).c_str());
+		} else {
+			snprintf (buf, sizeof (buf), _("in %" PRIu32), np+1);
+		}
 
 		boost::shared_ptr<Bundle> c (new Bundle (buf, false));
 		c->add_channel (_("mono"), DataType::AUDIO);
 		c->set_port (0, inputs[DataType::AUDIO][np]);
 
-		add_bundle (c);
+		add_bundle (c, false);
 	}
 
 	/* stereo input bundles */
@@ -538,7 +799,7 @@ Session::when_engine_running ()
 			c->add_channel (_("R"), DataType::AUDIO);
 			c->set_port (1, inputs[DataType::AUDIO][np + 1]);
 
-			add_bundle (c);
+			add_bundle (c, false);
 		}
 	}
 
@@ -546,73 +807,36 @@ Session::when_engine_running ()
 
 	for (uint32_t np = 0; np < inputs[DataType::MIDI].size(); ++np) {
 		string n = inputs[DataType::MIDI][np];
-		boost::erase_first (n, X_("alsa_pcm:"));
-
+		std::string pn = _engine.get_pretty_name_by_name (n);
+		if (!pn.empty()) {
+			n = pn;
+		} else {
+			boost::erase_first (n, X_("alsa_pcm:"));
+		}
 		boost::shared_ptr<Bundle> c (new Bundle (n, false));
 		c->add_channel ("", DataType::MIDI);
 		c->set_port (0, inputs[DataType::MIDI][np]);
-		add_bundle (c);
+		add_bundle (c, false);
 	}
 
 	/* MIDI output bundles */
 
 	for (uint32_t np = 0; np < outputs[DataType::MIDI].size(); ++np) {
 		string n = outputs[DataType::MIDI][np];
-		boost::erase_first (n, X_("alsa_pcm:"));
-
+		std::string pn = _engine.get_pretty_name_by_name (n);
+		if (!pn.empty()) {
+			n = pn;
+		} else {
+			boost::erase_first (n, X_("alsa_pcm:"));
+		}
 		boost::shared_ptr<Bundle> c (new Bundle (n, true));
 		c->add_channel ("", DataType::MIDI);
 		c->set_port (0, outputs[DataType::MIDI][np]);
-		add_bundle (c);
+		add_bundle (c, false);
 	}
 
-	BootMessage (_("Setup signal flow and plugins"));
-
-	/* Reset all panners */
-
-	Delivery::reset_panners ();
-
-	/* this will cause the CPM to instantiate any protocols that are in use
-	 * (or mandatory), which will pass it this Session, and then call
-	 * set_state() on each instantiated protocol to match stored state.
-	 */
-
-	ControlProtocolManager::instance().set_session (this);
-
-	/* This must be done after the ControlProtocolManager set_session above,
-	   as it will set states for ports which the ControlProtocolManager creates.
-	*/
-
-	MIDI::Manager::instance()->set_port_states (Config->midi_port_states ());
-
-	/* And this must be done after the MIDI::Manager::set_port_states as
-	 * it will try to make connections whose details are loaded by set_port_states.
-	 */
-
-	hookup_io ();
-
-	/* Let control protocols know that we are now all connected, so they
-	 * could start talking to surfaces if they want to.
-	 */
-
-	ControlProtocolManager::instance().midi_connectivity_established ();
-
-	if (_is_new && !no_auto_connect()) {
-		Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock());
-		auto_connect_master_bus ();
-	}
-
-	_state_of_the_state = StateOfTheState (_state_of_the_state & ~(CannotSave|Dirty));
-
-        /* update latencies */
-
-        initialize_latencies ();
-
-	/* hook us up to the engine */
-
-	BootMessage (_("Connect to engine"));
-	_engine.set_session (this);
-	_engine.reset_timebase ();
+	// we trust the backend to only calls us if there's a change
+	BundleAddedOrRemoved (); /* EMIT SIGNAL */
 }
 
 void
@@ -659,6 +883,12 @@ Session::remove_monitor_section ()
 	/* force reversion to Solo-In-Place */
 	Config->set_solo_control_is_listen_control (false);
 
+	/* if we are auditioning, cancel it ... this is a workaround
+	   to a problem (auditioning does not execute the process graph,
+	   which is needed to remove routes when using >1 core for processing)
+	*/
+	cancel_audition ();
+
 	{
 		/* Hold process lock while doing this so that we don't hear bits and
 		 * pieces of audio as we work on each route.
@@ -689,6 +919,10 @@ Session::remove_monitor_section ()
 
 	remove_route (_monitor_out);
 	auto_connect_master_bus ();
+
+	if (auditioner) {
+		auditioner->connect ();
+	}
 }
 
 void
@@ -700,7 +934,7 @@ Session::add_monitor_section ()
 		return;
 	}
 
-	boost::shared_ptr<Route> r (new Route (*this, _("monitor"), Route::MonitorOut, DataType::AUDIO));
+	boost::shared_ptr<Route> r (new Route (*this, _("Monitor"), Route::MonitorOut, DataType::AUDIO));
 
 	if (r->init ()) {
 		return;
@@ -774,14 +1008,14 @@ Session::add_monitor_section ()
 			
 			/* Monitor bus is audio only */
 
-			uint32_t mod = n_physical_outputs.get (DataType::AUDIO);
-			uint32_t limit = _monitor_out->n_outputs().get (DataType::AUDIO);
 			vector<string> outputs[DataType::num_types];
 
 			for (uint32_t i = 0; i < DataType::num_types; ++i) {
 				_engine.get_physical_outputs (DataType (DataType::Symbol (i)), outputs[i]);
 			}
-			
+
+			uint32_t mod = outputs[DataType::AUDIO].size();
+			uint32_t limit = _monitor_out->n_outputs().get (DataType::AUDIO);
 			
 			if (mod != 0) {
 				
@@ -833,6 +1067,125 @@ Session::add_monitor_section ()
 			(*x)->enable_monitor_send ();
 		}
 	}
+
+	if (auditioner) {
+		auditioner->connect ();
+	}
+}
+
+void
+Session::reset_monitor_section ()
+{
+	/* Process lock should be held by the caller.*/
+
+	if (!_monitor_out) {
+		return;
+	}
+
+	uint32_t limit = _master_out->n_outputs().n_audio();
+
+	/* connect the inputs to the master bus outputs. this
+	 * represents a separate data feed from the internal sends from
+	 * each route. as of jan 2011, it allows the monitor section to
+	 * conditionally ignore either the internal sends or the normal
+	 * input feed, but we should really find a better way to do
+	 * this, i think.
+	 */
+
+	_master_out->output()->disconnect (this);
+	_monitor_out->output()->disconnect (this);
+
+	_monitor_out->input()->ensure_io (_master_out->output()->n_ports(), false, this);
+	_monitor_out->output()->ensure_io (_master_out->output()->n_ports(), false, this);
+
+	for (uint32_t n = 0; n < limit; ++n) {
+		boost::shared_ptr<AudioPort> p = _monitor_out->input()->ports().nth_audio_port (n);
+		boost::shared_ptr<AudioPort> o = _master_out->output()->ports().nth_audio_port (n);
+
+		if (o) {
+			string connect_to = o->name();
+			if (_monitor_out->input()->connect (p, connect_to, this)) {
+				error << string_compose (_("cannot connect control input %1 to %2"), n, connect_to)
+				      << endmsg;
+				break;
+			}
+		}
+	}
+
+	/* connect monitor section to physical outs
+	 */
+
+	if (Config->get_auto_connect_standard_busses()) {
+
+		if (!Config->get_monitor_bus_preferred_bundle().empty()) {
+
+			boost::shared_ptr<Bundle> b = bundle_by_name (Config->get_monitor_bus_preferred_bundle());
+
+			if (b) {
+				_monitor_out->output()->connect_ports_to_bundle (b, true, this);
+			} else {
+				warning << string_compose (_("The preferred I/O for the monitor bus (%1) cannot be found"),
+							   Config->get_monitor_bus_preferred_bundle())
+					<< endmsg;
+			}
+
+		} else {
+
+			/* Monitor bus is audio only */
+
+			vector<string> outputs[DataType::num_types];
+
+			for (uint32_t i = 0; i < DataType::num_types; ++i) {
+				_engine.get_physical_outputs (DataType (DataType::Symbol (i)), outputs[i]);
+			}
+
+			uint32_t mod = outputs[DataType::AUDIO].size();
+			uint32_t limit = _monitor_out->n_outputs().get (DataType::AUDIO);
+
+			if (mod != 0) {
+
+				for (uint32_t n = 0; n < limit; ++n) {
+
+					boost::shared_ptr<Port> p = _monitor_out->output()->ports().port(DataType::AUDIO, n);
+					string connect_to;
+					if (outputs[DataType::AUDIO].size() > (n % mod)) {
+						connect_to = outputs[DataType::AUDIO][n % mod];
+					}
+
+					if (!connect_to.empty()) {
+						if (_monitor_out->output()->connect (p, connect_to, this)) {
+							error << string_compose (
+								_("cannot connect control output %1 to %2"),
+								n, connect_to)
+							      << endmsg;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/* Connect tracks to monitor section. Note that in an
+	   existing session, the internal sends will already exist, but we want the
+	   routes to notice that they connect to the control out specifically.
+	*/
+
+
+	boost::shared_ptr<RouteList> rls = routes.reader ();
+
+	PBD::Unwinder<bool> uw (ignore_route_processor_changes, true);
+
+	for (RouteList::iterator x = rls->begin(); x != rls->end(); ++x) {
+
+		if ((*x)->is_monitor()) {
+			/* relax */
+		} else if ((*x)->is_master()) {
+			/* relax */
+		} else {
+			(*x)->enable_monitor_send ();
+		}
+	}
 }
 
 void
@@ -873,7 +1226,12 @@ Session::hookup_io ()
 	/* Tell all IO objects to connect themselves together */
 
 	IO::enable_connecting ();
-	MIDI::JackMIDIPort::MakeConnections ();
+
+	/* Now tell all "floating" ports to connect to whatever
+	   they should be connected to.
+	*/
+
+	AudioEngine::instance()->reconnect_ports ();
 
 	/* Anyone who cares about input state, wake up and do something */
 
@@ -935,7 +1293,7 @@ Session::set_track_monitor_input_status (bool yn)
 		boost::shared_ptr<AudioTrack> tr = boost::dynamic_pointer_cast<AudioTrack> (*i);
 		if (tr && tr->record_enabled ()) {
 			//cerr << "switching to input = " << !auto_input << __FILE__ << __LINE__ << endl << endl;
-			tr->request_jack_monitors_input (yn);
+			tr->request_input_monitoring (yn);
 		}
 	}
 }
@@ -1017,6 +1375,7 @@ Session::auto_loop_changed (Location* location)
 	}
 
 	last_loopend = location->end();
+	set_dirty ();
 }
 
 void
@@ -1045,15 +1404,34 @@ Session::set_auto_punch_location (Location* location)
 
 	punch_connections.drop_connections ();
 
-	location->start_changed.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_start_changed, this, _1));
-	location->end_changed.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_end_changed, this, _1));
-	location->changed.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_changed, this, _1));
+	location->StartChanged.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_start_changed, this, location));
+	location->EndChanged.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_end_changed, this, location));
+	location->Changed.connect_same_thread (punch_connections, boost::bind (&Session::auto_punch_changed, this, location));
 
 	location->set_auto_punch (true, this);
 
 	auto_punch_changed (location);
 
 	auto_punch_location_changed (location);
+}
+
+void
+Session::set_session_extents (framepos_t start, framepos_t end)
+{
+	Location* existing;
+	if ((existing = _locations->session_range_location()) == 0) {
+		//if there is no existing session, we need to make a new session location  (should never happen)
+		existing = new Location (*this, 0, 0, _("session"), Location::IsSessionRange);
+	}
+	
+	if (end <= start) {
+		error << _("Session: you can't use that location for session start/end)") << endmsg;
+		return;
+	}
+
+	existing->set( start, end );
+	
+	set_dirty();
 }
 
 void
@@ -1087,9 +1465,9 @@ Session::set_auto_loop_location (Location* location)
 
 	loop_connections.drop_connections ();
 
-	location->start_changed.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, _1));
-	location->end_changed.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, _1));
-	location->changed.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, _1));
+	location->StartChanged.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, location));
+	location->EndChanged.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, location));
+	location->Changed.connect_same_thread (loop_connections, boost::bind (&Session::auto_loop_changed, this, location));
 
 	location->set_auto_loop (true, this);
 
@@ -1103,51 +1481,179 @@ Session::set_auto_loop_location (Location* location)
 }
 
 void
-Session::locations_added (Location *)
+Session::update_loop (Location*)
 {
+	set_dirty ();
+}
+
+void
+Session::update_marks (Location*)
+{
+	set_dirty ();
+}
+
+void
+Session::update_skips (Location* loc, bool consolidate)
+{
+    if (_ignore_skips_updates) {
+        return;
+    }
+    
+	Locations::LocationList skips;
+
+        if (consolidate) {
+	        PBD::Unwinder<bool> uw (_ignore_skips_updates, true);
+	        consolidate_skips (loc);
+        }
+
+	sync_locations_to_skips ();
+        
+	set_dirty ();
+}
+
+void
+Session::consolidate_skips (Location* loc)
+{
+        Locations::LocationList all_locations = _locations->list ();
+
+        for (Locations::LocationList::iterator l = all_locations.begin(); l != all_locations.end(); ) {
+
+                if (!(*l)->is_skip ()) {
+                        ++l;
+                        continue;
+                }
+
+                /* don't test against self */
+
+                if (*l == loc) {
+                        ++l;
+                        continue;
+                }
+                        
+                switch (Evoral::coverage ((*l)->start(), (*l)->end(), loc->start(), loc->end())) {
+                case Evoral::OverlapInternal:
+                case Evoral::OverlapExternal:
+                case Evoral::OverlapStart:
+                case Evoral::OverlapEnd:
+                        /* adjust new location to cover existing one */
+                        loc->set_start (min (loc->start(), (*l)->start()));
+                        loc->set_end (max (loc->end(), (*l)->end()));
+                        /* we don't need this one any more */
+                        _locations->remove (*l);
+                        /* the location has been deleted, so remove reference to it in our local list */
+                        l = all_locations.erase (l);
+                        break;
+
+                case Evoral::OverlapNone:
+                        ++l;
+                        break;
+                }
+        }
+}
+
+void
+Session::sync_locations_to_skips ()
+{
+	/* This happens asynchronously (in the audioengine thread). After the clear is done, we will call
+	 * Session::_sync_locations_to_skips() from the audioengine thread.
+	 */
+	clear_events (SessionEvent::Skip, boost::bind (&Session::_sync_locations_to_skips, this));
+}
+
+void
+Session::_sync_locations_to_skips ()
+{
+	/* called as a callback after existing Skip events have been cleared from a realtime audioengine thread */
+
+	Locations::LocationList const & locs (_locations->list());
+
+	for (Locations::LocationList::const_iterator i = locs.begin(); i != locs.end(); ++i) {
+		
+		Location* location = *i;
+		
+		if (location->is_skip() && location->is_skipping()) {
+			SessionEvent* ev = new SessionEvent (SessionEvent::Skip, SessionEvent::Add, location->start(), location->end(), 1.0);
+			queue_event (ev);
+		}
+	}
+}
+
+
+void
+Session::location_added (Location *location)
+{
+        if (location->is_auto_punch()) {
+                set_auto_punch_location (location);
+        }
+
+        if (location->is_auto_loop()) {
+                set_auto_loop_location (location);
+        }
+        
+        if (location->is_session_range()) {
+                /* no need for any signal handling or event setting with the session range,
+                   because we keep a direct reference to it and use its start/end directly.
+                */
+                _session_range_location = location;
+        }
+
+        if (location->is_skip()) {
+                /* listen for per-location signals that require us to update skip-locate events */
+
+                location->StartChanged.connect_same_thread (skip_update_connections, boost::bind (&Session::update_skips, this, location, true));
+                location->EndChanged.connect_same_thread (skip_update_connections, boost::bind (&Session::update_skips, this, location, true));
+                location->Changed.connect_same_thread (skip_update_connections, boost::bind (&Session::update_skips, this, location, true));
+                location->FlagsChanged.connect_same_thread (skip_update_connections, boost::bind (&Session::update_skips, this, location, false));
+
+                update_skips (location, true);
+        }
+
+	set_dirty ();
+}
+
+void
+Session::location_removed (Location *location)
+{
+        if (location->is_auto_loop()) {
+	        set_auto_loop_location (0);
+	        set_track_loop (false);
+        }
+        
+        if (location->is_auto_punch()) {
+                set_auto_punch_location (0);
+        }
+
+        if (location->is_session_range()) {
+                /* this is never supposed to happen */
+                error << _("programming error: session range removed!") << endl;
+        }
+
+        if (location->is_skip()) {
+                
+                update_skips (location, false);
+        }
+
 	set_dirty ();
 }
 
 void
 Session::locations_changed ()
 {
-	_locations->apply (*this, &Session::handle_locations_changed);
+        _locations->apply (*this, &Session::_locations_changed);
 }
 
 void
-Session::handle_locations_changed (Locations::LocationList& locations)
+Session::_locations_changed (const Locations::LocationList& locations)
 {
-	Locations::LocationList::iterator i;
-	Location* location;
-	bool set_loop = false;
-	bool set_punch = false;
+        /* There was some mass-change in the Locations object. 
 
-	for (i = locations.begin(); i != locations.end(); ++i) {
+           We might be re-adding a location here but it doesn't actually matter
+           for all the locations that the Session takes an interest in.
+        */
 
-		location =* i;
-
-		if (location->is_auto_punch()) {
-			set_auto_punch_location (location);
-			set_punch = true;
-		}
-		if (location->is_auto_loop()) {
-			set_auto_loop_location (location);
-			set_loop = true;
-		}
-
-		if (location->is_session_range()) {
-			_session_range_location = location;
-		}
-	}
-
-	if (!set_loop) {
-		set_auto_loop_location (0);
-	}
-	if (!set_punch) {
-		set_auto_punch_location (0);
-	}
-
-	set_dirty();
+	for (Locations::LocationList::const_iterator i = locations.begin(); i != locations.end(); ++i) {
+                location_added (*i);
+        }
 }
 
 void
@@ -1168,7 +1674,7 @@ Session::enable_record ()
 		if (g_atomic_int_compare_and_exchange (&_record_status, rs, Recording)) {
 
 			_last_record_location = _transport_frame;
-			MIDI::Manager::instance()->mmc()->send (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordStrobe));
+			send_immediate_mmc (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordStrobe));
 
 			if (Config->get_monitoring_model() == HardwareMonitoring && config.get_auto_input()) {
 				set_track_monitor_input_status (true);
@@ -1189,7 +1695,7 @@ Session::disable_record (bool rt_context, bool force)
 
 		if ((!Config->get_latched_record_enable () && !play_loop) || force) {
 			g_atomic_int_set (&_record_status, Disabled);
-			MIDI::Manager::instance()->mmc()->send (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordExit));
+			send_immediate_mmc (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordExit));
 		} else {
 			if (rs == Recording) {
 				g_atomic_int_set (&_record_status, Enabled);
@@ -1243,7 +1749,7 @@ Session::maybe_enable_record ()
 			enable_record ();
 		}
 	} else {
-		MIDI::Manager::instance()->mmc()->send (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordPause));
+		send_immediate_mmc (MIDI::MachineControlCommand (MIDI::MachineControl::cmdRecordPause));
 		RecordStateChanged (); /* EMIT SIGNAL */
 	}
 
@@ -1257,30 +1763,10 @@ Session::audible_frame () const
 	framepos_t tf;
 	framecnt_t offset;
 
-	/* the first of these two possible settings for "offset"
-	   mean that the audible frame is stationary until
-	   audio emerges from the latency compensation
-	   "pseudo-pipeline".
-
-	   the second means that the audible frame is stationary
-	   until audio would emerge from a physical port
-	   in the absence of any plugin latency compensation
-	*/
-
 	offset = worst_playback_latency ();
 
-	if (offset > current_block_size) {
-		offset -= current_block_size;
-	} else {
-		/* XXX is this correct? if we have no external
-		   physical connections and everything is internal
-		   then surely this is zero? still, how
-		   likely is that anyway?
-		*/
-		offset = current_block_size;
-	}
-
-	if (synced_to_jack()) {
+	if (synced_to_engine()) {
+		/* Note: this is basically just sync-to-JACK */
 		tf = _engine.transport_frame();
 	} else {
 		tf = _transport_frame;
@@ -1340,6 +1826,7 @@ Session::set_frame_rate (framecnt_t frames_per_second)
 	*/
 
 	_base_frame_rate = frames_per_second;
+	_nominal_frame_rate = frames_per_second;
 
 	sync_time_vars();
 
@@ -1548,7 +2035,7 @@ Session::resort_routes_using (boost::shared_ptr<RouteList> r)
 		DEBUG_TRACE (DEBUG::Graph, "Routes resorted, order follows:\n");
 		for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
 			DEBUG_TRACE (DEBUG::Graph, string_compose ("\t%1 signal order %2\n",
-								   (*i)->name(), (*i)->order_key (MixerSort)));
+								   (*i)->name(), (*i)->order_key ()));
 		}
 #endif
 
@@ -1703,6 +2190,7 @@ Session::new_midi_track (const ChanCount& input, const ChanCount& output, boost:
 
   failed:
 	if (!new_routes.empty()) {
+		StateProtector sp (this);
 		add_routes (new_routes, true, true, true);
 
 		if (instrument) {
@@ -1833,9 +2321,9 @@ Session::auto_connect_route (boost::shared_ptr<Route> route, ChanCount& existing
 			for (uint32_t i = output_start.get(*t); i < route->n_outputs().get(*t); ++i) {
 				string port;
 
-				if ((*t) == DataType::MIDI || Config->get_output_auto_connect() & AutoConnectPhysical) {
+				if ((*t) == DataType::MIDI && (Config->get_output_auto_connect() & AutoConnectPhysical)) {
 					port = physoutputs[(out_offset.get(*t) + i) % nphysical_out];
-				} else if ((*t) == DataType::AUDIO && Config->get_output_auto_connect() & AutoConnectMaster) {
+				} else if ((*t) == DataType::AUDIO && (Config->get_output_auto_connect() & AutoConnectMaster)) {
                                         /* master bus is audio only */
 					if (_master_out && _master_out->n_inputs().get(*t) > 0) {
 						port = _master_out->input()->ports().port(*t,
@@ -1857,6 +2345,14 @@ Session::auto_connect_route (boost::shared_ptr<Route> route, ChanCount& existing
 		}
 	}
 }
+
+void
+Session::reconnect_existing_routes (bool withLock, bool reconnect_master, bool reconnect_inputs, bool reconnect_outputs)
+{
+        /* TRX does stuff here, ardour does not (but probably should). This is called after an engine reset (in particular).
+         */
+}
+
 
 /** Caller must not hold process lock
  *  @param name_template string to use for the start of the name, or "" to use "Audio".
@@ -1944,6 +2440,7 @@ Session::new_audio_track (int input_channels, int output_channels, TrackMode mod
 
   failed:
 	if (!new_routes.empty()) {
+		StateProtector sp (this);
 		add_routes (new_routes, true, true, true);
 	}
 
@@ -2029,6 +2526,7 @@ Session::new_audio_route (int input_channels, int output_channels, RouteGroup* r
 
   failure:
 	if (!ret.empty()) {
+		StateProtector sp (this);
 		add_routes (ret, false, true, true); // autoconnect outputs only
 	}
 
@@ -2084,7 +2582,7 @@ Session::new_route_from_template (uint32_t how_many, const std::string& template
 				/* generate a new name by adding a number to the end of the template name */
 				if (!find_route_name (route_name.c_str(), ++number, name, sizeof(name), true)) {
 					fatal << _("Session: UINT_MAX routes? impossible!") << endmsg;
-					/*NOTREACHED*/
+					abort(); /*NOTREACHED*/
 				}
 			}
 
@@ -2145,6 +2643,7 @@ Session::new_route_from_template (uint32_t how_many, const std::string& template
 
   out:
 	if (!ret.empty()) {
+		StateProtector sp (this);
 		add_routes (ret, true, true, true);
 		IO::enable_connecting ();
 	}
@@ -2174,6 +2673,8 @@ Session::add_routes (RouteList& new_routes, bool input_auto_connect, bool output
 		save_state (_current_snapshot_name);
 	}
 	
+	reassign_track_numbers();
+
 	RouteAdded (new_routes); /* EMIT SIGNAL */
 }
 
@@ -2183,6 +2684,11 @@ Session::add_routes_inner (RouteList& new_routes, bool input_auto_connect, bool 
         ChanCount existing_inputs;
         ChanCount existing_outputs;
 	uint32_t order = next_control_id();
+
+	if (_order_hint > -1) {
+		order = _order_hint;
+		_order_hint = -1;
+	}
 
         count_existing_track_channels (existing_inputs, existing_outputs);
 
@@ -2245,15 +2751,13 @@ Session::add_routes_inner (RouteList& new_routes, bool input_auto_connect, bool 
 		   ID in most situations.
 		*/
 
-		if (!r->has_order_key (EditorSort)) {
+		if (!r->has_order_key ()) {
 			if (r->is_auditioner()) {
 				/* use an arbitrarily high value */
-				r->set_order_key (EditorSort, UINT_MAX);
-				r->set_order_key (MixerSort, UINT_MAX);
+				r->set_order_key (UINT_MAX);
 			} else {
 				DEBUG_TRACE (DEBUG::OrderKeys, string_compose ("while adding, set %1 to order key %2\n", r->name(), order));
-				r->set_order_key (EditorSort, order);
-				r->set_order_key (MixerSort, order);
+				r->set_order_key (order);
 				order++;
 			}
 		}
@@ -2284,7 +2788,7 @@ Session::globally_set_send_gains_to_zero (boost::shared_ptr<Route> dest)
 
 	for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
 		if ((s = (*i)->internal_send_for (dest)) != 0) {
-			s->amp()->gain_control()->set_value (0.0);
+			s->amp()->gain_control()->set_value (GAIN_COEFF_ZERO);
 		}
 	}
 }
@@ -2297,7 +2801,7 @@ Session::globally_set_send_gains_to_unity (boost::shared_ptr<Route> dest)
 
 	for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
 		if ((s = (*i)->internal_send_for (dest)) != 0) {
-			s->amp()->gain_control()->set_value (1.0);
+			s->amp()->gain_control()->set_value (GAIN_COEFF_UNITY);
 		}
 	}
 }
@@ -2412,6 +2916,13 @@ Session::remove_route (boost::shared_ptr<Route> route)
 		}
 	}
 
+	/* if the monitoring section had a pointer to this route, remove it */
+	if (_monitor_out && !route->is_master() && !route->is_monitor()) {
+		Glib::Threads::Mutex::Lock lm (AudioEngine::instance()->process_lock ());
+		PBD::Unwinder<bool> uw (ignore_route_processor_changes, true);
+		route->remove_aux_or_listen (_monitor_out);
+	}
+
 	boost::shared_ptr<MidiTrack> mt = boost::dynamic_pointer_cast<MidiTrack> (route);
 	if (mt && mt->step_editing()) {
 		if (_step_editors > 0) {
@@ -2448,6 +2959,7 @@ Session::remove_route (boost::shared_ptr<Route> route)
 	if (save_state (_current_snapshot_name)) {
 		save_history (_current_snapshot_name);
 	}
+	reassign_track_numbers();
 }
 
 void
@@ -2641,6 +3153,7 @@ Session::route_solo_changed (bool self_solo_change, void* /*src*/, boost::weak_p
 
 	for (RouteList::iterator i = uninvolved.begin(); i != uninvolved.end(); ++i) {
 		DEBUG_TRACE (DEBUG::Solo, string_compose ("mute change for %1, which neither feeds or is fed by %2\n", (*i)->name(), route->name()));
+		(*i)->act_on_mute ();
 		(*i)->mute_changed (this);
 	}
 
@@ -2862,6 +3375,42 @@ Session::route_by_remote_id (uint32_t id)
 	}
 
 	return boost::shared_ptr<Route> ((Route*) 0);
+}
+
+
+void
+Session::reassign_track_numbers ()
+{
+	int64_t tn = 0;
+	int64_t bn = 0;
+	RouteList r (*(routes.reader ()));
+	SignalOrderRouteSorter sorter;
+	r.sort (sorter);
+
+	StateProtector sp (this);
+
+	for (RouteList::iterator i = r.begin(); i != r.end(); ++i) {
+		if (boost::dynamic_pointer_cast<Track> (*i)) {
+			(*i)->set_track_number(++tn);
+		}
+		else if (!(*i)->is_master() && !(*i)->is_monitor() && !(*i)->is_auditioner()) {
+			(*i)->set_track_number(--bn);
+		}
+	}
+	const uint32_t decimals = ceilf (log10f (tn + 1));
+	const bool decimals_changed = _track_number_decimals != decimals;
+	_track_number_decimals = decimals;
+
+	if (decimals_changed && config.get_track_name_number ()) {
+		for (RouteList::iterator i = r.begin(); i != r.end(); ++i) {
+			boost::shared_ptr<Track> t = boost::dynamic_pointer_cast<Track> (*i);
+			if (t) {
+				t->resync_track_name();
+			}
+		}
+		// trigger GUI re-layout
+		config.ParameterChanged("track-name-number");
+	}
 }
 
 void
@@ -3107,7 +3656,7 @@ Session::remove_source (boost::weak_ptr<Source> src)
 		}
 	}
 
-	if (!(_state_of_the_state & InCleanup)) {
+	if (!(_state_of_the_state & StateOfTheState (InCleanup|Loading))) {
 
 		/* save state so we don't end up with a session file
 		   referring to non-existent sources.
@@ -3131,12 +3680,16 @@ Session::source_by_id (const PBD::ID& id)
 	return source;
 }
 
-boost::shared_ptr<Source>
-Session::source_by_path_and_channel (const string& path, uint16_t chn)
+boost::shared_ptr<AudioFileSource>
+Session::audio_source_by_path_and_channel (const string& path, uint16_t chn) const
 {
+	/* Restricted to audio files because only audio sources have channel
+	   as a property.
+	*/
+
 	Glib::Threads::Mutex::Lock lm (source_lock);
 
-	for (SourceMap::iterator i = sources.begin(); i != sources.end(); ++i) {
+	for (SourceMap::const_iterator i = sources.begin(); i != sources.end(); ++i) {
 		boost::shared_ptr<AudioFileSource> afs
 			= boost::dynamic_pointer_cast<AudioFileSource>(i->second);
 
@@ -3144,7 +3697,31 @@ Session::source_by_path_and_channel (const string& path, uint16_t chn)
 			return afs;
 		}
 	}
-	return boost::shared_ptr<Source>();
+
+	return boost::shared_ptr<AudioFileSource>();
+}
+
+boost::shared_ptr<MidiSource>
+Session::midi_source_by_path (const std::string& path) const
+{
+	/* Restricted to MIDI files because audio sources require a channel
+	   for unique identification, in addition to a path.
+	*/
+
+	Glib::Threads::Mutex::Lock lm (source_lock);
+
+	for (SourceMap::const_iterator s = sources.begin(); s != sources.end(); ++s) {
+		boost::shared_ptr<MidiSource> ms
+			= boost::dynamic_pointer_cast<MidiSource>(s->second);
+		boost::shared_ptr<FileSource> fs
+			= boost::dynamic_pointer_cast<FileSource>(s->second);
+		
+		if (ms && fs && fs->path() == path) {
+			return ms;
+		}
+	}
+
+	return boost::shared_ptr<MidiSource>();
 }
 
 uint32_t
@@ -3165,219 +3742,190 @@ Session::count_sources_by_origin (const string& path)
 	return cnt;
 }
 
-
-string
-Session::change_source_path_by_name (string path, string oldname, string newname, bool destructive)
-{
-	string look_for;
-	string old_basename = PBD::basename_nosuffix (oldname);
-	string new_legalized = legalize_for_path (newname);
-
-	/* note: we know (or assume) the old path is already valid */
-
-	if (destructive) {
-
-		/* destructive file sources have a name of the form:
-
-		    /path/to/Tnnnn-NAME(%[LR])?.wav
-
-		    the task here is to replace NAME with the new name.
-		*/
-
-		string dir;
-		string prefix;
-		string::size_type dash;
-
-		dir = Glib::path_get_dirname (path);
-		path = Glib::path_get_basename (path);
-
-		/* '-' is not a legal character for the NAME part of the path */
-
-		if ((dash = path.find_last_of ('-')) == string::npos) {
-			return "";
-		}
-
-		prefix = path.substr (0, dash);
-
-		path += prefix;
-		path += '-';
-		path += new_legalized;
-		path += native_header_format_extension (config.get_native_file_header_format(), DataType::AUDIO);
-		path = Glib::build_filename (dir, path);
-
-	} else {
-
-		/* non-destructive file sources have a name of the form:
-
-		    /path/to/NAME-nnnnn(%[LR])?.ext
-
-		    the task here is to replace NAME with the new name.
-		*/
-
-		string dir;
-		string suffix;
-		string::size_type dash;
-		string::size_type postfix;
-
-		dir = Glib::path_get_dirname (path);
-		path = Glib::path_get_basename (path);
-
-		/* '-' is not a legal character for the NAME part of the path */
-
-		if ((dash = path.find_last_of ('-')) == string::npos) {
-			return "";
-		}
-
-		suffix = path.substr (dash+1);
-
-		// Suffix is now everything after the dash. Now we need to eliminate
-		// the nnnnn part, which is done by either finding a '%' or a '.'
-
-		postfix = suffix.find_last_of ("%");
-		if (postfix == string::npos) {
-			postfix = suffix.find_last_of ('.');
-		}
-
-		if (postfix != string::npos) {
-			suffix = suffix.substr (postfix);
-		} else {
-			error << "Logic error in Session::change_source_path_by_name(), please report" << endl;
-			return "";
-		}
-
-		const uint32_t limit = 10000;
-		char buf[PATH_MAX+1];
-
-		for (uint32_t cnt = 1; cnt <= limit; ++cnt) {
-
-			snprintf (buf, sizeof(buf), "%s-%u%s", newname.c_str(), cnt, suffix.c_str());
-
-			if (!matching_unsuffixed_filename_exists_in (dir, buf)) {
-				path = Glib::build_filename (dir, buf);
-				break;
-			}
-
-			path = "";
-		}
-
-		if (path.empty()) {
-			fatal << string_compose (_("FATAL ERROR! Could not find a suitable version of %1 for a rename"),
-			                         newname) << endl;
-			/*NOTREACHED*/
-		}
-	}
-
-	return path;
-}
-
-/** Return the full path (in some session directory) for a new within-session source.
- * \a name must be a session-unique name that does not contain slashes
- *         (e.g. as returned by new_*_source_name)
- */
-string
-Session::new_source_path_from_name (DataType type, const string& name)
-{
-	assert(name.find("/") == string::npos);
-
-	SessionDirectory sdir(get_best_session_directory_for_new_source());
-
-	std::string p;
-	if (type == DataType::AUDIO) {
-		p = sdir.sound_path();
-	} else if (type == DataType::MIDI) {
-		p = sdir.midi_path();
-	} else {
-		error << "Unknown source type, unable to create file path" << endmsg;
-		return "";
-	}
-
-	return Glib::build_filename (p, name);
-}
-
 string
 Session::peak_path (string base) const
 {
 	return Glib::build_filename (_session_dir->peak_path(), base + peakfile_suffix);
 }
 
+string
+Session::new_audio_source_path_for_embedded (const std::string& path)
+{
+	/* embedded source: 
+	 *
+	 * we know that the filename is already unique because it exists
+	 * out in the filesystem. 
+	 *
+	 * However, when we bring it into the session, we could get a
+	 * collision.
+	 *
+	 * Eg. two embedded files:
+	 * 
+	 *          /foo/bar/baz.wav
+	 *          /frob/nic/baz.wav
+	 *
+	 * When merged into session, these collide. 
+	 *
+	 * There will not be a conflict with in-memory sources
+	 * because when the source was created we already picked
+	 * a unique name for it.
+	 *
+	 * This collision is not likely to be common, but we have to guard
+	 * against it.  So, if there is a collision, take the md5 hash of the
+	 * the path, and use that as the filename instead.
+	 */
+
+	SessionDirectory sdir (get_best_session_directory_for_new_audio());
+	string base = Glib::path_get_basename (path);
+	string newpath = Glib::build_filename (sdir.sound_path(), base);
+	
+	if (Glib::file_test (newpath, Glib::FILE_TEST_EXISTS)) {
+
+		MD5 md5;
+
+		md5.digestString (path.c_str());
+		md5.writeToString ();
+		base = md5.digestChars;
+		
+		string ext = get_suffix (path);
+
+		if (!ext.empty()) {
+			base += '.';
+			base += ext;
+		}
+		
+		newpath = Glib::build_filename (sdir.sound_path(), base);
+
+		/* if this collides, we're screwed */
+
+		if (Glib::file_test (newpath, Glib::FILE_TEST_EXISTS)) {
+			error << string_compose (_("Merging embedded file %1: name collision AND md5 hash collision!"), path) << endmsg;
+			return string();
+		}
+
+	}
+
+	return newpath;
+}
+
+/** Return true if there are no audio file sources that use @param name as 
+ * the filename component of their path. 
+ *
+ * Return false otherwise.
+ *
+ * This method MUST ONLY be used to check in-session, mono files since it 
+ * hard-codes the channel of the audio file source we are looking for as zero.
+ * 
+ * If/when Ardour supports native files in non-mono formats, the logic here
+ * will need to be revisited.
+ */
+bool
+Session::audio_source_name_is_unique (const string& name)
+{
+	std::vector<string> sdirs = source_search_path (DataType::AUDIO);
+	vector<space_and_path>::iterator i;
+	uint32_t existing = 0;
+
+	for (vector<string>::const_iterator i = sdirs.begin(); i != sdirs.end(); ++i) {
+		
+		/* note that we search *without* the extension so that
+		   we don't end up both "Audio 1-1.wav" and "Audio 1-1.caf"
+		   in the event that this new name is required for
+		   a file format change.
+		*/
+
+		const string spath = *i;
+		
+		if (matching_unsuffixed_filename_exists_in (spath, name)) {
+			existing++;
+			break;
+		}
+		
+		/* it is possible that we have the path already
+		 * assigned to a source that has not yet been written
+		 * (ie. the write source for a diskstream). we have to
+		 * check this in order to make sure that our candidate
+		 * path isn't used again, because that can lead to
+		 * two Sources point to the same file with different
+		 * notions of their removability.
+		 */
+		
+		
+		string possible_path = Glib::build_filename (spath, name);
+
+		if (audio_source_by_path_and_channel (possible_path, 0)) {
+			existing++;
+			break;
+		}
+	}
+
+	return (existing == 0);
+}
+
+string
+Session::format_audio_source_name (const string& legalized_base, uint32_t nchan, uint32_t chan, bool destructive, bool take_required, uint32_t cnt, bool related_exists)
+{
+	ostringstream sstr;
+	const string ext = native_header_format_extension (config.get_native_file_header_format(), DataType::AUDIO);
+	
+	if (destructive) {
+		sstr << 'T';
+		sstr << setfill ('0') << setw (4) << cnt;
+		sstr << legalized_base;
+	} else {
+		sstr << legalized_base;
+		
+		if (take_required || related_exists) {
+			sstr << '-';
+			sstr << cnt;
+		}
+	}
+	
+	if (nchan == 2) {
+		if (chan == 0) {
+			sstr << "%L";
+		} else {
+			sstr << "%R";
+		}
+	} else if (nchan > 2) {
+		if (nchan < 26) {
+			sstr << '%';
+			sstr << 'a' + chan;
+		} else {
+			/* XXX what? more than 26 channels! */
+			sstr << '%';
+			sstr << chan+1;
+		}
+	}
+	
+	sstr << ext;
+
+	return sstr.str();
+}
+
 /** Return a unique name based on \a base for a new internal audio source */
 string
-Session::new_audio_source_name (const string& base, uint32_t nchan, uint32_t chan, bool destructive)
+Session::new_audio_source_path (const string& base, uint32_t nchan, uint32_t chan, bool destructive, bool take_required)
 {
 	uint32_t cnt;
-	char buf[PATH_MAX+1];
-	const uint32_t limit = 10000;
+	string possible_name;
+	const uint32_t limit = 9999; // arbitrary limit on number of files with the same basic name
 	string legalized;
-	string ext = native_header_format_extension (config.get_native_file_header_format(), DataType::AUDIO);
+	bool some_related_source_name_exists = false;
 
-	buf[0] = '\0';
 	legalized = legalize_for_path (base);
 
 	// Find a "version" of the base name that doesn't exist in any of the possible directories.
+
 	for (cnt = (destructive ? ++destructive_index : 1); cnt <= limit; ++cnt) {
 
-		vector<space_and_path>::iterator i;
-		uint32_t existing = 0;
-
-		for (i = session_dirs.begin(); i != session_dirs.end(); ++i) {
-
-			if (destructive) {
-
-				if (nchan < 2) {
-					snprintf (buf, sizeof(buf), "T%04d-%s%s",
-					          cnt, legalized.c_str(), ext.c_str());
-				} else if (nchan == 2) {
-					if (chan == 0) {
-						snprintf (buf, sizeof(buf), "T%04d-%s%%L%s",
-						          cnt, legalized.c_str(), ext.c_str());
-					} else {
-						snprintf (buf, sizeof(buf), "T%04d-%s%%R%s",
-						          cnt, legalized.c_str(), ext.c_str());
-					}
-				} else if (nchan < 26) {
-					snprintf (buf, sizeof(buf), "T%04d-%s%%%c%s",
-					          cnt, legalized.c_str(), 'a' + chan, ext.c_str());
-				} else {
-					snprintf (buf, sizeof(buf), "T%04d-%s%s",
-					          cnt, legalized.c_str(), ext.c_str());
-				}
-
-			} else {
-
-				if (nchan < 2) {
-					snprintf (buf, sizeof(buf), "%s-%u%s", legalized.c_str(), cnt, ext.c_str());
-				} else if (nchan == 2) {
-					if (chan == 0) {
-						snprintf (buf, sizeof(buf), "%s-%u%%L%s", legalized.c_str(), cnt, ext.c_str());
-					} else {
-						snprintf (buf, sizeof(buf), "%s-%u%%R%s", legalized.c_str(), cnt, ext.c_str());
-					}
-				} else if (nchan < 26) {
-					snprintf (buf, sizeof(buf), "%s-%u%%%c%s", legalized.c_str(), cnt, 'a' + chan, ext.c_str());
-				} else {
-					snprintf (buf, sizeof(buf), "%s-%u%s", legalized.c_str(), cnt, ext.c_str());
-				}
-			}
-
-			SessionDirectory sdir((*i).path);
-
-			string spath = sdir.sound_path();
-
-			/* note that we search *without* the extension so that
-			   we don't end up both "Audio 1-1.wav" and "Audio 1-1.caf"
-			   in the event that this new name is required for
-			   a file format change.
-			*/
-
-			if (matching_unsuffixed_filename_exists_in (spath, buf)) {
-				existing++;
-				break;
-			}
-		}
-
-		if (existing == 0) {
+		possible_name = format_audio_source_name (legalized, nchan, chan, destructive, take_required, cnt, some_related_source_name_exists);
+		
+		if (audio_source_name_is_unique (possible_name)) {
 			break;
 		}
+		
+		some_related_source_name_exists = true;
 
 		if (cnt > limit) {
 			error << string_compose(
@@ -3388,47 +3936,62 @@ Session::new_audio_source_name (const string& base, uint32_t nchan, uint32_t cha
 		}
 	}
 
-	return Glib::path_get_basename (buf);
+	/* We've established that the new name does not exist in any session
+	 * directory, so now find out which one we should use for this new
+	 * audio source.
+	 */
+
+	SessionDirectory sdir (get_best_session_directory_for_new_audio());
+
+	std::string s = Glib::build_filename (sdir.sound_path(), possible_name);
+
+	return s;
 }
 
-/** Create a new within-session audio source */
-boost::shared_ptr<AudioFileSource>
-Session::create_audio_source_for_session (size_t n_chans, string const & n, uint32_t chan, bool destructive)
-{
-	const string name    = new_audio_source_name (n, n_chans, chan, destructive);
-	const string path    = new_source_path_from_name(DataType::AUDIO, name);
-
-	return boost::dynamic_pointer_cast<AudioFileSource> (
-		SourceFactory::createWritable (DataType::AUDIO, *this, path, destructive, frame_rate()));
-}
-
-/** Return a unique name based on \a base for a new internal MIDI source */
+/** Return a unique name based on `base` for a new internal MIDI source */
 string
-Session::new_midi_source_name (const string& base)
+Session::new_midi_source_path (const string& base)
 {
 	uint32_t cnt;
 	char buf[PATH_MAX+1];
 	const uint32_t limit = 10000;
 	string legalized;
+	string possible_path;
+	string possible_name;
 
 	buf[0] = '\0';
 	legalized = legalize_for_path (base);
 
 	// Find a "version" of the file name that doesn't exist in any of the possible directories.
+	std::vector<string> sdirs = source_search_path(DataType::MIDI);
+
+	/* - the main session folder is the first in the vector.
+	 * - after checking all locations for file-name uniqueness,
+	 *   we keep the one from the last iteration as new file name
+	 * - midi files are small and should just be kept in the main session-folder
+	 *
+	 * -> reverse the array, check main session folder last and use that as location
+	 *    for MIDI files.
+	 */
+	std::reverse(sdirs.begin(), sdirs.end());
+
 	for (cnt = 1; cnt <= limit; ++cnt) {
 
 		vector<space_and_path>::iterator i;
 		uint32_t existing = 0;
+		
+		for (vector<string>::const_iterator i = sdirs.begin(); i != sdirs.end(); ++i) {
 
-		for (i = session_dirs.begin(); i != session_dirs.end(); ++i) {
+			snprintf (buf, sizeof(buf), "%s-%u.mid", legalized.c_str(), cnt);
+			possible_name = buf;
 
-			SessionDirectory sdir((*i).path);
+			possible_path = Glib::build_filename (*i, possible_name);
+			
+			if (Glib::file_test (possible_path, Glib::FILE_TEST_EXISTS)) {
+				existing++;
+			}
 
-			std::string p = Glib::build_filename (sdir.midi_path(), legalized);
-
-			snprintf (buf, sizeof(buf), "%s-%u.mid", p.c_str(), cnt);
-
-			if (Glib::file_test (buf, Glib::FILE_TEST_EXISTS)) {
+			if (midi_source_by_path (possible_path)) {
 				existing++;
 			}
 		}
@@ -3442,36 +4005,83 @@ Session::new_midi_source_name (const string& base)
 					_("There are already %1 recordings for %2, which I consider too many."),
 					limit, base) << endmsg;
 			destroy ();
-			throw failed_constructor();
+			return 0;
 		}
 	}
 
-	return Glib::path_get_basename(buf);
+	/* No need to "find best location" for software/app-based RAID, because
+	   MIDI is so small that we always put it in the same place.
+	*/
+
+	return possible_path;
 }
 
 
+/** Create a new within-session audio source */
+boost::shared_ptr<AudioFileSource>
+Session::create_audio_source_for_session (size_t n_chans, string const & base, uint32_t chan, bool destructive)
+{
+	const string path = new_audio_source_path (base, n_chans, chan, destructive, true);
+
+	if (!path.empty()) {
+		return boost::dynamic_pointer_cast<AudioFileSource> (
+			SourceFactory::createWritable (DataType::AUDIO, *this, path, destructive, frame_rate()));
+	} else {
+		throw failed_constructor ();
+	}
+}
+
 /** Create a new within-session MIDI source */
 boost::shared_ptr<MidiSource>
-Session::create_midi_source_for_session (Track* track, string const & n)
+Session::create_midi_source_for_session (string const & basic_name)
 {
-	/* try to use the existing write source for the track, to keep numbering sane
-	 */
+	const string path = new_midi_source_path (basic_name);
+	
+	if (!path.empty()) {
+		return boost::dynamic_pointer_cast<SMFSource> (
+			SourceFactory::createWritable (
+				DataType::MIDI, *this, path, false, frame_rate()));
+	} else {
+		throw failed_constructor ();
+	}
+}
 
-	if (track) {
-		/*MidiTrack* mt = dynamic_cast<Track*> (track);
-		  assert (mt);
-		*/
+/** Create a new within-session MIDI source */
+boost::shared_ptr<MidiSource>
+Session::create_midi_source_by_stealing_name (boost::shared_ptr<Track> track)
+{
+	/* the caller passes in the track the source will be used in,
+	   so that we can keep the numbering sane. 
+	   
+	   Rationale: a track with the name "Foo" that has had N
+	   captures carried out so far will ALREADY have a write source
+	   named "Foo-N+1.mid" waiting to be used for the next capture.
+	   
+	   If we call new_midi_source_name() we will get "Foo-N+2". But
+	   there is no region corresponding to "Foo-N+1", so when
+	   "Foo-N+2" appears in the track, the gap presents the user
+	   with odd behaviour - why did it skip past Foo-N+1?
+	   
+	   We could explain this to the user in some odd way, but
+	   instead we rename "Foo-N+1.mid" as "Foo-N+2.mid", and then
+	   use "Foo-N+1" here.
+	   
+	   If that attempted rename fails, we get "Foo-N+2.mid" anyway.
+	*/
+	
+	boost::shared_ptr<MidiTrack> mt = boost::dynamic_pointer_cast<MidiTrack> (track);
+	assert (mt);
+	std::string name = track->steal_write_source_name ();
 
-		list<boost::shared_ptr<Source> > l = track->steal_write_sources ();
-
-		if (!l.empty()) {
-			assert (boost::dynamic_pointer_cast<MidiSource> (l.front()));
-			return boost::dynamic_pointer_cast<MidiSource> (l.front());
-		}
+	if (name.empty()) {
+		return boost::shared_ptr<MidiSource>();
 	}
 
-	const string name = new_midi_source_name (n);
-	const string path = new_source_path_from_name (DataType::MIDI, name);
+	/* MIDI files are small, just put them in the first location of the
+	   session source search path.
+	*/
+
+	const string path = Glib::build_filename (source_search_path (DataType::MIDI).front(), name);
 
 	return boost::dynamic_pointer_cast<SMFSource> (
 		SourceFactory::createWritable (
@@ -3549,6 +4159,9 @@ Session::audition_region (boost::shared_ptr<Region> r)
 void
 Session::cancel_audition ()
 {
+	if (!auditioner) {
+		return;
+	}
 	if (auditioner->auditioning()) {
 		auditioner->cancel_audition ();
 		AuditionActive (false); /* EMIT SIGNAL */
@@ -3564,7 +4177,7 @@ Session::RoutePublicOrderSorter::operator() (boost::shared_ptr<Route> a, boost::
 	if (b->is_monitor()) {
 		return false;
 	}
-	return a->order_key (MixerSort) < b->order_key (MixerSort);
+	return a->order_key () < b->order_key ();
 }
 
 bool
@@ -3642,7 +4255,7 @@ Session::available_capture_duration ()
 		fatal << string_compose (_("programming error: %1"),
 					 X_("illegal native file data format"))
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	double scale = 4096.0 / sample_bytes_on_disk;
@@ -3655,7 +4268,7 @@ Session::available_capture_duration ()
 }
 
 void
-Session::add_bundle (boost::shared_ptr<Bundle> bundle)
+Session::add_bundle (boost::shared_ptr<Bundle> bundle, bool emit_signal)
 {
 	{
 		RCUWriter<BundleList> writer (_bundles);
@@ -3663,7 +4276,9 @@ Session::add_bundle (boost::shared_ptr<Bundle> bundle)
 		b->push_back (bundle);
 	}
 
-	BundleAdded (bundle); /* EMIT SIGNAL */
+	if (emit_signal) {
+		BundleAddedOrRemoved (); /* EMIT SIGNAL */
+	}
 
 	set_dirty();
 }
@@ -3685,7 +4300,7 @@ Session::remove_bundle (boost::shared_ptr<Bundle> bundle)
 	}
 
 	if (removed) {
-		 BundleRemoved (bundle); /* EMIT SIGNAL */
+		 BundleAddedOrRemoved (); /* EMIT SIGNAL */
 	}
 
 	set_dirty();
@@ -3718,9 +4333,9 @@ Session::tempo_map_changed (const PropertyChange&)
 }
 
 void
-Session::update_locations_after_tempo_map_change (Locations::LocationList& loc)
+Session::update_locations_after_tempo_map_change (const Locations::LocationList& loc)
 {
-	for (Locations::LocationList::iterator i = loc.begin(); i != loc.end(); ++i) {
+	for (Locations::LocationList::const_iterator i = loc.begin(); i != loc.end(); ++i) {
 		(*i)->recompute_frames_from_bbt ();
 	}
 }
@@ -3731,7 +4346,7 @@ Session::update_locations_after_tempo_map_change (Locations::LocationList& loc)
 void
 Session::ensure_buffers (ChanCount howmany)
 {
-	BufferManager::ensure_buffers (howmany);
+	BufferManager::ensure_buffers (howmany, bounce_processing() ? bounce_chunk_size : 0);
 }
 
 void
@@ -3968,28 +4583,26 @@ Session::freeze_all (InterThreadInfo& itt)
 }
 
 boost::shared_ptr<Region>
-Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
+Session::write_one_track (Track& track, framepos_t start, framepos_t end,
 			  bool /*overwrite*/, vector<boost::shared_ptr<Source> >& srcs,
 			  InterThreadInfo& itt, 
 			  boost::shared_ptr<Processor> endpoint, bool include_endpoint,
-			  bool for_export)
+			  bool for_export, bool for_freeze)
 {
 	boost::shared_ptr<Region> result;
 	boost::shared_ptr<Playlist> playlist;
-	boost::shared_ptr<AudioFileSource> fsource;
-	uint32_t x;
-	char buf[PATH_MAX+1];
+	boost::shared_ptr<Source> source;
 	ChanCount diskstream_channels (track.n_channels());
 	framepos_t position;
 	framecnt_t this_chunk;
 	framepos_t to_do;
+	framepos_t latency_skip;
 	BufferSet buffers;
-	SessionDirectory sdir(get_best_session_directory_for_new_source ());
-	const string sound_dir = sdir.sound_path();
 	framepos_t len = end - start;
 	bool need_block_size_reset = false;
-	string ext;
 	ChanCount const max_proc = track.max_processor_streams ();
+	string legal_playlist_name;
+	string possible_path;
 
 	if (end <= start) {
 		error << string_compose (_("Cannot write a range where end <= start (e.g. %1 <= %2)"),
@@ -3997,11 +4610,27 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 		return result;
 	}
 
-	const framecnt_t chunk_size = (256 * 1024)/4;
+	diskstream_channels = track.bounce_get_output_streams (diskstream_channels, endpoint,
+			include_endpoint, for_export, for_freeze);
+
+	if (diskstream_channels.n(track.data_type()) < 1) {
+		error << _("Cannot write a range with no data.") << endmsg;
+		return result;
+	}
 
 	// block all process callback handling
 
 	block_processing ();
+
+	{
+		// synchronize with AudioEngine::process_callback()
+		// make sure processing is not currently running
+		// and processing_blocked() is honored before
+		// acquiring thread buffers
+		Glib::Threads::Mutex::Lock lm (_engine.process_lock());
+	}
+
+	_bounce_processing_active = true;
 
 	/* call tree *MUST* hold route_lock */
 
@@ -4009,33 +4638,29 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 		goto out;
 	}
 
-	ext = native_header_format_extension (config.get_native_file_header_format(), DataType::AUDIO);
+	legal_playlist_name = legalize_for_path (playlist->name());
 
-	for (uint32_t chan_n = 0; chan_n < diskstream_channels.n_audio(); ++chan_n) {
+	for (uint32_t chan_n = 0; chan_n < diskstream_channels.n(track.data_type()); ++chan_n) {
 
-		for (x = 0; x < 99999; ++x) {
-			snprintf (buf, sizeof(buf), "%s/%s-%d-bounce-%" PRIu32 "%s", sound_dir.c_str(), playlist->name().c_str(), chan_n, x+1, ext.c_str());
-			if (!Glib::file_test (buf, Glib::FILE_TEST_EXISTS)) {
-				break;
-			}
-		}
-
-		if (x == 99999) {
-			error << string_compose (_("too many bounced versions of playlist \"%1\""), playlist->name()) << endmsg;
+		string base_name = string_compose ("%1-%2-bounce", playlist->name(), chan_n);
+		string path = ((track.data_type() == DataType::AUDIO)
+		               ? new_audio_source_path (legal_playlist_name, diskstream_channels.n_audio(), chan_n, false, true)
+		               : new_midi_source_path (legal_playlist_name));
+		
+		if (path.empty()) {
 			goto out;
 		}
 
 		try {
-			fsource = boost::dynamic_pointer_cast<AudioFileSource> (
-				SourceFactory::createWritable (DataType::AUDIO, *this, buf, false, frame_rate()));
+			source = SourceFactory::createWritable (track.data_type(), *this, path, false, frame_rate());
 		}
 
 		catch (failed_constructor& err) {
-			error << string_compose (_("cannot create new audio file \"%1\" for %2"), buf, track.name()) << endmsg;
+			error << string_compose (_("cannot create new file \"%1\" for %2"), path, track.name()) << endmsg;
 			goto out;
 		}
 
-		srcs.push_back (fsource);
+		srcs.push_back (source);
 	}
 
 	/* tell redirects that care that we are about to use a much larger
@@ -4044,28 +4669,81 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 	 */
 
 	need_block_size_reset = true;
-	track.set_block_size (chunk_size);
+	track.set_block_size (bounce_chunk_size);
+	_engine.main_thread()->get_buffers ();
 
 	position = start;
 	to_do = len;
+	latency_skip = track.bounce_get_latency (endpoint, include_endpoint, for_export, for_freeze);
 
 	/* create a set of reasonably-sized buffers */
-	buffers.ensure_buffers (DataType::AUDIO, max_proc.n_audio(), chunk_size);
+	for (DataType::iterator t = DataType::begin(); t != DataType::end(); ++t) {
+		buffers.ensure_buffers(*t, max_proc.get(*t), bounce_chunk_size);
+	}
 	buffers.set_count (max_proc);
 
 	for (vector<boost::shared_ptr<Source> >::iterator src = srcs.begin(); src != srcs.end(); ++src) {
 		boost::shared_ptr<AudioFileSource> afs = boost::dynamic_pointer_cast<AudioFileSource>(*src);
-		if (afs)
+		boost::shared_ptr<MidiSource> ms;
+		if (afs) {
 			afs->prepare_for_peakfile_writes ();
+		} else if ((ms = boost::dynamic_pointer_cast<MidiSource>(*src))) {
+			Source::Lock lock(ms->mutex());
+			ms->mark_streaming_write_started(lock);
+		}
 	}
 
 	while (to_do && !itt.cancel) {
 
-		this_chunk = min (to_do, chunk_size);
+		this_chunk = min (to_do, bounce_chunk_size);
 
-		if (track.export_stuff (buffers, start, this_chunk, endpoint, include_endpoint, for_export)) {
+		if (track.export_stuff (buffers, start, this_chunk, endpoint, include_endpoint, for_export, for_freeze)) {
 			goto out;
 		}
+
+		start += this_chunk;
+		to_do -= this_chunk;
+		itt.progress = (float) (1.0 - ((double) to_do / len));
+
+		if (latency_skip >= bounce_chunk_size) {
+			latency_skip -= bounce_chunk_size;
+			continue;
+		}
+
+		const framecnt_t current_chunk = this_chunk - latency_skip;
+
+		uint32_t n = 0;
+		for (vector<boost::shared_ptr<Source> >::iterator src=srcs.begin(); src != srcs.end(); ++src, ++n) {
+			boost::shared_ptr<AudioFileSource> afs = boost::dynamic_pointer_cast<AudioFileSource>(*src);
+			boost::shared_ptr<MidiSource> ms;
+
+			if (afs) {
+				if (afs->write (buffers.get_audio(n).data(latency_skip), current_chunk) != current_chunk) {
+					goto out;
+				}
+			} else if ((ms = boost::dynamic_pointer_cast<MidiSource>(*src))) {
+				Source::Lock lock(ms->mutex());
+
+				const MidiBuffer& buf = buffers.get_midi(0);
+				for (MidiBuffer::const_iterator i = buf.begin(); i != buf.end(); ++i) {
+					Evoral::Event<framepos_t> ev = *i;
+					ev.set_time(ev.time() - position);
+					ms->append_event_frames(lock, ev, ms->timeline_position());
+				}
+			}
+		}
+		latency_skip = 0;
+	}
+
+	/* post-roll, pick up delayed processor output */
+	latency_skip = track.bounce_get_latency (endpoint, include_endpoint, for_export, for_freeze);
+
+	while (latency_skip && !itt.cancel) {
+		this_chunk = min (latency_skip, bounce_chunk_size);
+		latency_skip -= this_chunk;
+
+		buffers.silence (this_chunk, 0);
+		track.bounce_process (buffers, start, this_chunk, endpoint, include_endpoint, for_export, for_freeze);
 
 		uint32_t n = 0;
 		for (vector<boost::shared_ptr<Source> >::iterator src=srcs.begin(); src != srcs.end(); ++src, ++n) {
@@ -4077,12 +4755,6 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 				}
 			}
 		}
-
-		start += this_chunk;
-		to_do -= this_chunk;
-
-		itt.progress = (float) (1.0 - ((double) to_do / len));
-
 	}
 
 	if (!itt.cancel) {
@@ -4094,10 +4766,14 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 
 		for (vector<boost::shared_ptr<Source> >::iterator src=srcs.begin(); src != srcs.end(); ++src) {
 			boost::shared_ptr<AudioFileSource> afs = boost::dynamic_pointer_cast<AudioFileSource>(*src);
+			boost::shared_ptr<MidiSource> ms;
 
 			if (afs) {
 				afs->update_header (position, *xnow, now);
 				afs->flush_header ();
+			} else if ((ms = boost::dynamic_pointer_cast<MidiSource>(*src))) {
+				Source::Lock lock(ms->mutex());
+				ms->mark_streaming_write_completed(lock);
 			}
 		}
 
@@ -4116,12 +4792,7 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
   out:
 	if (!result) {
 		for (vector<boost::shared_ptr<Source> >::iterator src = srcs.begin(); src != srcs.end(); ++src) {
-			boost::shared_ptr<AudioFileSource> afs = boost::dynamic_pointer_cast<AudioFileSource>(*src);
-
-			if (afs) {
-				afs->mark_for_remove ();
-			}
-
+			(*src)->mark_for_remove ();
 			(*src)->drop_references ();
 		}
 
@@ -4134,8 +4805,10 @@ Session::write_one_track (AudioTrack& track, framepos_t start, framepos_t end,
 		}
 	}
 
+	_bounce_processing_active = false;
 
 	if (need_block_size_reset) {
+		_engine.main_thread()->drop_buffers ();
 		track.set_block_size (get_block_size());
 	}
 
@@ -4148,6 +4821,12 @@ gain_t*
 Session::gain_automation_buffer() const
 {
 	return ProcessThread::gain_automation_buffer ();
+}
+
+gain_t*
+Session::trim_automation_buffer() const
+{
+	return ProcessThread::trim_automation_buffer ();
 }
 
 gain_t*
@@ -4169,10 +4848,17 @@ Session::get_silent_buffers (ChanCount count)
 }
 
 BufferSet&
-Session::get_scratch_buffers (ChanCount count)
+Session::get_scratch_buffers (ChanCount count, bool silence)
 {
-	return ProcessThread::get_scratch_buffers (count);
+	return ProcessThread::get_scratch_buffers (count, silence);
 }
+
+BufferSet&
+Session::get_route_buffers (ChanCount count, bool silence)
+{
+	return ProcessThread::get_route_buffers (count, silence);
+}
+
 
 BufferSet&
 Session::get_mix_buffers (ChanCount count)
@@ -4289,6 +4975,22 @@ void
 Session::route_removed_from_route_group (RouteGroup* rg, boost::weak_ptr<Route> r)
 {
 	RouteRemovedFromRouteGroup (rg, r);
+}
+
+boost::shared_ptr<RouteList>
+Session::get_tracks () const
+{
+	boost::shared_ptr<RouteList> rl = routes.reader ();
+	boost::shared_ptr<RouteList> tl (new RouteList);
+
+	for (RouteList::const_iterator r = rl->begin(); r != rl->end(); ++r) {
+		if (boost::dynamic_pointer_cast<Track> (*r)) {
+			if (!(*r)->is_auditioner()) {
+				tl->push_back (*r);
+			}
+		}
+	}
+	return tl;
 }
 
 boost::shared_ptr<RouteList>
@@ -4419,18 +5121,18 @@ Session::end_time_changed (framepos_t old)
 	}
 }
 
-string
+std::vector<std::string>
 Session::source_search_path (DataType type) const
 {
-	vector<string> s;
+	Searchpath sp;
 
 	if (session_dirs.size() == 1) {
 		switch (type) {
 		case DataType::AUDIO:
-			s.push_back (_session_dir->sound_path());
+			sp.push_back (_session_dir->sound_path());
 			break;
 		case DataType::MIDI:
-			s.push_back (_session_dir->midi_path());
+			sp.push_back (_session_dir->midi_path());
 			break;
 		}
 	} else {
@@ -4438,10 +5140,10 @@ Session::source_search_path (DataType type) const
 			SessionDirectory sdir (i->path);
 			switch (type) {
 			case DataType::AUDIO:
-				s.push_back (sdir.sound_path());
+				sp.push_back (sdir.sound_path());
 				break;
 			case DataType::MIDI:
-			        s.push_back (sdir.midi_path());
+				sp.push_back (sdir.midi_path());
 				break;
 			}
 		}
@@ -4450,49 +5152,30 @@ Session::source_search_path (DataType type) const
 	if (type == DataType::AUDIO) {
 		const string sound_path_2X = _session_dir->sound_path_2X();
 		if (Glib::file_test (sound_path_2X, Glib::FILE_TEST_EXISTS|Glib::FILE_TEST_IS_DIR)) {
-			if (find (s.begin(), s.end(), sound_path_2X) == s.end()) {
-				s.push_back (sound_path_2X);
+			if (find (sp.begin(), sp.end(), sound_path_2X) == sp.end()) {
+				sp.push_back (sound_path_2X);
 			}
 		}
 	}
 
-	/* now check the explicit (possibly user-specified) search path
-	 */
-
-	vector<string> dirs;
+	// now check the explicit (possibly user-specified) search path
 
 	switch (type) {
 	case DataType::AUDIO:
-		split (config.get_audio_search_path (), dirs, ':');
+		sp += Searchpath(config.get_audio_search_path ());
 		break;
 	case DataType::MIDI:
-		split (config.get_midi_search_path (), dirs, ':');
+		sp += Searchpath(config.get_midi_search_path ());
 		break;
 	}
 
-	for (vector<string>::iterator i = dirs.begin(); i != dirs.end(); ++i) {
-		if (find (s.begin(), s.end(), *i) == s.end()) {
-			s.push_back (*i);
-		}
-	}
-	
-	string search_path;
-
-	for (vector<string>::iterator si = s.begin(); si != s.end(); ++si) {
-		if (!search_path.empty()) {
-			search_path += ':';
-		}
-		search_path += *si;
-	}
-
-	return search_path;
+	return sp;
 }
 
 void
 Session::ensure_search_path_includes (const string& path, DataType type)
 {
-	string search_path;
-	vector<string> dirs;
+	Searchpath sp;
 
 	if (path == ".") {
 		return;
@@ -4500,16 +5183,14 @@ Session::ensure_search_path_includes (const string& path, DataType type)
 
 	switch (type) {
 	case DataType::AUDIO:
-		search_path = config.get_audio_search_path ();
+		sp += Searchpath(config.get_audio_search_path ());
 		break;
 	case DataType::MIDI:
-		search_path = config.get_midi_search_path ();
+		sp += Searchpath (config.get_midi_search_path ());
 		break;
 	}
 
-	split (search_path, dirs, ':');
-
-	for (vector<string>::iterator i = dirs.begin(); i != dirs.end(); ++i) {
+	for (vector<std::string>::iterator i = sp.begin(); i != sp.end(); ++i) {
 		/* No need to add this new directory if it has the same inode as
 		   an existing one; checking inode rather than name prevents duplicated
 		   directories when we are using symlinks.
@@ -4521,20 +5202,43 @@ Session::ensure_search_path_includes (const string& path, DataType type)
 		}
 	}
 
-	if (!search_path.empty()) {
-		search_path += ':';
-	}
-
-	search_path += path;
+	sp += path;
 
 	switch (type) {
 	case DataType::AUDIO:
-		config.set_audio_search_path (search_path);
+		config.set_audio_search_path (sp.to_string());
 		break;
 	case DataType::MIDI:
-		config.set_midi_search_path (search_path);
+		config.set_midi_search_path (sp.to_string());
 		break;
 	}
+}
+
+void
+Session::remove_dir_from_search_path (const string& dir, DataType type)
+{
+	Searchpath sp;
+
+	switch (type) {
+	case DataType::AUDIO:
+		sp = Searchpath(config.get_audio_search_path ());
+		break;
+	case DataType::MIDI:
+		sp = Searchpath (config.get_midi_search_path ());
+		break;
+	}
+
+	sp -= dir;
+
+	switch (type) {
+	case DataType::AUDIO:
+		config.set_audio_search_path (sp.to_string());
+		break;
+	case DataType::MIDI:
+		config.set_midi_search_path (sp.to_string());
+		break;
+	}
+
 }
 
 boost::shared_ptr<Speakers>
@@ -4794,8 +5498,7 @@ Session::notify_remote_id_change ()
 	}
 
 	switch (Config->get_remote_model()) {
-	case MixerSort:
-	case EditorSort:
+	case MixerOrdered:
 		Route::RemoteControlIDChange (); /* EMIT SIGNAL */
 		break;
 	default:
@@ -4804,7 +5507,7 @@ Session::notify_remote_id_change ()
 }
 
 void
-Session::sync_order_keys (RouteSortOrderKey sort_key_changed)
+Session::sync_order_keys ()
 {
 	if (deletion_in_progress()) {
 		return;
@@ -4816,9 +5519,11 @@ Session::sync_order_keys (RouteSortOrderKey sort_key_changed)
 	   opportunity to keep them in sync if they wish to.
 	*/
 
-	DEBUG_TRACE (DEBUG::OrderKeys, string_compose ("Sync Order Keys, based on %1\n", enum_2_string (sort_key_changed)));
+	DEBUG_TRACE (DEBUG::OrderKeys, "Sync Order Keys.\n");
 
-	Route::SyncOrderKeys (sort_key_changed); /* EMIT SIGNAL */
+	reassign_track_numbers();
+
+	Route::SyncOrderKeys (); /* EMIT SIGNAL */
 
 	DEBUG_TRACE (DEBUG::OrderKeys, "\tsync done\n");
 }

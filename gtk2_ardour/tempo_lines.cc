@@ -17,233 +17,132 @@
 
 */
 
-#include <libgnomecanvasmm/canvas.h>
-#include <libgnomecanvasmm/group.h>
-#include "tempo_lines.h"
+#include "pbd/compose.h"
+
+#include "canvas/canvas.h"
+#include "canvas/debug.h"
+
 #include "ardour_ui.h"
+#include "public_editor.h"
+#include "rgb_macros.h"
+#include "tempo_lines.h"
 
 using namespace std;
 
-#define MAX_CACHED_LINES 128
-
-TempoLines::TempoLines(ArdourCanvas::Canvas& canvas, ArdourCanvas::Group* group, double screen_height)
-	: _canvas(canvas)
-	, _group(group)
-	, _clean_left(DBL_MAX)
-	, _clean_right(0.0)
-	, _height(screen_height)
+TempoLines::TempoLines (ArdourCanvas::Container* group, double)
+	: lines (group, ArdourCanvas::LineSet::Vertical)
 {
+	lines.set_extent (ArdourCanvas::COORD_MAX);
 }
 
 void
 TempoLines::tempo_map_changed()
 {
-	_clean_left = DBL_MAX;
-	_clean_right = 0.0;
-
-	double_t d = 1.0;
-	// TODO: Dirty/slow, but 'needed' for zoom :(
-	for (Lines::iterator i = _lines.begin(); i != _lines.end(); d += 1.0) {
-		Lines::iterator next = i;
-		++next;
-		i->second->property_x1() = - d;
-		i->second->property_x2() = - d;
-		ArdourCanvas::SimpleLine* f = i->second;
-		_lines.erase(i);
-		_lines.insert(make_pair(- d, f));
-		i = next;
-	}
+	lines.clear ();
 }
 
 void
 TempoLines::show ()
 {
-	for (Lines::iterator i = _lines.begin(); i != _lines.end(); ++i) {
-		i->second->show();
-	}
+	lines.show ();
 }
 
 void
 TempoLines::hide ()
 {
-	for (Lines::iterator i = _lines.begin(); i != _lines.end(); ++i) {
-		i->second->hide();
+	lines.hide ();
+}
+
+void
+TempoLines::draw_ticks (const ARDOUR::TempoMap::BBTPointList::const_iterator& b,
+                        unsigned                                              divisions,
+                        framecnt_t                                            leftmost_frame,
+                        framecnt_t                                            frame_rate)
+{
+	const double   fpb  = b->tempo->frames_per_beat(frame_rate);
+	const uint32_t base = ARDOUR_UI::config()->color_mod("measure line beat", "measure line beat");
+
+	for (unsigned l = 1; l < divisions; ++l) {
+		/* find the coarsest division level this tick falls on */
+		unsigned level = divisions;
+		for (unsigned d = divisions; d >= 4; d /= 2) {
+			if (l % (divisions / d) == 0) {
+				level = d;
+			}
+		}
+
+		/* draw line with alpha corresponding to coarsest level */
+		const uint8_t    a = max(8, (int)rint(UINT_RGBA_A(base) / (0.8 * log2(level))));
+		const uint32_t   c = UINT_RGBA_CHANGE_A(base, a);
+		const framepos_t f = b->frame + (l * (fpb / (double)divisions));
+		if (f > leftmost_frame) {
+			lines.add (PublicEditor::instance().sample_to_pixel_unrounded (f), 1.0, c);
+		}
 	}
 }
 
 void
-TempoLines::draw (const ARDOUR::TempoMap::BBTPointList::const_iterator& begin, 
-		  const ARDOUR::TempoMap::BBTPointList::const_iterator& end, 
-		  double frames_per_unit)
+TempoLines::draw (const ARDOUR::TempoMap::BBTPointList::const_iterator& begin,
+                  const ARDOUR::TempoMap::BBTPointList::const_iterator& end,
+                  unsigned                                              divisions,
+                  framecnt_t                                            leftmost_frame,
+                  framecnt_t                                            frame_rate)
 {
 	ARDOUR::TempoMap::BBTPointList::const_iterator i;
-	ArdourCanvas::SimpleLine *line = NULL;
-	gdouble xpos;
-	double who_cares;
-	double x1, x2, y1, beat_density;
+	double  beat_density;
 
 	uint32_t beats = 0;
 	uint32_t bars = 0;
 	uint32_t color;
 
-	const size_t needed = distance (begin, end);
-
-	_canvas.get_scroll_region (x1, y1, x2, who_cares);
-
 	/* get the first bar spacing */
 
 	i = end;
 	i--;
-	bars = (*i).bar - (*begin).bar;
+	bars = (*i).bar - (*begin).bar; 
 	beats = distance (begin, end) - bars;
 
-	beat_density = (beats * 10.0f) / _canvas.get_width ();
+	beat_density = (beats * 10.0f) / lines.canvas()->width();
 
-	if (beat_density > 4.0f) {
+	if (beat_density > 2.0f) {
 		/* if the lines are too close together, they become useless */
-		tempo_map_changed();
+		lines.clear ();
 		return;
 	}
 
-	xpos = rint(((framepos_t)(*i).frame) / (double)frames_per_unit);
-	const double needed_right = xpos;
-
-	i = begin;
-
-	xpos = rint(((framepos_t)(*i).frame) / (double)frames_per_unit);
-	const double needed_left = xpos;
-
-	Lines::iterator left = _lines.lower_bound(xpos); // first line >= xpos
-
-	bool exhausted = (left == _lines.end());
-	Lines::iterator li = left;
-	if (li != _lines.end())
-		line = li->second;
-
-	// Tempo map hasn't changed and we're entirely within a clean
-	// range, don't need to do anything.  Yay.
-	if (needed_left >= _clean_left && needed_right <= _clean_right) {
-		// cout << endl << "*** LINE CACHE PERFECT HIT" << endl;
-		return;
+	/* constrain divisions to a log2 factor to cap line density */
+	while (divisions > 3 && beat_density * divisions > 0.4) {
+		divisions /= 2;
 	}
 
-	//cout << endl << "*** LINE CACHE MISS" << endl;
+	lines.clear ();
 
-	bool invalidated = false;
+	if (beat_density <= 0.12 && begin != end && begin->frame > 0) {
+		/* draw subdivisions of the beat before the first visible beat line */
+		ARDOUR::TempoMap::BBTPointList::const_iterator prev = begin;
+		--prev;
+		draw_ticks(prev, divisions, leftmost_frame, frame_rate);
+	}
 
 	for (i = begin; i != end; ++i) {
 
 		if ((*i).is_bar()) {
-			color = ARDOUR_UI::config()->canvasvar_MeasureLineBar.get();
+			color = ARDOUR_UI::config()->color ("measure line bar");
 		} else {
-			if (beat_density > 2.0) {
+			if (beat_density > 0.3) {
 				continue; /* only draw beat lines if the gaps between beats are large. */
 			}
-			color = ARDOUR_UI::config()->canvasvar_MeasureLineBeat.get();
+			color = ARDOUR_UI::config()->color_mod ("measure line beat", "measure line beat");
 		}
 
-		xpos = rint(((framepos_t)(*i).frame) / (double)frames_per_unit);
+		ArdourCanvas::Coord xpos = PublicEditor::instance().sample_to_pixel_unrounded ((*i).frame);
 
-		li = _lines.lower_bound(xpos); // first line >= xpos
+		lines.add (xpos, 1.0, color);
 
-		line = (li != _lines.end()) ? li->second : NULL;
-		assert(!line || line->property_x1() == li->first);
-		
-		Lines::iterator next = li;
-		if (next != _lines.end())
-			++next;
-		
-		exhausted = (next == _lines.end());
-
-		// Hooray, line is perfect
-		if (line && line->property_x1() == xpos) {
-			if (li != _lines.end())
-				++li;
-			
-			line->property_color_rgba() = color;
-			// Use existing line, moving if necessary
-		} else if (!exhausted) {
-			Lines::iterator steal = _lines.end();
-			--steal;
-			
-			// Steal from the right
-			if (left->first > needed_left && li != steal && steal->first > needed_right) {
-				//cout << "*** STEALING FROM RIGHT" << endl;
-				double const x = steal->first;
-				line = steal->second;
-				_lines.erase(steal);
-				line->property_x1() = xpos;
-				line->property_x2() = xpos;
-				line->property_color_rgba() = color;
-				_lines.insert(make_pair(xpos, line));
-				invalidated = true;
-				
-				// Shift clean range left
-				_clean_left = min(_clean_left, xpos);
-				_clean_right = min(_clean_right, x);
-				
-				// Move this line to where we need it
-			} else {
-				Lines::iterator existing = _lines.find(xpos);
-				if (existing != _lines.end()) {
-					//cout << "*** EXISTING LINE" << endl;
-					li = existing;
-					li->second->property_color_rgba() = color;
-				} else {
-					//cout << "*** MOVING LINE" << endl;
-					const double x1 = line->property_x1();
-					const bool was_clean = x1 >= _clean_left && x1 <= _clean_right;
-					invalidated = invalidated || was_clean;
-					// Invalidate clean portion (XXX: too harsh?)
-					_clean_left  = needed_left;
-					_clean_right = needed_right;
-					_lines.erase(li);
-					line->property_color_rgba() = color;
-					line->property_x1() = xpos;
-					line->property_x2() = xpos;
-					_lines.insert(make_pair(xpos, line));
-				}
-			}
-			
-			// Create a new line
-		} else if (_lines.size() < needed || _lines.size() < MAX_CACHED_LINES) {
-			//cout << "*** CREATING LINE" << endl;
-			/* if we already have a line there ... don't sweat it */
-			if (_lines.find (xpos) == _lines.end()) {
-				line = new ArdourCanvas::SimpleLine (*_group);
-				line->property_x1() = xpos;
-				line->property_x2() = xpos;
-				line->property_y1() = 0.0;
-				line->property_y2() = _height;
-				line->property_color_rgba() = color;
-				_lines.insert(make_pair(xpos, line));
-			}
-			
-			// Steal from the left
-		} else {
-			//cout << "*** STEALING FROM LEFT" << endl;
-			if (_lines.find (xpos) == _lines.end()) {
-				Lines::iterator steal = _lines.begin();
-				double const x = steal->first;
-				line = steal->second;
-				_lines.erase(steal);
-				line->property_color_rgba() = color;
-				line->property_x1() = xpos;
-				line->property_x2() = xpos;
-				_lines.insert(make_pair(xpos, line));
-				invalidated = true;
-			
-				// Shift clean range right
-				_clean_left = max(_clean_left, x);
-				_clean_right = max(_clean_right, xpos);
-			}
+		if (beat_density <= 0.12) {
+			/* draw subdivisions of this beat */
+			draw_ticks(i, divisions, leftmost_frame, frame_rate);
 		}
-	}
-
-	// Extend range to what we've 'fixed'
-	if (!invalidated) {
-		_clean_left  = min(_clean_left, needed_left);
-		_clean_right = max(_clean_right, needed_right);
 	}
 }
 

@@ -17,42 +17,43 @@
 
 */
 
+#include <cstdlib>
+#include <cassert>
+#include <cmath>
 #include <list>
 #include <vector>
 #include <algorithm>
-#include <cstdlib>
-#include <cmath>
-#include <cassert>
 
 #include "pbd/unknown_type.h"
 #include "pbd/unwind.h"
 
 #include "ardour/debug.h"
-#include "ardour/route.h"
 #include "ardour/midi_track.h"
+#include "ardour/route.h"
 #include "ardour/session.h"
 
 #include "gtkmm2ext/cell_renderer_pixbuf_multi.h"
 #include "gtkmm2ext/cell_renderer_pixbuf_toggle.h"
 #include "gtkmm2ext/treeutils.h"
 
-#include "editor.h"
-#include "keyboard.h"
+#include "actions.h"
 #include "ardour_ui.h"
 #include "audio_time_axis.h"
-#include "midi_time_axis.h"
-#include "mixer_strip.h"
-#include "gui_thread.h"
-#include "actions.h"
-#include "utils.h"
-#include "route_sorter.h"
+#include "editor.h"
 #include "editor_group_tabs.h"
 #include "editor_routes.h"
+#include "gui_thread.h"
+#include "keyboard.h"
+#include "midi_time_axis.h"
+#include "mixer_strip.h"
+#include "route_sorter.h"
+#include "utils.h"
 
 #include "i18n.h"
 
 using namespace std;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace Gtkmm2ext;
@@ -60,20 +61,24 @@ using namespace Glib;
 using Gtkmm2ext::Keyboard;
 
 struct ColumnInfo {
-    int         index;
-    const char* label;
-    const char* tooltip;
+	int         index;
+	const char* label;
+	const char* tooltip;
 };
 
 EditorRoutes::EditorRoutes (Editor* e)
 	: EditorComponent (e)
-        , _ignore_reorder (false)
-        , _no_redisplay (false)
-        , _adding_routes (false)
-        , _menu (0)
-        , old_focus (0)
-        , selection_countdown (0)
-        , name_editable (0)
+	, _ignore_reorder (false)
+	, _no_redisplay (false)
+	, _adding_routes (false)
+	, _route_deletion_in_progress (false)
+	, _redisplay_on_resume (false)
+	, _redisplay_active (0)
+	, _queue_tv_update (0)
+	, _menu (0)
+	, old_focus (0)
+	, selection_countdown (0)
+	, name_editable (0)
 {
 	static const int column_width = 22;
 
@@ -183,7 +188,7 @@ EditorRoutes::EditorRoutes (Editor* e)
 	solo_safe_state_column->set_expand(false);
 	solo_safe_state_column->set_fixed_width(column_width);
 
-        _name_column = _display.append_column ("", _columns.text) - 1;
+	_name_column = _display.append_column ("", _columns.text) - 1;
 	_visible_column = _display.append_column ("", _columns.visible) - 1;
 	_active_column = _display.append_column ("", _columns.active) - 1;
 
@@ -199,15 +204,15 @@ EditorRoutes::EditorRoutes (Editor* e)
 	Gtk::Label* l;
 
 	ColumnInfo ci[] = {
-		{ 0, _("Name"), _("Track/Bus Name") },
-		{ 1, _("V"), _("Track/Bus visible ?") },
-		{ 2, _("A"), _("Track/Bus active ?") },
-		{ 3, _("I"), _("MIDI input enabled") },
-		{ 4, _("R"), _("Record enabled") },
-		{ 5, _("M"), _("Muted") },
-		{ 6, _("S"), _("Soloed") },
-		{ 7, _("SI"), _("Solo Isolated") },
-		{ 8, _("SS"), _("Solo Safe (Locked)") },
+		{ 0,  _("Name"),        _("Track/Bus Name") },
+		{ 1, S_("Visible|V"),   _("Track/Bus visible ?") },
+		{ 2, S_("Active|A"),    _("Track/Bus active ?") },
+		{ 3, S_("MidiInput|I"), _("MIDI input enabled") },
+		{ 4, S_("Rec|R"),       _("Record enabled") },
+		{ 5, S_("Mute|M"),      _("Muted") },
+		{ 6, S_("Solo|S"),      _("Soloed") },
+		{ 7, S_("SoloIso|SI"),  _("Solo Isolated") },
+		{ 8, S_("SoloLock|SS"), _("Solo Safe (Locked)") },
 		{ -1, 0, 0 }
 	};
 
@@ -222,6 +227,7 @@ EditorRoutes::EditorRoutes (Editor* e)
 	_display.set_headers_visible (true);
 	_display.get_selection()->set_mode (SELECTION_SINGLE);
 	_display.get_selection()->set_select_function (sigc::mem_fun (*this, &EditorRoutes::selection_filter));
+	_display.get_selection()->signal_changed().connect (sigc::mem_fun (*this, &EditorRoutes::selection_changed));
 	_display.set_reorderable (true);
 	_display.set_name (X_("EditGroupList"));
 	_display.set_rules_hint (true);
@@ -231,7 +237,7 @@ EditorRoutes::EditorRoutes (Editor* e)
 	CellRendererText* name_cell = dynamic_cast<CellRendererText*> (_display.get_column_cell_renderer (_name_column));
 
 	assert (name_cell);
-        name_cell->signal_editing_started().connect (sigc::mem_fun (*this, &EditorRoutes::name_edit_started));
+	name_cell->signal_editing_started().connect (sigc::mem_fun (*this, &EditorRoutes::name_edit_started));
 
 	TreeViewColumn* name_column = _display.get_column (_name_column);
 
@@ -269,50 +275,50 @@ EditorRoutes::EditorRoutes (Editor* e)
 	active_col->set_sizing (TREE_VIEW_COLUMN_FIXED);
 	active_col->set_fixed_width (30);
 	active_col->set_alignment (ALIGN_CENTER);
-	
-	_model->signal_row_deleted().connect (sigc::mem_fun (*this, &EditorRoutes::route_deleted));
+
+	_model->signal_row_deleted().connect (sigc::mem_fun (*this, &EditorRoutes::row_deleted));
 	_model->signal_rows_reordered().connect (sigc::mem_fun (*this, &EditorRoutes::reordered));
 
 	_display.signal_button_press_event().connect (sigc::mem_fun (*this, &EditorRoutes::button_press), false);
 	_scroller.signal_key_press_event().connect (sigc::mem_fun(*this, &EditorRoutes::key_press), false);
 
-        _scroller.signal_focus_in_event().connect (sigc::mem_fun (*this, &EditorRoutes::focus_in), false);
-        _scroller.signal_focus_out_event().connect (sigc::mem_fun (*this, &EditorRoutes::focus_out));
+	_scroller.signal_focus_in_event().connect (sigc::mem_fun (*this, &EditorRoutes::focus_in), false);
+	_scroller.signal_focus_out_event().connect (sigc::mem_fun (*this, &EditorRoutes::focus_out));
 
-        _display.signal_enter_notify_event().connect (sigc::mem_fun (*this, &EditorRoutes::enter_notify), false);
-        _display.signal_leave_notify_event().connect (sigc::mem_fun (*this, &EditorRoutes::leave_notify), false);
+	_display.signal_enter_notify_event().connect (sigc::mem_fun (*this, &EditorRoutes::enter_notify), false);
+	_display.signal_leave_notify_event().connect (sigc::mem_fun (*this, &EditorRoutes::leave_notify), false);
 
-        _display.set_enable_search (false);
+	_display.set_enable_search (false);
 
-	Route::SyncOrderKeys.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::sync_treeview_from_order_keys, this, _1), gui_context());
+	Route::SyncOrderKeys.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::sync_treeview_from_order_keys, this), gui_context());
 }
 
 bool
 EditorRoutes::focus_in (GdkEventFocus*)
 {
-        Window* win = dynamic_cast<Window*> (_scroller.get_toplevel ());
+	Window* win = dynamic_cast<Window*> (_scroller.get_toplevel ());
 
-        if (win) {
-                old_focus = win->get_focus ();
-        } else {
-                old_focus = 0;
-        }
+	if (win) {
+		old_focus = win->get_focus ();
+	} else {
+		old_focus = 0;
+	}
 
-        name_editable = 0;
+	name_editable = 0;
 
-        /* try to do nothing on focus in (doesn't work, hence selection_count nonsense) */
-        return true;
+	/* try to do nothing on focus in (doesn't work, hence selection_count nonsense) */
+	return true;
 }
 
 bool
 EditorRoutes::focus_out (GdkEventFocus*)
 {
-        if (old_focus) {
-                old_focus->grab_focus ();
-                old_focus = 0;
-        }
+	if (old_focus) {
+		old_focus->grab_focus ();
+		old_focus = 0;
+	}
 
-        return false;
+	return false;
 }
 
 bool
@@ -322,27 +328,27 @@ EditorRoutes::enter_notify (GdkEventCrossing*)
 		return true;
 	}
 
-        /* arm counter so that ::selection_filter() will deny selecting anything for the
-           next two attempts to change selection status.
-        */
-        selection_countdown = 2;
-        _scroller.grab_focus ();
-        Keyboard::magic_widget_grab_focus ();
-        return false;
+	/* arm counter so that ::selection_filter() will deny selecting anything for the
+	 * next two attempts to change selection status.
+	 */
+	selection_countdown = 2;
+	_scroller.grab_focus ();
+	Keyboard::magic_widget_grab_focus ();
+	return false;
 }
 
 bool
 EditorRoutes::leave_notify (GdkEventCrossing*)
 {
-        selection_countdown = 0;
+	selection_countdown = 0;
 
-        if (old_focus) {
-                old_focus->grab_focus ();
-                old_focus = 0;
-        }
+	if (old_focus) {
+		old_focus->grab_focus ();
+		old_focus = 0;
+	}
 
-        Keyboard::magic_widget_drop_focus ();
-        return false;
+	Keyboard::magic_widget_drop_focus ();
+	return false;
 }
 
 void
@@ -355,6 +361,13 @@ EditorRoutes::set_session (Session* s)
 	if (_session) {
 		_session->SoloChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::solo_changed_so_update_mute, this), gui_context());
 		_session->RecordStateChanged.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::update_rec_display, this), gui_context());
+
+		/* TODO: check if these needs to be tied in with DisplaySuspender
+		 * Given that the UI is single-threaded and DisplaySuspender is only used
+		 * in loops in the UI thread all should be fine.
+		 */
+		_session->BatchUpdateStart.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::suspend_redisplay, this), gui_context());
+		_session->BatchUpdateEnd.connect (*this, MISSING_INVALIDATOR, boost::bind (&EditorRoutes::resume_redisplay, this), gui_context());
 	}
 }
 
@@ -379,6 +392,7 @@ EditorRoutes::on_input_active_changed (std::string const & path_string)
 void
 EditorRoutes::on_tv_rec_enable_changed (std::string const & path_string)
 {
+	DisplaySuspender ds;
 	// Get the model row that has been toggled.
 	Gtk::TreeModel::Row row = *_model->get_iter (Gtk::TreeModel::Path (path_string));
 
@@ -489,19 +503,15 @@ EditorRoutes::show_menu ()
 }
 
 void
-EditorRoutes::redisplay ()
+EditorRoutes::redisplay_real ()
 {
-	if (_no_redisplay || !_session || _session->deletion_in_progress()) {
-		return;
-	}
-
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 	uint32_t position;
 
 	/* n will be the count of tracks plus children (updated by TimeAxisView::show_at),
-	   so we will use that to know where to put things.
-	*/
+	 * so we will use that to know where to put things.
+	 */
 	int n;
 
 	for (n = 0, position = 0, i = rows.begin(); i != rows.end(); ++i) {
@@ -514,11 +524,10 @@ EditorRoutes::redisplay ()
 		}
 
 		bool visible = tv->marked_for_display ();
-
+		
 		/* show or hide the TimeAxisView */
 		if (visible) {
 			position += tv->show_at (position, n, &_editor->edit_controls_vbox);
-			tv->clip_to_viewport ();
 		} else {
 			tv->hide ();
 		}
@@ -527,38 +536,76 @@ EditorRoutes::redisplay ()
 	}
 
 	/* whenever we go idle, update the track view list to reflect the new order.
-	   we can't do this here, because we could mess up something that is traversing
-	   the track order and has caused a redisplay of the list.
-	*/
+	 * we can't do this here, because we could mess up something that is traversing
+	 * the track order and has caused a redisplay of the list.
+	 */
 	Glib::signal_idle().connect (sigc::mem_fun (*_editor, &Editor::sync_track_view_list_and_routes));
 
-        _editor->reset_controls_layout_height (position);
-        _editor->reset_controls_layout_width ();
-	_editor->full_canvas_height = position + _editor->canvas_timebars_vsize;
-	_editor->vertical_adjustment.set_upper (_editor->full_canvas_height);
+	_editor->reset_controls_layout_height (position);
+	_editor->reset_controls_layout_width ();
+	_editor->_full_canvas_height = position;
 
-	if ((_editor->vertical_adjustment.get_value() + _editor->_canvas_height) > _editor->vertical_adjustment.get_upper()) {
+	if ((_editor->vertical_adjustment.get_value() + _editor->_visible_canvas_height) > _editor->vertical_adjustment.get_upper()) {
 		/*
-		   We're increasing the size of the canvas while the bottom is visible.
-		   We scroll down to keep in step with the controls layout.
-		*/
-		_editor->vertical_adjustment.set_value (_editor->full_canvas_height - _editor->_canvas_height);
+		 * We're increasing the size of the canvas while the bottom is visible.
+		 * We scroll down to keep in step with the controls layout.
+		 */
+		_editor->vertical_adjustment.set_value (_editor->_full_canvas_height - _editor->_visible_canvas_height);
 	}
 }
 
 void
-EditorRoutes::route_deleted (Gtk::TreeModel::Path const &)
+EditorRoutes::redisplay ()
 {
-	/* this happens as the second step of a DnD within the treeview as well
-	   as when a row/route is actually deleted.
-	*/
+	if (!_session || _session->deletion_in_progress()) {
+		return;
+	}
+
+	if (_no_redisplay) {
+		_redisplay_on_resume = true;
+		return;
+	}
+
+	// model deprecated g_atomic_int_exchange_and_add(, 1)
+	g_atomic_int_inc(&_redisplay_active);
+	if (!g_atomic_int_compare_and_exchange (&_redisplay_active, 1, 1)) {
+		return;
+	}
+
+	redisplay_real ();
+
+	while (!g_atomic_int_compare_and_exchange (&_redisplay_active, 1, 0)) {
+		g_atomic_int_set(&_redisplay_active, 1);
+		redisplay_real ();
+	}
+}
+
+void
+EditorRoutes::row_deleted (Gtk::TreeModel::Path const &)
+{
+	/* this happens as the second step of a DnD within the treeview, and
+	 * when a route is actually removed. we don't differentiate between
+	 * the two cases.
+	 *
+	 * note that the sync_orders_keys() step may not actually change any
+	 * RID's (e.g. the last track may be removed, so all other tracks keep
+	 * the same RID), which means that no redisplay would happen. so we
+	 * have to force a redisplay.
+	 */
+
 	DEBUG_TRACE (DEBUG::OrderKeys, "editor routes treeview row deleted\n");
+
+	DisplaySuspender ds;
 	sync_order_keys_from_treeview ();
 }
 
 void
 EditorRoutes::reordered (TreeModel::Path const &, TreeModel::iterator const &, int* /*what*/)
 {
+	/* reordering implies that RID's will change, so sync_order_keys() will
+	   cause a redisplay.
+	*/
+
 	DEBUG_TRACE (DEBUG::OrderKeys, "editor routes treeview reordered\n");
 	sync_order_keys_from_treeview ();
 }
@@ -570,6 +617,7 @@ EditorRoutes::visible_changed (std::string const & path)
 		return;
 	}
 
+	DisplaySuspender ds;
 	TreeIter iter;
 
 	if ((iter = _model->get_iter (path))) {
@@ -600,10 +648,20 @@ EditorRoutes::active_changed (std::string const & path)
 void
 EditorRoutes::routes_added (list<RouteTimeAxisView*> routes)
 {
-	TreeModel::Row row;
 	PBD::Unwinder<bool> at (_adding_routes, true);
+	bool from_scratch = (_model->children().size() == 0);
+	Gtk::TreeModel::Children::iterator insert_iter = _model->children().end();
 
-	suspend_redisplay ();
+	for (Gtk::TreeModel::Children::iterator it = _model->children().begin(); it != _model->children().end(); ++it) {
+		boost::shared_ptr<Route> r = (*it)[_columns.route];
+
+		if (r->order_key() == (routes.front()->route()->order_key() + routes.size())) {
+			insert_iter = it;
+			break;
+		}
+	}
+
+	DisplaySuspender ds;
 
 	_display.set_model (Glib::RefPtr<ListStore>());
 
@@ -611,7 +669,7 @@ EditorRoutes::routes_added (list<RouteTimeAxisView*> routes)
 
 		boost::shared_ptr<MidiTrack> midi_trk = boost::dynamic_pointer_cast<MidiTrack> ((*x)->route());
 
-		row = *(_model->append ());
+		TreeModel::Row row = *(_model->insert (insert_iter));
 
 		row[_columns.text] = (*x)->route()->name();
 		row[_columns.visible] = (*x)->marked_for_display();
@@ -668,12 +726,12 @@ EditorRoutes::routes_added (list<RouteTimeAxisView*> routes)
 	update_input_active_display ();
 	update_active_display ();
 
-	resume_redisplay ();
 	_display.set_model (_model);
 
 	/* now update route order keys from the treeview/track display order */
-
-	sync_order_keys_from_treeview ();
+	if (!from_scratch) {
+		sync_order_keys_from_treeview ();
+	}
 }
 
 void
@@ -687,7 +745,6 @@ EditorRoutes::handle_gui_changes (string const & what, void*)
 		/* Optional :make tracks change height while it happens, instead
 		   of on first-idle
 		*/
-		//update_canvas_now ();
 		redisplay ();
 	}
 
@@ -706,12 +763,13 @@ EditorRoutes::route_removed (TimeAxisView *tv)
 
 	for (ri = rows.begin(); ri != rows.end(); ++ri) {
 		if ((*ri)[_columns.tv] == tv) {
+			PBD::Unwinder<bool> uw (_route_deletion_in_progress, true);
 			_model->erase (ri);
 			break;
 		}
 	}
 
-	/* the deleted signal for the treeview/model will take 
+	/* the deleted signal for the treeview/model will take
 	   care of any updates.
 	*/
 }
@@ -746,12 +804,8 @@ EditorRoutes::route_property_changed (const PropertyChange& what_changed, boost:
 void
 EditorRoutes::update_active_display ()
 {
-	TreeModel::Children rows = _model->children();
-	TreeModel::Children::iterator i;
-
-	for (i = rows.begin(); i != rows.end(); ++i) {
-		boost::shared_ptr<Route> route = (*i)[_columns.route];
-		(*i)[_columns.active] = route->active ();
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
 	}
 }
 
@@ -761,7 +815,7 @@ EditorRoutes::update_visibility ()
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 
-	suspend_redisplay ();
+	DisplaySuspender ds;
 
 	for (i = rows.begin(); i != rows.end(); ++i) {
 		TimeAxisView *tv = (*i)[_columns.tv];
@@ -772,8 +826,6 @@ EditorRoutes::update_visibility ()
 	 */
 
 	sync_order_keys_from_treeview ();
-
-	resume_redisplay ();
 }
 
 void
@@ -812,17 +864,17 @@ EditorRoutes::show_track_in_display (TimeAxisView& tv)
 void
 EditorRoutes::reset_remote_control_ids ()
 {
-	if (Config->get_remote_model() != EditorOrdered || !_session || _session->deletion_in_progress()) {
+	if (Config->get_remote_model() == UserOrdered || !_session || _session->deletion_in_progress()) {
 		return;
 	}
 
 	TreeModel::Children rows = _model->children();
-	
+
 	if (rows.empty()) {
 		return;
 	}
 
-	
+
 	DEBUG_TRACE (DEBUG::OrderKeys, "editor reset remote control ids\n");
 
 	TreeModel::Children::iterator ri;
@@ -832,19 +884,28 @@ EditorRoutes::reset_remote_control_ids ()
 
 	for (ri = rows.begin(); ri != rows.end(); ++ri) {
 
+		/* skip two special values */
+		
+		if (rid == Route::MasterBusRemoteControlID) {
+			rid++;
+		}
+		
+		if (rid == Route::MonitorBusRemoteControlID) {
+			rid++;
+		}
+
 		boost::shared_ptr<Route> route = (*ri)[_columns.route];
 		bool visible = (*ri)[_columns.visible];
-
 
 		if (!route->is_master() && !route->is_monitor()) {
 
 			uint32_t new_rid = (visible ? rid : invisible_key--);
 
 			if (new_rid != route->remote_control_id()) {
-				route->set_remote_control_id_from_order_key (EditorSort, new_rid);	
+				route->set_remote_control_id_explicit (new_rid);
 				rid_change = true;
 			}
-			
+
 			if (visible) {
 				rid++;
 			}
@@ -867,12 +928,12 @@ EditorRoutes::sync_order_keys_from_treeview ()
 	}
 
 	TreeModel::Children rows = _model->children();
-	
+
 	if (rows.empty()) {
 		return;
 	}
 
-	
+
 	DEBUG_TRACE (DEBUG::OrderKeys, "editor sync order keys from treeview\n");
 
 	TreeModel::Children::iterator ri;
@@ -887,23 +948,23 @@ EditorRoutes::sync_order_keys_from_treeview ()
 		boost::shared_ptr<Route> route = (*ri)[_columns.route];
 		bool visible = (*ri)[_columns.visible];
 
-		uint32_t old_key = route->order_key (EditorSort);
+		uint32_t old_key = route->order_key ();
 
 		if (order != old_key) {
-			route->set_order_key (EditorSort, order);
+			route->set_order_key (order);
 
 			changed = true;
 		}
 
-		if ((Config->get_remote_model() == EditorOrdered) && !route->is_master() && !route->is_monitor()) {
+		if ((Config->get_remote_model() == MixerOrdered) && !route->is_master() && !route->is_monitor()) {
 
 			uint32_t new_rid = (visible ? rid : invisible_key--);
 
 			if (new_rid != route->remote_control_id()) {
-				route->set_remote_control_id_from_order_key (EditorSort, new_rid);	
+				route->set_remote_control_id_explicit (new_rid);
 				rid_change = true;
 			}
-			
+
 			if (visible) {
 				rid++;
 			}
@@ -912,10 +973,10 @@ EditorRoutes::sync_order_keys_from_treeview ()
 
 		++order;
 	}
-	
+
 	if (changed) {
 		/* tell the world that we changed the editor sort keys */
-		_session->sync_order_keys (EditorSort);
+		_session->sync_order_keys ();
 	}
 
 	if (rid_change) {
@@ -925,37 +986,17 @@ EditorRoutes::sync_order_keys_from_treeview ()
 }
 
 void
-EditorRoutes::sync_treeview_from_order_keys (RouteSortOrderKey src)
+EditorRoutes::sync_treeview_from_order_keys ()
 {
-	/* Some route order key(s) for `src' has been changed, make sure that 
+	/* Some route order key(s) have been changed, make sure that
 	   we update out tree/list model and GUI to reflect the change.
 	*/
 
-	if (!_session || _session->deletion_in_progress()) {
+	if (_ignore_reorder || !_session || _session->deletion_in_progress()) {
 		return;
 	}
 
-	DEBUG_TRACE (DEBUG::OrderKeys, string_compose ("editor sync model from order keys, src = %1\n", enum_2_string (src)));
-
-	if (src == MixerSort) {
-
-		if (!Config->get_sync_all_route_ordering()) {
-			/* mixer sort keys changed - we don't care */
-			return;
-		}
-
-		DEBUG_TRACE (DEBUG::OrderKeys, "reset editor order key to match mixer\n");
-
-		/* mixer sort keys were changed, update the editor sort
-		 * keys since "sync mixer+editor order" is enabled.
-		 */
-
-		boost::shared_ptr<RouteList> r = _session->get_routes ();
-		
-		for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
-			(*i)->sync_order_keys (src);
-		}
-	}
+	DEBUG_TRACE (DEBUG::OrderKeys, "editor sync model from order keys.\n");
 
 	/* we could get here after either a change in the Mixer or Editor sort
 	 * order, but either way, the mixer order keys reflect the intended
@@ -975,7 +1016,7 @@ EditorRoutes::sync_treeview_from_order_keys (RouteSortOrderKey src)
 
 	for (TreeModel::Children::iterator ri = rows.begin(); ri != rows.end(); ++ri, ++old_order) {
 		boost::shared_ptr<Route> route = (*ri)[_columns.route];
-		sorted_routes.push_back (RoutePlusOrderKey (route, old_order, route->order_key (EditorSort)));
+		sorted_routes.push_back (RoutePlusOrderKey (route, old_order, route->order_key ()));
 	}
 
 	SortByNewDisplayOrder cmp;
@@ -984,7 +1025,7 @@ EditorRoutes::sync_treeview_from_order_keys (RouteSortOrderKey src)
 	neworder.assign (sorted_routes.size(), 0);
 
 	uint32_t n = 0;
-	
+
 	for (OrderKeySortedRoutes::iterator sr = sorted_routes.begin(); sr != sorted_routes.end(); ++sr, ++n) {
 
 		neworder[n] = sr->old_display_order;
@@ -1011,7 +1052,7 @@ EditorRoutes::hide_all_tracks (bool /*with_select*/)
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 
-	suspend_redisplay ();
+	DisplaySuspender ds;
 
 	for (i = rows.begin(); i != rows.end(); ++i) {
 
@@ -1024,14 +1065,6 @@ EditorRoutes::hide_all_tracks (bool /*with_select*/)
 
 		row[_columns.visible] = false;
 	}
-
-	resume_redisplay ();
-
-	/* XXX this seems like a hack and half, but its not clear where to put this
-	   otherwise.
-	*/
-
-	//reset_scrolling_region ();
 }
 
 void
@@ -1040,7 +1073,7 @@ EditorRoutes::set_all_tracks_visibility (bool yn)
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 
-	suspend_redisplay ();
+	DisplaySuspender ds;
 
 	for (i = rows.begin(); i != rows.end(); ++i) {
 
@@ -1059,8 +1092,6 @@ EditorRoutes::set_all_tracks_visibility (bool yn)
 	 */
 
 	sync_order_keys_from_treeview ();
-
-	resume_redisplay ();
 }
 
 void
@@ -1069,7 +1100,7 @@ EditorRoutes::set_all_audio_midi_visibility (int tracks, bool yn)
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 
-	suspend_redisplay ();
+	DisplaySuspender ds;
 
 	for (i = rows.begin(); i != rows.end(); ++i) {
 
@@ -1121,8 +1152,6 @@ EditorRoutes::set_all_audio_midi_visibility (int tracks, bool yn)
 	 */
 
 	sync_order_keys_from_treeview ();
-
-	resume_redisplay ();
 }
 
 void
@@ -1173,59 +1202,58 @@ EditorRoutes::hide_all_miditracks ()
 bool
 EditorRoutes::key_press (GdkEventKey* ev)
 {
-        TreeViewColumn *col;
-        boost::shared_ptr<RouteList> rl (new RouteList);
-        TreePath path;
+	TreeViewColumn *col;
+	boost::shared_ptr<RouteList> rl (new RouteList);
+	TreePath path;
 
-        switch (ev->keyval) {
-        case GDK_Tab:
-        case GDK_ISO_Left_Tab:
+	switch (ev->keyval) {
+		case GDK_Tab:
+		case GDK_ISO_Left_Tab:
 
-                /* If we appear to be editing something, leave that cleanly and appropriately.
-                */
-                if (name_editable) {
-                        name_editable->editing_done ();
-                        name_editable = 0;
-                }
-
-                col = _display.get_column (_name_column); // select&focus on name column
-
-                if (Keyboard::modifier_state_equals (ev->state, Keyboard::TertiaryModifier)) {
-                        treeview_select_previous (_display, _model, col);
-                } else {
-                        treeview_select_next (_display, _model, col);
-                }
-
-                return true;
-                break;
-
-        case 'm':
-                if (get_relevant_routes (rl)) {
-                        _session->set_mute (rl, !rl->front()->muted(), Session::rt_cleanup);
-                }
-                return true;
-                break;
-
-        case 's':
-                if (get_relevant_routes (rl)) {
-			if (Config->get_solo_control_is_listen_control()) {
-				_session->set_listen (rl, !rl->front()->listening_via_monitor(), Session::rt_cleanup);
-			} else {
-				_session->set_solo (rl, !rl->front()->self_soloed(), Session::rt_cleanup);
+			/* If we appear to be editing something, leave that cleanly and appropriately. */
+			if (name_editable) {
+				name_editable->editing_done ();
+				name_editable = 0;
 			}
-		}
-                return true;
-                break;
 
-        case 'r':
-                if (get_relevant_routes (rl)) {
-                        _session->set_record_enabled (rl, !rl->front()->record_enabled(), Session::rt_cleanup);
-                }
-                break;
+			col = _display.get_column (_name_column); // select&focus on name column
 
-        default:
-                break;
-        }
+			if (Keyboard::modifier_state_equals (ev->state, Keyboard::TertiaryModifier)) {
+				treeview_select_previous (_display, _model, col);
+			} else {
+				treeview_select_next (_display, _model, col);
+			}
+
+			return true;
+			break;
+
+		case 'm':
+			if (get_relevant_routes (rl)) {
+				_session->set_mute (rl, !rl->front()->muted(), Session::rt_cleanup);
+			}
+			return true;
+			break;
+
+		case 's':
+			if (get_relevant_routes (rl)) {
+				if (Config->get_solo_control_is_listen_control()) {
+					_session->set_listen (rl, !rl->front()->listening_via_monitor(), Session::rt_cleanup);
+				} else {
+					_session->set_solo (rl, !rl->front()->self_soloed(), Session::rt_cleanup);
+				}
+			}
+			return true;
+			break;
+
+		case 'r':
+			if (get_relevant_routes (rl)) {
+				_session->set_record_enabled (rl, !rl->front()->record_enabled(), Session::rt_cleanup);
+			}
+			break;
+
+		default:
+			break;
+	}
 
 	return false;
 }
@@ -1233,44 +1261,44 @@ EditorRoutes::key_press (GdkEventKey* ev)
 bool
 EditorRoutes::get_relevant_routes (boost::shared_ptr<RouteList> rl)
 {
-        TimeAxisView* tv;
-        RouteTimeAxisView* rtv;
+	TimeAxisView* tv;
+	RouteTimeAxisView* rtv;
 	RefPtr<TreeSelection> selection = _display.get_selection();
-        TreePath path;
-        TreeIter iter;
+	TreePath path;
+	TreeIter iter;
 
-        if (selection->count_selected_rows() != 0) {
+	if (selection->count_selected_rows() != 0) {
 
-                /* use selection */
+		/* use selection */
 
-                RefPtr<TreeModel> tm = RefPtr<TreeModel>::cast_dynamic (_model);
-                iter = selection->get_selected (tm);
+		RefPtr<TreeModel> tm = RefPtr<TreeModel>::cast_dynamic (_model);
+		iter = selection->get_selected (tm);
 
-        } else {
-                /* use mouse pointer */
+	} else {
+		/* use mouse pointer */
 
-                int x, y;
-                int bx, by;
+		int x, y;
+		int bx, by;
 
-                _display.get_pointer (x, y);
-                _display.convert_widget_to_bin_window_coords (x, y, bx, by);
+		_display.get_pointer (x, y);
+		_display.convert_widget_to_bin_window_coords (x, y, bx, by);
 
-                if (_display.get_path_at_pos (bx, by, path)) {
-                        iter = _model->get_iter (path);
-                }
-        }
+		if (_display.get_path_at_pos (bx, by, path)) {
+			iter = _model->get_iter (path);
+		}
+	}
 
-        if (iter) {
-                tv = (*iter)[_columns.tv];
-                if (tv) {
-                        rtv = dynamic_cast<RouteTimeAxisView*>(tv);
-                        if (rtv) {
-                                rl->push_back (rtv->route());
-                        }
-                }
-        }
+	if (iter) {
+		tv = (*iter)[_columns.tv];
+		if (tv) {
+			rtv = dynamic_cast<RouteTimeAxisView*>(tv);
+			if (rtv) {
+				rl->push_back (rtv->route());
+			}
+		}
+	}
 
-        return !rl->empty();
+	return !rl->empty();
 }
 
 bool
@@ -1297,90 +1325,92 @@ EditorRoutes::button_press (GdkEventButton* ev)
 	//Scroll editor canvas to selected track
 	if (Keyboard::modifier_state_equals (ev->state, Keyboard::PrimaryModifier)) {
 
-		// Get the model row.
 		Gtk::TreeModel::Row row = *_model->get_iter (path);
-
 		TimeAxisView *tv = row[_columns.tv];
 
-		int y_pos = tv->y_position();
-
-		//Clamp the y pos so that we do not extend beyond the canvas full height.
-		if (_editor->full_canvas_height - y_pos < _editor->_canvas_height){
-		    y_pos = _editor->full_canvas_height - _editor->_canvas_height;
-		}
-
-		//Only scroll to if the track is visible
-		if(y_pos != -1){
-		    _editor->reset_y_origin (y_pos);
+		if (tv) {
+			_editor->ensure_time_axis_view_is_visible (*tv, true);
 		}
 	}
 
 	return false;
 }
 
+void
+EditorRoutes::selection_changed ()
+{
+	_editor->begin_reversible_selection_op (X_("Select Track from Route List"));
+
+	if (_display.get_selection()->count_selected_rows() > 0) {
+
+		TreeIter iter;
+		TreeView::Selection::ListHandle_Path rows = _display.get_selection()->get_selected_rows ();
+		TrackViewList selected;
+
+		_editor->get_selection().clear_regions ();
+
+		for (TreeView::Selection::ListHandle_Path::iterator i = rows.begin(); i != rows.end(); ++i) {
+
+			if ((iter = _model->get_iter (*i))) {
+
+				TimeAxisView* tv = (*iter)[_columns.tv];
+				selected.push_back (tv);
+			}
+
+		}
+
+		_editor->get_selection().set (selected);
+		_editor->ensure_time_axis_view_is_visible (*(selected.front()), true);
+
+	} else {
+		_editor->get_selection().clear_tracks ();
+	}
+
+	_editor->commit_reversible_selection_op ();
+}
+
 bool
 EditorRoutes::selection_filter (Glib::RefPtr<TreeModel> const &, TreeModel::Path const&, bool /*selected*/)
 {
-        if (selection_countdown) {
-                if (--selection_countdown == 0) {
-                        return true;
-                } else {
-                        /* no selection yet ... */
-                        return false;
-                }
-        }
+	if (selection_countdown) {
+		if (--selection_countdown == 0) {
+			return true;
+		} else {
+			/* no selection yet ... */
+			return false;
+		}
+	}
 	return true;
 }
 
-struct EditorOrderRouteSorter {
-    bool operator() (boost::shared_ptr<Route> a, boost::shared_ptr<Route> b) {
-	    if (a->is_master()) {
-		    /* master before everything else */
-		    return true;
-	    } else if (b->is_master()) {
-		    /* everything else before master */
-		    return false;
-	    }
-	    return a->order_key (EditorSort) < b->order_key (EditorSort);
-    }
+struct EditorOrderRouteSorter
+{
+	bool operator() (boost::shared_ptr<Route> a, boost::shared_ptr<Route> b) {
+		if (a->is_master()) {
+			/* master before everything else */
+			return true;
+		} else if (b->is_master()) {
+			/* everything else before master */
+			return false;
+		}
+		return a->order_key () < b->order_key ();
+	}
 };
 
 void
 EditorRoutes::initial_display ()
 {
-	suspend_redisplay ();
+	DisplaySuspender ds;
 	_model->clear ();
 
 	if (!_session) {
-		resume_redisplay ();
 		return;
 	}
 
-	boost::shared_ptr<RouteList> routes = _session->get_routes();
-
-	if (ARDOUR_UI::instance()->session_is_new ()) {
-
-		/* new session: stamp all routes with the right editor order
-		 * key
-		 */
-
-		_editor->add_routes (*(routes.get()));
+	RouteList r (*_session->get_routes());
 		
-	} else {
-
-		/* existing session: sort a copy of the route list by
-		 * editor-order and add its contents to the display.
-		 */
-
-		RouteList r (*routes);
-		EditorOrderRouteSorter sorter;
-		
-		r.sort (sorter);
-		_editor->add_routes (r);
-		
-	}
-
-	resume_redisplay ();
+	r.sort (EditorOrderRouteSorter ());
+	_editor->add_routes (r);
 }
 
 void
@@ -1501,7 +1531,7 @@ EditorRoutes::move_selected_tracks (bool up)
 	}
 
 	for (leading = view_routes.begin(); leading != view_routes.end(); ++leading) {
-		uint32_t order = leading->second->order_key (EditorSort);
+		uint32_t order = leading->second->order_key ();
 		neworder.push_back (order);
 	}
 
@@ -1518,7 +1548,7 @@ EditorRoutes::move_selected_tracks (bool up)
 		}
 		assert (*i < (int) neworder.size ());
 	}
-#endif	
+#endif
 
 	_model->reorder (neworder);
 }
@@ -1534,7 +1564,7 @@ EditorRoutes::update_input_active_display ()
 
 		if (boost::dynamic_pointer_cast<Track> (route)) {
 			boost::shared_ptr<MidiTrack> mt = boost::dynamic_pointer_cast<MidiTrack> (route);
-			
+
 			if (mt) {
 				(*i)[_columns.is_input_active] = mt->input_active();
 			}
@@ -1545,15 +1575,28 @@ EditorRoutes::update_input_active_display ()
 void
 EditorRoutes::update_rec_display ()
 {
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
+	}
+}
+
+bool
+EditorRoutes::idle_update_mute_rec_solo_etc()
+{
+	g_atomic_int_set (&_queue_tv_update, 0);
 	TreeModel::Children rows = _model->children();
 	TreeModel::Children::iterator i;
 
 	for (i = rows.begin(); i != rows.end(); ++i) {
 		boost::shared_ptr<Route> route = (*i)[_columns.route];
-
+		(*i)[_columns.mute_state] = RouteUI::mute_active_state (_session, route);
+		(*i)[_columns.solo_state] = RouteUI::solo_active_state (route);
+		(*i)[_columns.solo_isolate_state] = RouteUI::solo_isolate_active_state (route) ? 1 : 0;
+		(*i)[_columns.solo_safe_state] = RouteUI::solo_safe_active_state (route) ? 1 : 0;
+		(*i)[_columns.active] = route->active ();
 		if (boost::dynamic_pointer_cast<Track> (route)) {
 			boost::shared_ptr<MidiTrack> mt = boost::dynamic_pointer_cast<MidiTrack> (route);
-
+			
 			if (route->record_enabled()) {
 				if (_session->record_status() == Session::Recording) {
 					(*i)[_columns.rec_state] = 1;
@@ -1565,57 +1608,44 @@ EditorRoutes::update_rec_display ()
 			} else {
 				(*i)[_columns.rec_state] = 0;
 			}
-
+			
 			(*i)[_columns.name_editable] = !route->record_enabled ();
 		}
 	}
+
+	return false; // do not call again (until needed)
 }
+
 
 void
 EditorRoutes::update_mute_display ()
 {
-	TreeModel::Children rows = _model->children();
-	TreeModel::Children::iterator i;
-
-	for (i = rows.begin(); i != rows.end(); ++i) {
-		boost::shared_ptr<Route> route = (*i)[_columns.route];
-		(*i)[_columns.mute_state] = RouteUI::mute_active_state (_session, route);
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
 	}
 }
 
 void
 EditorRoutes::update_solo_display (bool /* selfsoloed */)
 {
-	TreeModel::Children rows = _model->children();
-	TreeModel::Children::iterator i;
-
-	for (i = rows.begin(); i != rows.end(); ++i) {
-		boost::shared_ptr<Route> route = (*i)[_columns.route];
-		(*i)[_columns.solo_state] = RouteUI::solo_active_state (route);
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
 	}
 }
 
 void
 EditorRoutes::update_solo_isolate_display ()
 {
-	TreeModel::Children rows = _model->children();
-	TreeModel::Children::iterator i;
-
-	for (i = rows.begin(); i != rows.end(); ++i) {
-		boost::shared_ptr<Route> route = (*i)[_columns.route];
-		(*i)[_columns.solo_isolate_state] = RouteUI::solo_isolate_active_state (route) ? 1 : 0;
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
 	}
 }
 
 void
 EditorRoutes::update_solo_safe_display ()
 {
-	TreeModel::Children rows = _model->children();
-	TreeModel::Children::iterator i;
-
-	for (i = rows.begin(); i != rows.end(); ++i) {
-		boost::shared_ptr<Route> route = (*i)[_columns.route];
-		(*i)[_columns.solo_safe_state] = RouteUI::solo_safe_active_state (route) ? 1 : 0;
+	if (g_atomic_int_compare_and_exchange (&_queue_tv_update, 0, 1)) {
+		Glib::signal_idle().connect (sigc::mem_fun (*this, &EditorRoutes::idle_update_mute_rec_solo_etc));
 	}
 }
 
@@ -1641,21 +1671,21 @@ EditorRoutes::clear ()
 void
 EditorRoutes::name_edit_started (CellEditable* ce, const Glib::ustring&)
 {
-        name_editable = ce;
+	name_editable = ce;
 
-        /* give it a special name */
+	/* give it a special name */
 
-        Gtk::Entry *e = dynamic_cast<Gtk::Entry*> (ce);
+	Gtk::Entry *e = dynamic_cast<Gtk::Entry*> (ce);
 
-        if (e) {
-                e->set_name (X_("RouteNameEditorEntry"));
-        }
+	if (e) {
+		e->set_name (X_("RouteNameEditorEntry"));
+	}
 }
 
 void
 EditorRoutes::name_edit (std::string const & path, std::string const & new_text)
 {
-        name_editable = 0;
+	name_editable = 0;
 
 	TreeIter iter = _model->get_iter (path);
 
@@ -1689,14 +1719,11 @@ EditorRoutes::show_tracks_with_regions_at_playhead ()
 		}
 	}
 
-	suspend_redisplay ();
+	DisplaySuspender ds;
 
 	TreeModel::Children rows = _model->children ();
 	for (TreeModel::Children::iterator i = rows.begin(); i != rows.end(); ++i) {
 		TimeAxisView* tv = (*i)[_columns.tv];
 		(*i)[_columns.visible] = (show.find (tv) != show.end());
 	}
-
-	resume_redisplay ();
 }
-

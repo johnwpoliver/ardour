@@ -26,6 +26,7 @@
 
 #include "ardour/ardour.h"
 #include "ardour/io_processor.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 
 class XMLNode;
@@ -41,7 +42,7 @@ class Pannable;
 
 /** Port inserts: send output to a Jack port, pick up input at a Jack port
  */
-class PortInsert : public IOProcessor
+class LIBARDOUR_API PortInsert : public IOProcessor
 {
   public:
 	PortInsert (Session&, boost::shared_ptr<Pannable>, boost::shared_ptr<MuteMaster> mm);
@@ -57,7 +58,7 @@ class PortInsert : public IOProcessor
 
 	bool set_name (const std::string& name);
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
 
 	void activate ();

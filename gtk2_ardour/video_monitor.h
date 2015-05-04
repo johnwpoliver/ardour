@@ -26,7 +26,7 @@
 #include "ardour/types.h"
 #include "ardour/session.h"
 #include "ardour/session_handle.h"
-#include "system_exec.h"
+#include "ardour/system_exec.h"
 
 namespace ARDOUR {
 	class Session;
@@ -61,7 +61,6 @@ class VideoMonitor : public sigc::trackable , public ARDOUR::SessionHandlePtr, p
 
 	void set_session (ARDOUR::Session *s);
 	void save_session ();
-	void clear_session_state ();
 	void query_full_state (bool);
 	bool set_custom_setting (const std::string, const std::string);
 	const std::string get_custom_setting (const std::string);
@@ -84,10 +83,11 @@ class VideoMonitor : public sigc::trackable , public ARDOUR::SessionHandlePtr, p
 
 	protected:
 	PublicEditor *editor;
-	SystemExec *process;
+	ARDOUR::SystemExec *process;
 	float fps;
 	void parse_output (std::string d, size_t s);
 	void terminated ();
+	void forward_keyevent (unsigned int);
 
 	void parameter_changed (std::string const & p);
 
@@ -99,6 +99,7 @@ class VideoMonitor : public sigc::trackable , public ARDOUR::SessionHandlePtr, p
 
 	void xjadeo_sync_setup ();
 	ARDOUR::framepos_t manually_seeked_frame;
+	ARDOUR::frameoffset_t video_offset;
 	bool sync_by_manual_seek;
 	sigc::connection clock_connection;
 	sigc::connection state_connection;
@@ -106,6 +107,8 @@ class VideoMonitor : public sigc::trackable , public ARDOUR::SessionHandlePtr, p
 	int starting;
 	int knownstate;
 	int osdmode;
+
+	PBD::Signal1<void, unsigned int> XJKeyEvent;
 #if 1
 	bool debug_enable;
 #endif

@@ -34,6 +34,7 @@
 #include "ardour/midi_buffer.h"
 #include "ardour/port.h"
 #include "ardour/port_set.h"
+#include "ardour/uri_map.h"
 #ifdef LV2_SUPPORT
 #include "ardour/lv2_plugin.h"
 #include "lv2_evbuf.h"
@@ -90,7 +91,7 @@ BufferSet::clear()
 
 /** Set up this BufferSet so that its data structures mirror a PortSet's buffers.
  *  This is quite expensive and not RT-safe, so it should not be called in a process context;
- *  get_jack_port_addresses() will fill in a structure set up by this method.
+ *  get_backend_port_addresses() will fill in a structure set up by this method.
  *
  *  XXX: this *is* called in a process context; I'm not sure quite what `should not' means above.
  */
@@ -114,13 +115,13 @@ BufferSet::attach_buffers (PortSet& ports)
 	_is_mirror = true;
 }
 
-/** Write the JACK port addresses from a PortSet into our data structures.  This
+/** Write the backend port addresses from a PortSet into our data structures.  This
  *  call assumes that attach_buffers() has already been called for the same PortSet.
  *  Does not allocate, so RT-safe BUT you can only call Port::get_buffer() from
  *  the process() callback tree anyway, so this has to be called in RT context.
  */
 void
-BufferSet::get_jack_port_addresses (PortSet& ports, framecnt_t nframes)
+BufferSet::get_backend_port_addresses (PortSet& ports, framecnt_t nframes)
 {
 	assert (_count == ports.count ());
 	assert (_available == ports.count ());
@@ -167,7 +168,7 @@ BufferSet::ensure_buffers(DataType type, size_t num_buffers, size_t buffer_capac
 	// If there's not enough or they're too small, just nuke the whole thing and
 	// rebuild it (so I'm lazy..)
 	if (bufs.size() < num_buffers
-			|| (bufs.size() > 0 && bufs[0]->capacity() < buffer_capacity)) {
+	    || (bufs.size() > 0 && bufs[0]->capacity() < buffer_capacity)) {
 
 		// Nuke it
 		for (BufferVec::iterator i = bufs.begin(); i != bufs.end(); ++i) {
@@ -179,7 +180,7 @@ BufferSet::ensure_buffers(DataType type, size_t num_buffers, size_t buffer_capac
 		for (size_t i = 0; i < num_buffers; ++i) {
 			bufs.push_back(Buffer::create(type, buffer_capacity));
 		}
-
+		
 		_available.set(type, num_buffers);
 		_count.set (type, num_buffers);
 	}
@@ -192,8 +193,8 @@ BufferSet::ensure_buffers(DataType type, size_t num_buffers, size_t buffer_capac
 			_lv2_buffers.push_back(
 				std::make_pair(false, lv2_evbuf_new(buffer_capacity,
 				                                    LV2_EVBUF_EVENT,
-				                                    LV2Plugin::urids.atom_Chunk,
-				                                    LV2Plugin::urids.atom_Sequence)));
+				                                    URIMap::instance().urids.atom_Chunk,
+				                                    URIMap::instance().urids.atom_Sequence)));
 		}
 	}
 #endif
@@ -252,6 +253,25 @@ BufferSet::get(DataType type, size_t i) const
 
 #ifdef LV2_SUPPORT
 
+void
+BufferSet::ensure_lv2_bufsize(bool input, size_t i, size_t buffer_capacity)
+{
+	assert(count().get(DataType::MIDI) > i);
+
+	LV2Buffers::value_type b     = _lv2_buffers.at(i * 2 + (input ? 0 : 1));
+	LV2_Evbuf*             evbuf = b.second;
+
+	if (lv2_evbuf_get_capacity(evbuf) >= buffer_capacity) return;
+
+	lv2_evbuf_free(b.second);
+	_lv2_buffers.at(i * 2 + (input ? 0 : 1)) =
+		std::make_pair(false, lv2_evbuf_new(
+					buffer_capacity,
+					LV2_EVBUF_EVENT,
+					URIMap::instance().urids.atom_Chunk,
+					URIMap::instance().urids.atom_Sequence));
+}
+
 LV2_Evbuf*
 BufferSet::get_lv2_midi(bool input, size_t i, bool old_api)
 {
@@ -263,6 +283,25 @@ BufferSet::get_lv2_midi(bool input, size_t i, bool old_api)
 	lv2_evbuf_set_type(evbuf, old_api ? LV2_EVBUF_EVENT : LV2_EVBUF_ATOM);
 	lv2_evbuf_reset(evbuf, input);
 	return evbuf;
+}
+
+void
+BufferSet::forward_lv2_midi(LV2_Evbuf* buf, size_t i, bool purge_ardour_buffer)
+{
+	MidiBuffer& mbuf  = get_midi(i);
+	if (purge_ardour_buffer) {
+		mbuf.silence(0, 0);
+	}
+	for (LV2_Evbuf_Iterator i = lv2_evbuf_begin(buf);
+			 lv2_evbuf_is_valid(i);
+			 i = lv2_evbuf_next(i)) {
+		uint32_t frames, subframes, type, size;
+		uint8_t* data;
+		lv2_evbuf_get(i, &frames, &subframes, &type, &size, &data);
+		if (type == URIMap::instance().urids.midi_MidiEvent) {
+			mbuf.push_back(frames, size, data);
+		}
+	}
 }
 
 void
@@ -288,7 +327,7 @@ BufferSet::flush_lv2_midi(bool input, size_t i)
 			DEBUG_TRACE (PBD::DEBUG::LV2, string_compose ("\tByte[%1] = %2\n", x, (int) data[x]));
 		}
 #endif
-		if (type == LV2Plugin::urids.midi_MidiEvent) {
+		if (type == URIMap::instance().urids.midi_MidiEvent) {
 			// TODO: Make Ardour event buffers generic so plugins can communicate
 			mbuf.push_back(frames, size, data);
 		}
@@ -428,17 +467,6 @@ BufferSet::silence (framecnt_t nframes, framecnt_t offset)
 			(*b)->silence (nframes, offset);
 		}
 	}
-}
-
-void
-BufferSet::set_is_silent (bool yn)
-{
-	for (std::vector<BufferVec>::iterator i = _buffers.begin(); i != _buffers.end(); ++i) {
-		for (BufferVec::iterator b = i->begin(); b != i->end(); ++b) {
-			(*b)->set_is_silent (yn);
-		}
-	}
-
 }
 
 } // namespace ARDOUR

@@ -205,7 +205,8 @@ SourceFactory::create (Session& s, const XMLNode& node, bool defer_peaks)
 		}
 	} else if (type == DataType::MIDI) {
 		boost::shared_ptr<SMFSource> src (new SMFSource (s, node));
-		src->load_model (true, true);
+		Source::Lock lock(src->mutex());
+		src->load_model (lock, true);
 #ifdef BOOST_SP_ENABLE_DEBUG_HOOKS
 		// boost_debug_shared_ptr_mark_interesting (src, "Source");
 #endif
@@ -272,18 +273,18 @@ SourceFactory::createExternal (DataType type, Session& s, const string& path,
 
 	} else if (type == DataType::MIDI) {
 
-		SMFSource* src = new SMFSource (s, path, SMFSource::Flag(0));
-		src->load_model (true, true);
+		boost::shared_ptr<SMFSource> src (new SMFSource (s, path));
+		Source::Lock lock(src->mutex());
+		src->load_model (lock, true);
 #ifdef BOOST_SP_ENABLE_DEBUG_HOOKS
 		// boost_debug_shared_ptr_mark_interesting (src, "Source");
 #endif
-		boost::shared_ptr<Source> ret (src);
 
 		if (announce) {
-			SourceCreated (ret);
+			SourceCreated (src);
 		}
 
-		return ret;
+		return src;
 
 	}
 
@@ -325,7 +326,8 @@ SourceFactory::createWritable (DataType type, Session& s, const std::string& pat
 		boost::shared_ptr<SMFSource> src (new SMFSource (s, path, SndFileSource::default_writable_flags));
 		assert (src->writable ());
 
-		src->load_model (true, true);
+		Source::Lock lock(src->mutex());
+		src->load_model (lock, true);
 #ifdef BOOST_SP_ENABLE_DEBUG_HOOKS
 		// boost_debug_shared_ptr_mark_interesting (src, "Source");
 #endif
@@ -337,6 +339,39 @@ SourceFactory::createWritable (DataType type, Session& s, const std::string& pat
 		}
 		return src;
 
+	}
+
+	return boost::shared_ptr<Source> ();
+}
+
+boost::shared_ptr<Source>
+SourceFactory::createForRecovery (DataType type, Session& s, const std::string& path, int chn)
+{
+	/* this might throw failed_constructor(), which is OK */
+
+	if (type == DataType::AUDIO) {
+		Source* src = new SndFileSource (s, path, chn);
+
+#ifdef BOOST_SP_ENABLE_DEBUG_HOOKS
+		// boost_debug_shared_ptr_mark_interesting (src, "Source");
+#endif
+		boost::shared_ptr<Source> ret (src);
+
+		if (setup_peakfile (ret, false)) {
+			return boost::shared_ptr<Source>();
+		}
+
+		// no analysis data - this is still basically a new file (we
+		// crashed while recording.
+
+		// always announce these files
+
+		SourceCreated (ret);
+
+		return ret;
+
+	} else if (type == DataType::MIDI) {
+		error << _("Recovery attempted on a MIDI file - not implemented") << endmsg;
 	}
 
 	return boost::shared_ptr<Source> ();

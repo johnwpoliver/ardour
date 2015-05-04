@@ -1,13 +1,23 @@
 #!/bin/bash
 
+set -e
+
 # script for pulling together a MacOSX app bundle.
 
 GTKSTACK_ROOT=$HOME/gtk/inst
 ARDOURSTACK_ROOT=$HOME/a3/inst
 BUILD_ROOT=../../build
 
+# where harvid and xjadeo binaries are cached
+if test -z "$CACHEDIR" -o ! -d "$CACHEDIR"; then
+	CACHEDIR=/var/tmp
+fi
+mkdir -p "$CACHEDIR"
+
 SAE=
 MIXBUS=
+WITH_HARVID=1
+WITH_HARRISON_LV2=
 WITH_LADSPA=1
 STRIP=1
 PRINT_SYSDEPS=
@@ -39,7 +49,6 @@ while [ $# -gt 0 ] ; do
 	--public) WITH_NLS= ; 
 	          SAE= ; 
                   WITH_LADSPA=1; 
-                  STRIP= ; 
 		  PRODUCT_PKG_DIR=Ardour;
 		  APPNAME=Ardour ;
 		  shift ;;
@@ -55,6 +64,7 @@ while [ $# -gt 0 ] ; do
 	# specific build flags
 	#
 
+	--noharvid) WITH_HARVID= ; shift ;;
 	--noladspa) WITH_LADSPA= ; shift ;;
 	--nostrip) STRIP= ; shift ;;
 	--sysdeps) PRINT_SYSDEPS=1; shift ;;
@@ -68,13 +78,28 @@ if test -z "$PRODUCT_PKG_DIR" -o -z "$APPNAME"; then
 fi
 
 . ../define_versions.sh
-echo "Version is $release_version / $revision"
-info_string="$version built on `hostname` by `whoami` on `date`"
+echo "Version is $release_version"
+if [ "x$commit" != "x" ] ; then
+    info_string="$release_version ($commit) built on `hostname` by `whoami` on `date`"
+else
+    info_string="$release_version built on `hostname` by `whoami` on `date`"
+fi
 echo "Info string is $info_string"
+
+if [ x$DEBUG = xT ]; then
+	STRIP=
+	echo "Debug build, strip disabled"
+else
+	if test x$STRIP != x ; then
+		echo "No debug build, strip enabled"
+	else
+		echo "No debug build, but strip disabled."
+	fi
+fi
 
 # setup directory structure
 
-APPDIR=${APPNAME}.app
+APPDIR=${APPNAME}${major_version}.app
 APPROOT=$APPDIR/Contents
 Frameworks=$APPROOT/lib
 Resources=$APPROOT/Resources
@@ -92,6 +117,7 @@ Locale=$Resources/locale
 Plugins=$APPROOT/Plugins
 Surfaces=$Frameworks/surfaces
 Panners=$Frameworks/panners
+Backends=$Frameworks/backends
 MidiMaps=$Shared/midi_maps
 ExportFormats=$Shared/export
 Templates=$Shared/templates
@@ -103,7 +129,7 @@ if [ x$PRINT_SYSDEPS != x ] ; then
 # print system dependencies
 #
 
-    for file in $APPROOT/MacOS/* $Frameworks/* $Frameworks/modules/* $Plugins/*.so ; do 
+for file in $APPROOT/MacOS/* $Frameworks/* $Frameworks/modules/* $Plugins/*.so ; do
 	if ! file $file | grep -qs Mach-O ; then
 	    continue
 	fi
@@ -125,35 +151,38 @@ mkdir -p $APPROOT/Resources
 mkdir -p $Plugins
 mkdir -p $Surfaces
 mkdir -p $Panners
+mkdir -p $Backends
 mkdir -p $MidiMaps
 mkdir -p $ExportFormats
 mkdir -p $Templates
 mkdir -p $Frameworks/modules
 mkdir -p $Etc
 mkdir -p $MackieControl
+mkdir -p $PatchFiles
 
 # maybe set variables
 env=""
 if test x$SAE != x ; then
-    appname="Ardour3/SAE"
+    appname="Ardour${major_version}-SAE"
+    EXECUTABLE=${appname}
     env="$env<key>ARDOUR_SAE</key><string>true</string>"
     #
     # current default for SAE version is German keyboard layout without a keypad
     #
     env="$env<key>ARDOUR_KEYBOARD_LAYOUT</key><string>de-nokeypad</string>"
     env="$env<key>ARDOUR_UI_CONF</key><string>ardour3_ui_sae.conf</string>"
-    env="$env<key>ARDOUR3_UI_RC</key><string>ardour3_ui_dark_sae.rc</string>"
 elif test x$MIXBUS != x ; then
-    appname="Ardour3/Mixbus"
+    appname="Mixbus"
+    EXECUTABLE=${appname}${major_version}
     env="$env<key>ARDOUR_MIXBUS</key><string>true</string>"
     #
     # current default for MIXBUS version is US keyboard layout without a keypad
     #
     env="$env<key>ARDOUR_KEYBOARD_LAYOUT</key><string>us-nokeypad</string>"
     env="$env<key>ARDOUR_UI_CONF</key><string>ardour3_ui.conf</string>"
-    env="$env<key>ARDOUR3_UI_RC</key><string>ardour3_ui_dark.rc</string>"
 else
-    appname="Ardour3"
+    appname="Ardour${major_version}"
+    EXECUTABLE=${appname}
 fi
 
 #
@@ -166,14 +195,17 @@ env="$env<key>DYLIB_FALLBACK_LIBRARY_PATH</key><string>/usr/local/lib:/opt/lib</
 
 env="<key>LSEnvironment</key><dict>$env<key>ARDOUR_BUNDLED</key><string>true</string></dict>"
 
+
 # edit plist
 sed -e "s?@ENV@?$env?g" \
-    -e "s?@VERSION@?$release_version/$revision?g" \
-    -e "s?@INFOSTRING@?$info_string?g" < Info.plist.in > Info.plist
+    -e "s?@VERSION@?$release_version?g" \
+    -e "s?@INFOSTRING@?$info_string?g" \
+    -e "s?@IDSUFFIX@?$EXECUTABLE?g" \
+    -e "s?@EXECUTABLE@?$EXECUTABLE?g" < Info.plist.in > Info.plist
 # and plist strings
 sed -e "s?@APPNAME@?$appname?" \
     -e "s?@ENV@?$env?g" \
-    -e "s?@VERSION@?$release_version/$revision?g" \
+    -e "s?@VERSION@?$release_version?g" \
     -e "s?@INFOSTRING@?$info_string?g" < InfoPlist.strings.in > Resources/InfoPlist.strings || exit 1
 
 # copy static files
@@ -181,16 +213,20 @@ sed -e "s?@APPNAME@?$appname?" \
 cp Info.plist $APPROOT
 cp -R Resources $APPROOT
 
+# ..and clean up
+rm -f Info.plist
+rm -f Resources/InfoPlist.strings
+
 #
 # if we build a bundle without jack, then
-# make the Ardour3 executable a helper
+# make the Ardour executable a helper
 # script that checks to see if JACK is
 # installed.
 #
 
-cp startup_script $APPROOT/MacOS/Ardour3
-chmod 775 $APPROOT/MacOS/Ardour3
-MAIN_EXECUTABLE=Ardour3.bin
+cp startup_script $APPROOT/MacOS/$EXECUTABLE
+chmod 775 $APPROOT/MacOS/$EXECUTABLE
+MAIN_EXECUTABLE=Ardour.bin  ## used in startup_script
 
 echo "Copying ardour executable ...."
 cp $BUILD_ROOT/gtk2_ardour/ardour-$release_version $APPROOT/MacOS/$MAIN_EXECUTABLE
@@ -200,31 +236,51 @@ if test x$SAE != x ; then
 elif test x$MIXBUS != x ; then
     cp  Mixbus.icns $Resources/appIcon.icns
 else
-    cp  Ardour3.icns $Resources/appIcon.icns
+    cp  Ardour.icns $Resources/appIcon.icns
 fi
 cp  typeArdour.icns $Resources/
-if test x$STRIP != x ; then
-    strip $APPROOT/MacOS/Ardour3
-fi
+
+set +e # things below are not error-free (optional files etc) :(
 
 # copy locale files
 if test x$WITH_NLS != x ; then
     echo "NLS support ..."
-    echo "I hope you remembered to run scons msgupdate!"
+    echo "I hope you remembered to run waf i18n"
     LINGUAS=
-    for file in $BUILD_ROOT/gtk2_ardour/*.mo 
-    do
-	lang=`basename $file | sed 's/\.mo//'`
-	mkdir -p $Locale/$lang/LC_MESSAGES
-	cp $file $Locale/$lang/LC_MESSAGES/gtk2_ardour.mo
-	LINGUAS="$LINGUAS $lang"
+
+    for pkg in gtk2_ardour libs/ardour libs/gtkmm2ext ; do 
+	files=`find ../../$pkg -name "*.mo"`
+	
+            #
+            # the package name is appended with a number so that
+            # it can be parallel installed during a regular install
+            # with older (and newer) versions. it is just the major
+            # number of the release (i.e. leading digits)
+            #
+	
+        vsuffix=`echo $release_version | sed 's/^\([0-9][0-9]*\).*/\1/'`
+	
+	if [ -z "$files" ]; then
+	    echo ""
+	    echo "!!!! WARNING !!!! - Did not find any .mo files in ../../$pkg"
+	    echo ""
+	fi
+	
+	for file in $files 
+	do
+	    echo $file
+	    lang=`basename $file | sed 's/\.mo//'`
+	    mkdir -p $Locale/$lang/LC_MESSAGES
+	    cp $file $Locale/$lang/LC_MESSAGES/`basename $pkg`$vsuffix.mo
+	    echo copy $file to $Locale/$lang/LC_MESSAGES/`basename $pkg`$vsuffix.mo
+            if echo $LINGUAS | grep $lang >/dev/null 2>&1 ; then
+                :
+            else 
+		LINGUAS="$LINGUAS $lang"
+            fi
+	done
     done
-    for file in $BUILD_ROOT/libs/ardour/*.mo 
-    do
-	lang=`basename $file | sed 's/\.mo//'`
-	mkdir -p $Locale/$lang/LC_MESSAGES
-	cp $file $Locale/$lang/LC_MESSAGES/libardour.mo
-    done
+
     for l in $LINGUAS
     do
       if [ -d $GTKSTACK_ROOT/share/locale/$l ] ; then
@@ -248,23 +304,7 @@ fi
 # 
 
 cp -R $GTKSTACK_ROOT/etc/* $Etc
-echo "Copying all Pango modules ..."
-cp -R $GTKSTACK_ROOT/lib/pango/1.6.0/modules/*.so $Frameworks/modules
-echo "Copying all GDK Pixbuf loaders ..."
-cp -R $GTKSTACK_ROOT/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.so $Frameworks/modules
-# charset alias file
 cp -R $GTKSTACK_ROOT/lib/charset.alias $Resources
-
-# generate new Pango module file
-cat > pangorc <<EOF 
-[Pango]
-ModulesPath=$GTKSTACK_ROOT/lib/pango/1.6.0/modules
-EOF
-env PANGO_RC_FILE=pangorc $GTKSTACK_ROOT/bin/pango-querymodules | sed "s?$GTKSTACK_ROOT/lib/pango/1.6.0/modules/?@executable_path/../lib/modules/?" > $Resources/pango.modules
-rm pangorc
-
-# generate a new GDK pixbufs loaders file
-gdk-pixbuf-query-loaders | sed "s?$GTKSTACK_ROOT/lib/gdk-pixbuf-2.0/2.10.0/loaders/?@executable_path/../lib/modules/?" > $Resources/gdk-pixbuf.loaders
 
 # We rely on clearlooks, so include a version from our own build tree
 # this one is special - we will set GTK_PATH to $Frameworks/gtkengines
@@ -301,6 +341,10 @@ cp $BUILD_ROOT/libs/surfaces/control_protocol/libardourcp*.dylib $Frameworks
 # Panners
 cp $BUILD_ROOT/libs/panners/*/lib*.dylib $Panners
 
+# Backends
+for backend in jack wavesaudio dummy coreaudio; do
+    cp $BUILD_ROOT/libs/backends/$backend/lib*.dylib $Backends
+done
 
 # Export Formats/Presets
 for f in $BUILD_ROOT/../export/*.preset $BUILD_ROOT/../export/*.format ; do 
@@ -335,16 +379,40 @@ done
 # VAMP plugins that we use
 cp $BUILD_ROOT/libs/vamp-plugins/libardourvampplugins.dylib $Frameworks
 
-# Suil modules
-cp $ARDOURSTACK_ROOT/lib/suil-0/lib* $Frameworks
+# Suil modules (new dir 'build-stack')
+if test -d $GTKSTACK_ROOT/lib/suil-0/ ; then
+    cp $GTKSTACK_ROOT/lib/suil-0/lib* $Frameworks
+fi
+
+# Suil modules (old dir 'build-ardour-stack')
+if test -d $ARDOURSTACK_ROOT/lib/suil-0/ ; then
+    cp $ARDOURSTACK_ROOT/lib/suil-0/lib* $Frameworks
+fi
+
+# VST scanner app and wrapper script, if they exist
+if test -d $BUILD_ROOT/libs/fst ; then
+    cp $BUILD_ROOT/libs/fst/ardour-vst-scanner* $Frameworks/
+fi
+
+# vfork wrapper
+if test -f $BUILD_ROOT/libs/vfork/ardour-exec-wrapper ; then
+    mkdir -p $Frameworks/vfork
+    cp $BUILD_ROOT/libs/vfork/ardour-exec-wrapper $Frameworks/
+fi
+
 
 while [ true ] ; do 
     missing=false
-    for file in $APPROOT/MacOS/* $Frameworks/* $Frameworks/modules/* $Panners/*.dylib $Surfaces/*.dylib $Plugins/*.so ; do 
+    for file in $APPROOT/MacOS/* $Frameworks/* $Frameworks/modules/* $Panners/*.dylib $Backends/*.dylib $Surfaces/*.dylib $Plugins/*.so ; do 
 	if ! file $file | grep -qs Mach-O ; then
 	    continue
 	fi
-	deps=`otool -L $file | awk '{print $1}' | egrep "($GTKSTACK_ROOT|$ARDOURSTACK_ROOT|/opt/|/local/|libs/)" | grep -v 'libjack\.'`
+
+	if test x$STRIP != x ; then
+		strip -u -r -arch all $file &>/dev/null
+	fi
+
+	deps=`otool -L $file | awk '{print $1}' | egrep "($GTKSTACK_ROOT|$ARDOURSTACK_ROOT|/opt/|/local/|libs/)" | grep -v 'libjack\.' | grep -v "$(basename $file)"`
 	# echo -n "."
 	for dep in $deps ; do
 	    base=`basename $dep`
@@ -370,40 +438,38 @@ echo "Copying other stuff to $APPDIR  ..."
 #cp $BUILD_ROOT/gtk2_ardour/ergonomic-us.bindings  $Resources
 
 cp $BUILD_ROOT/gtk2_ardour/mnemonic-us.bindings  $Resources
-cp ../../gtk2_ardour/mixer.bindings $Resources
-cp ../../gtk2_ardour/step_editing.bindings $Resources
 cp $BUILD_ROOT/gtk2_ardour/ardour.menus $Resources
+cp $BUILD_ROOT/gtk2_ardour/default_ui_config $Resources
+cp $BUILD_ROOT/gtk2_ardour/clearlooks.rc $Resources
 
-if test x$SAE != x ; then
-    cp $BUILD_ROOT/gtk2_ardour/SAE-de-keypad.bindings  $Resources
-    cp $BUILD_ROOT/gtk2_ardour/SAE-de-nokeypad.bindings  $Resources
-    cp $BUILD_ROOT/gtk2_ardour/SAE-us-keypad.bindings  $Resources
-    cp $BUILD_ROOT/gtk2_ardour/SAE-us-nokeypad.bindings  $Resources
-    cp $BUILD_ROOT/ardour_system_sae.rc $Resources/ardour_system.rc
-    echo cp $BUILD_ROOT/ardour_system_sae.rc $Resources/ardour_system.rc
-    cp $BUILD_ROOT/instant.xml.sae $Resources/instant.xml
-    echo cp $BUILD_ROOT/instant.xml.sae $Resources/instant.xml
-else
-    cp ../../ardour_system.rc $Resources/ardour_system.rc
-    cp ../../instant.xml $Resources/instant.xml
-    echo cp ../../instant.xml $Resources/instant.xml
-fi
-cp ../../gtk2_ardour/ardour3_ui_default.conf $Resources
-cp ../../gtk2_ardour/ardour3_ui_default.conf $Resources/ardour3_ui.conf
-cp $BUILD_ROOT/gtk2_ardour/ardour3_ui_light.rc $Resources
-cp $BUILD_ROOT/gtk2_ardour/ardour3_ui_dark.rc $Resources
+# Copied directly from source tree
 
+cp ../../system_config $Resources/system_config
+cp ../../instant.xml $Resources/instant.xml
+cp ../../gtk2_ardour/step_editing.bindings $Resources
+cp ../../gtk2_ardour/mixer.bindings $Resources
 cp -r ../../gtk2_ardour/icons $Resources
 cp -r ../../gtk2_ardour/pixmaps $Resources
-
-# shared stuff
+cp ../../gtk2_ardour/dark.colors $Resources
 cp -R ../../gtk2_ardour/splash.png $Shared
+cp -R ../../gtk2_ardour/small-splash.png $Shared
 cp -R ../../gtk2_ardour/ArdourMono.ttf $Shared
 
 # go through and recursively remove any .svn dirs in the bundle
 for svndir in `find $APPDIR -name .svn -type dir`; do
     rm -rf $svndir
 done
+
+# install bundled LV2s to <app>/Contents/lib/LV2/
+cp -R $BUILD_ROOT/libs/LV2 $Frameworks/
+
+# lv2 core, classifications etc - TODO check if we need the complete LV2 ontology
+if test -d $ARDOURSTACK_ROOT/lib/lv2/lv2core.lv2 ; then
+	cp -R $ARDOURSTACK_ROOT/lib/lv2/lv2core.lv2 $Frameworks/LV2/
+elif test -d $GTKSTACK_ROOT/lib/lv2/lv2core.lv2 ; then
+	cp -R $GTKSTACK_ROOT/lib/lv2/lv2core.lv2 $Frameworks/LV2/
+fi
+
 
 # now fix up the executables
 echo "Fixing up executable dependency names ..."
@@ -426,7 +492,7 @@ done
 
 echo "Fixing up library names ..."
 # now do the same for all the libraries we include
-for libdir in $Frameworks $Frameworks/modules $Surfaces $Panners ; do
+for libdir in $Frameworks $Frameworks/modules $Surfaces $Panners $Backends ; do
 
     libbase=`basename $libdir`
     
@@ -472,6 +538,9 @@ done
 rm -rf $PRODUCT_PKG_DIR
 mkdir $PRODUCT_PKG_DIR
 
+DMGWINBOTTOM=440
+DMGBACKGROUND=dmgbg
+
 if [ x$SAE != x ] ; then
 	
     # SAE packaging
@@ -488,8 +557,7 @@ elif [ x$MIXBUS != x ] ; then
 
     echo "Creating Mixbus packaging directory"
     mv $APPDIR $PRODUCT_PKG_DIR/
-    cp MixBus_Install_QuickStart.pdf "$PRODUCT_PKG_DIR/Mixbus Install & Quick Start Guide.pdf"
-
+    DMGBACKGROUND=dmgbgMB
 else 
 
     echo "Creating $APPNAME packaging directory"
@@ -497,16 +565,102 @@ else
 
 fi
 
+if test x$WITH_HARRISON_LV2 != x ; then
+	if file ${PRODUCT_PKG_DIR}/$APPROOT/MacOS/$MAIN_EXECUTABLE | grep -q x86_64; then
+		OSX_ARCH=osx64
+	else 
+		OSX_ARCH=osx32
+	fi
+	curl -s http://www.harrisonconsoles.com/mixbus/mb3/${OSX_ARCH}/harrison_lv2s.zip \
+		| bsdtar -C "${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2/" -xf -
+fi
+
+if test x$WITH_HARVID != x ; then
+	echo "installing video tools.."
+	HARVID_VERSION=$(curl -s -S http://ardour.org/files/video-tools/harvid_version.txt)
+	XJADEO_VERSION=$(curl -s -S http://ardour.org/files/video-tools/xjadeo_version.txt)
+	MULTIARCH=osx
+	echo "copying harvid and xjadeo ..."
+
+	rsync -Pa \
+		rsync://ardour.org/video-tools/harvid-osx-${HARVID_VERSION}.tgz \
+		"$CACHEDIR/harvid-${MULTIARCH}-${HARVID_VERSION}.tgz"
+
+	rsync -Pa \
+		rsync://ardour.org/video-tools/jadeo-${XJADEO_VERSION:1}.dmg \
+		"$CACHEDIR/jadeo-${XJADEO_VERSION:1}.dmg"
+
+	tar -x -z \
+		-C $PRODUCT_PKG_DIR/$APPROOT \
+		-f "$CACHEDIR/harvid-${MULTIARCH}-${HARVID_VERSION}.tgz" || exit 1
+
+	JADEO=$(hdiutil attach "$CACHEDIR/jadeo-${XJADEO_VERSION:1}.dmg" | grep Apple_HFS | grep dev/ | cut -f 3)
+	cp -r "${JADEO}/Jadeo.app" "$PRODUCT_PKG_DIR/"
+	hdiutil detach "${JADEO}"
+
+	DMGWINBOTTOM=580
+	YPOS=$[ $DMGWINBOTTOM - 300 ]
+	XJADEOPOS="set position of item \"Jadeo.app\" of container window to {310, ${YPOS}}"
+
+	DMGBACKGROUND=${DMGBACKGROUND}xj
+fi
+
+###################################################################
+### Mixbus plugins, etc
+if test -n "$MIXBUS"; then
+	echo "bundling x42 plugins"
+	if file ${PRODUCT_PKG_DIR}/$APPROOT/MacOS/$MAIN_EXECUTABLE | grep -q x86_64; then
+		OSX_ARCH=x86_64
+	else
+		OSX_ARCH=i386
+	fi
+
+	mkdir -p "${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2"
+
+	METERS_VERSION=$(curl -s -S http://gareus.org/x42/osx/x42-meters.latest.txt)
+	rsync -a -q --partial \
+		rsync://gareus.org/x42/osx/x42-meters-lv2-osx-${METERS_VERSION}.zip \
+		"$CACHEDIR/x42-meters-lv2-osx-${METERS_VERSION}.zip"
+	bsdtar -C "${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2/" -xf \
+		"$CACHEDIR/x42-meters-lv2-osx-${METERS_VERSION}.zip"
+
+	SETBFREE_VERSION=$(curl -s -S http://gareus.org/x42/osx/setBfree.latest.txt)
+	rsync -a -q --partial \
+		rsync://gareus.org/x42/osx/setBfree-lv2-osx-${SETBFREE_VERSION}.zip \
+		"$CACHEDIR/setBfree-lv2-osx-${SETBFREE_VERSION}.zip"
+	bsdtar -C "${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2/" -xf \
+		"$CACHEDIR/setBfree-lv2-osx-${SETBFREE_VERSION}.zip"
+
+	MIDIFILTER_VERSION=$(curl -s -S http://gareus.org/x42/osx/x42-midifilter.latest.txt)
+	rsync -a -q --partial \
+		rsync://gareus.org/x42/osx/x42-midifilter-lv2-osx-${MIDIFILTER_VERSION}.zip \
+		"$CACHEDIR/x42-midifilter-lv2-osx-${MIDIFILTER_VERSION}.zip"
+	bsdtar -C "${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2/" -xf \
+		"$CACHEDIR/x42-midifilter-lv2-osx-${MIDIFILTER_VERSION}.zip"
+
+	for file in ${PRODUCT_PKG_DIR}/${APPROOT}/lib/LV2/*/*.dylib ; do
+		lipo -thin ${OSX_ARCH} ${file} -output ${file}.thin
+		mv ${file}.thin ${file}
+	done
+
+fi
+################################################################################
+
+( cd $PRODUCT_PKG_DIR ; find . ) > file_list.txt
+
 echo "Building DMG ..."
 
-# UC_DMG=$APPNAME-${release_version}-${revision}-UC.dmg
-# FINAL_DMG=$APPNAME-${release_version}-${revision}.dmg
-UC_DMG=$APPNAME-$version.dmg
-VOLNAME=$APPNAME-$version
+# UC_DMG=$APPNAME-${release_version}-UC.dmg
+# FINAL_DMG=$APPNAME-${release_version}.dmg
 
-# TODO use mktemp
-export TMPDIR=`pwd`
-MNTPATH=`mktemp -d -t /ardourimg`
+if [ x$DEBUG = xT ]; then
+	UC_DMG=$APPNAME-$release_version-dbg.dmg
+else
+	UC_DMG=$APPNAME-$release_version.dmg
+fi
+VOLNAME=$APPNAME-$release_version
+
+MNTPATH=`mktemp -d -t ardourimg`
 TMPDMG=`mktemp -t ardour`
 ICNSTMP=`mktemp -t ardouricon`
 EXTRA_SPACE_MB=30
@@ -520,64 +674,77 @@ mkdir -p "$MNTPATH"
 
 TMPDMG="${TMPDMG}.dmg"
 
+trap "rm -rf $MNTPATH $TMPDMG ${TMPDMG}.dmg $ICNSTMP" EXIT
+
 hdiutil create -megabytes $DMGMEGABYTES "$TMPDMG"
 DiskDevice=$(hdid -nomount "$TMPDMG" | grep Apple_HFS | cut -f 1 -d ' ')
 newfs_hfs -v "${VOLNAME}" "${DiskDevice}"
-mount -t hfs "${DiskDevice}" "${MNTPATH}"
+mount -t hfs -o nobrowse "${DiskDevice}" "${MNTPATH}"
 
-cp -r ${PRODUCT_PKG_DIR}/${APPDIR} "${MNTPATH}" || exit
+cp -r ${PRODUCT_PKG_DIR}/* "${MNTPATH}" || exit
 mkdir "${MNTPATH}/.background"
-cp -vi dmgbg.png "${MNTPATH}/.background/dmgbg.png"
+cp -vi ${DMGBACKGROUND}.png "${MNTPATH}/.background/dmgbg.png"
 
 echo "setting DMG background ..."
 
-echo '
-   tell application "Finder"
-     tell disk "'${VOLNAME}'"
-           open
-           set current view of container window to icon view
-           set toolbar visible of container window to false
-           set statusbar visible of container window to false
-           set the bounds of container window to {400, 200, 800, 440}
-           set theViewOptions to the icon view options of container window
-           set arrangement of theViewOptions to not arranged
-           set icon size of theViewOptions to 64
-           set background picture of theViewOptions to file ".background:dmgbg.png"
-           make new alias file at container window to POSIX file "/Applications" with properties {name:"Applications"}
-           set position of item "'${APPDIR}'" of container window to {90, 100}
-           set position of item "Applications" of container window to {310, 100}
-           close
-           open
-           update without registering applications
-           delay 5
-           eject
-     end tell
-   end tell
-' | osascript
+if test $(sw_vers -productVersion | cut -d '.' -f 2) -lt 9; then
+	# OSX ..10.8.X
+	DISKNAME=${VOLNAME}
+else
+	# OSX 10.9.X and later
+	DISKNAME=`basename "${MNTPATH}"`
+fi
+
+osascript << EOF
+  tell application "Finder"
+    activate
+    tell disk "${DISKNAME}"
+      open
+      set current view of container window to icon view
+      set toolbar visible of container window to false
+      set statusbar visible of container window to false
+      set the bounds of container window to {400, 200, 800, ${DMGWINBOTTOM}}
+      set theViewOptions to the icon view options of container window
+      set arrangement of theViewOptions to not arranged
+      set icon size of theViewOptions to 64
+      set background picture of theViewOptions to file ".background:dmgbg.png"
+      make new alias file at container window to POSIX file "/Applications" with properties {name:"Applications"}
+      set position of item "${APPDIR}" of container window to {90, 100}
+      set position of item "Applications" of container window to {310, 100}
+      ${MIXBUSPOS}
+      ${HARVIDPOS}
+      ${XJADEOPOS}
+      close
+      open
+      update without registering applications
+      delay 5
+      eject
+    end tell
+  end tell
+EOF
 
 chmod -Rf go-w "${MNTPATH}"
 sync
 
+set -e
 echo "compressing Image ..."
 
-# Umount the image
-umount "${DiskDevice}"
-hdiutil eject "${DiskDevice}"
+# Umount the image ('eject' above may already have done that)
+umount "${DiskDevice}" || true
+hdiutil eject "${DiskDevice}" || true
 # Create a read-only version, use zlib compression
 hdiutil convert -format UDZO "${TMPDMG}" -imagekey zlib-level=9 -o "${UC_DMG}"
-# Delete the temporary files
-rm "$TMPDMG"
-rmdir "$MNTPATH"
 
 echo "setting file icon ..."
 
 cp ${PRODUCT_PKG_DIR}/$Resources/appIcon.icns ${ICNSTMP}.icns
-/usr/bin/sips -i ${ICNSTMP}.icns
-/Developer/Tools/DeRez -only icns ${ICNSTMP}.icns > ${ICNSTMP}.rsrc
-/Developer/Tools/Rez -append ${ICNSTMP}.rsrc -o "$UC_DMG"
-/Developer/Tools/SetFile -a C "$UC_DMG"
+sips -i ${ICNSTMP}.icns
+DeRez -only icns ${ICNSTMP}.icns > ${ICNSTMP}.rsrc
+Rez -append ${ICNSTMP}.rsrc -o "$UC_DMG"
+SetFile -a C "$UC_DMG"
 
 rm ${ICNSTMP}.icns ${ICNSTMP}.rsrc
+rm -rf ${PRODUCT_PKG_DIR}
 
 echo
 echo "packaging suceeded."

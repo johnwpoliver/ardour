@@ -123,8 +123,8 @@ ExportPresetSelector::update_selection ()
 		}
 	}
 
-	save_button.set_sensitive (current);
-	remove_button.set_sensitive (current);
+	save_button.set_sensitive (current != 0);
+	remove_button.set_sensitive (current != 0);
 	new_button.set_sensitive (!current && !text.empty() && !preset_name_exists);
 }
 
@@ -152,6 +152,18 @@ void
 ExportPresetSelector::remove_current ()
 {
 	if (!profile_manager) { return; }
+
+	Gtk::MessageDialog dialog (_("Do you really want to remove this preset?"),
+			false,
+			Gtk::MESSAGE_QUESTION,
+			Gtk::BUTTONS_YES_NO);
+
+	if (Gtk::RESPONSE_YES != dialog.run ()) {
+		/* User has selected "no" or closed the dialog, better
+		 * abort
+		 */
+		return;
+	}
 
 	profile_manager->remove_preset();
 	entry.get_entry()->set_text ("");

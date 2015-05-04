@@ -19,6 +19,7 @@
 
 #include <inttypes.h>
 
+#include "pbd/basename.h"
 #include "pbd/error.h"
 
 #include "ardour/audioregion.h"
@@ -58,7 +59,17 @@ RegionFactory::create (boost::shared_ptr<const Region> region, bool announce)
 	} else if ((mr = boost::dynamic_pointer_cast<const MidiRegion>(region)) != 0) {
 
 		if (mr->session().config.get_midi_copy_is_fork()) {
-			ret = mr->clone ();
+			/* What we really want to do here is what Editor::fork_region()
+			   does via Session::create_midi_source_by_stealing_name(), but we
+			   don't have a Track.  We'll just live with the skipped number,
+			   and store the ancestral name of sources so multiple clones
+			   generates reasonable names that don't have too many suffixes. */
+			const std::string ancestor_name = mr->sources().front()->ancestor_name();
+			const std::string base          = PBD::basename_nosuffix(ancestor_name);
+
+			boost::shared_ptr<MidiSource> source = mr->session().create_midi_source_for_session(base);
+			source->set_ancestor_name(mr->sources().front()->name());
+			ret = mr->clone(source);
 		} else {
 			ret = boost::shared_ptr<Region> (new MidiRegion (mr, 0));
 		}
@@ -66,7 +77,7 @@ RegionFactory::create (boost::shared_ptr<const Region> region, bool announce)
 	} else {
 		fatal << _("programming error: RegionFactory::create() called with unknown Region type")
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if (ret) {
@@ -108,7 +119,7 @@ RegionFactory::create (boost::shared_ptr<Region> region, const PropertyList& pli
 	} else {
 		fatal << _("programming error: RegionFactory::create() called with unknown Region type")
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		return boost::shared_ptr<Region>();
 	}
 
@@ -149,7 +160,7 @@ RegionFactory::create (boost::shared_ptr<Region> region, frameoffset_t offset, c
 	} else {
 		fatal << _("programming error: RegionFactory::create() called with unknown Region type")
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		return boost::shared_ptr<Region>();
 	}
 
@@ -191,7 +202,7 @@ RegionFactory::create (boost::shared_ptr<Region> region, const SourceList& srcs,
 	} else {
 		fatal << _("programming error: RegionFactory::create() called with unknown Region type")
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if (ret) {
@@ -564,7 +575,7 @@ RegionFactory::new_region_name (string old)
 	uint32_t number;
 	string::size_type len = old.length() + 64;
 	string remainder;
-	char buf[len];
+	std::vector<char> buf(len);
 
 	if ((last_period = old.find_last_of ('.')) == string::npos) {
 
@@ -603,8 +614,8 @@ RegionFactory::new_region_name (string old)
 
 		number++;
 
-		snprintf (buf, len, "%s%" PRIu32 "%s", old.substr (0, last_period + 1).c_str(), number, remainder.c_str());
-		sbuf = buf;
+		snprintf (&buf[0], len, "%s%" PRIu32 "%s", old.substr (0, last_period + 1).c_str(), number, remainder.c_str());
+		sbuf = &buf[0];
 
 		if (region_name_map.find (sbuf) == region_name_map.end ()) {
 			break;
@@ -612,7 +623,7 @@ RegionFactory::new_region_name (string old)
 	}
 
 	if (number != (UINT_MAX-1)) {
-		return buf;
+		return &buf[0];
 	}
 
 	error << string_compose (_("cannot create new name for region \"%1\""), old) << endmsg;

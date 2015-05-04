@@ -79,6 +79,7 @@ class ProcessorWindowProxy : public WM::ProxyBase
 {
   public:
     ProcessorWindowProxy (std::string const &, ProcessorBox *, boost::weak_ptr<ARDOUR::Processor>);
+    ~ProcessorWindowProxy();
 
     Gtk::Window* get (bool create = false);
     
@@ -88,13 +89,20 @@ class ProcessorWindowProxy : public WM::ProxyBase
 
     ARDOUR::SessionHandlePtr* session_handle();
     void toggle();
+    void set_custom_ui_mode(bool use_custom) { want_custom = use_custom; }
 
-    bool marked;
+    void set_state (const XMLNode&);
+    XMLNode& get_state () const;
 
   private:
     ProcessorBox* _processor_box;
     boost::weak_ptr<ARDOUR::Processor> _processor;
     bool is_custom;
+    bool want_custom;
+    bool _valid;
+
+    void processor_going_away ();
+    PBD::ScopedConnection going_away_connection;
 };
 
 class ProcessorEntry : public Gtkmm2ext::DnDVBoxChild, public sigc::trackable
@@ -108,13 +116,16 @@ public:
 	std::string drag_text () const;
 	void set_visual_state (Gtkmm2ext::VisualState, bool);
 
+	bool is_selectable() const {return _selectable;}
+	void set_selectable(bool s) { _selectable = s; }
+	
 	enum Position {
 		PreFader,
 		Fader,
 		PostFader
 	};
 
-	void set_position (Position);
+	void set_position (Position, uint32_t);
 	boost::shared_ptr<ARDOUR::Processor> processor () const;
 	void set_enum_width (Width);
 
@@ -127,27 +138,31 @@ public:
 	void set_control_state (XMLNode const *);
 	std::string state_id () const;
 	Gtk::Menu* build_controls_menu ();
+	Gtk::Menu* build_send_options_menu ();
 
 protected:
 	ArdourButton _button;
 	Gtk::VBox _vbox;
 	Position _position;
+	uint32_t _position_num;
 
 	virtual void setup_visuals ();
 
 private:
+	bool _selectable;
 	void led_clicked();
 	void processor_active_changed ();
 	void processor_property_changed (const PBD::PropertyChange&);
+	void processor_configuration_changed (const ARDOUR::ChanCount in, const ARDOUR::ChanCount out);
 	std::string name (Width) const;
 	void setup_tooltip ();
 
 	ProcessorBox* _parent;
 	boost::shared_ptr<ARDOUR::Processor> _processor;
 	Width _width;
-	Gtk::StateType _visual_state;
 	PBD::ScopedConnection active_connection;
 	PBD::ScopedConnection name_connection;
+	PBD::ScopedConnection config_connection;
 
 	class Control : public sigc::trackable {
 	public:
@@ -157,7 +172,6 @@ private:
 		void add_state (XMLNode *) const;
 		void set_state (XMLNode const *);
 		void hide_things ();
-		void hide_label ();
 
 		bool visible () const {
 			return _visible;
@@ -167,7 +181,7 @@ private:
 			return _name;
 		}
 		
-		Gtk::VBox box;
+		Gtk::Alignment box;
 
 	private:
 		void slider_adjusted ();
@@ -180,7 +194,6 @@ private:
 		/* things for a slider */
 		Gtk::Adjustment _adjustment;
 		Gtkmm2ext::HSliderController _slider;
-		Gtk::Label _label;
 		Gtkmm2ext::PersistentTooltip _slider_persistant_tooltip;
 		/* things for a button */
 		ArdourButton _button;
@@ -193,12 +206,40 @@ private:
 	std::list<Control*> _controls;
 
 	void toggle_control_visibility (Control *);
-};
+	void toggle_panner_link ();
 
-class BlankProcessorEntry : public ProcessorEntry
-{
-  public:
-	BlankProcessorEntry (ProcessorBox *, Width w);
+	class PortIcon : public Gtk::DrawingArea {
+	public:
+		PortIcon(bool input);
+		void set_ports(ARDOUR::ChanCount const ports) { _ports = ports; }
+	private:
+		bool on_expose_event (GdkEventExpose *);
+		bool _input;
+		ARDOUR::ChanCount _ports;
+	};
+
+	class RoutingIcon : public Gtk::DrawingArea {
+	public:
+		RoutingIcon() {
+			_sources = ARDOUR::ChanCount(ARDOUR::DataType::AUDIO, 1);
+			_sinks = ARDOUR::ChanCount(ARDOUR::DataType::AUDIO, 1);
+			_splitting = false;
+			set_size_request (-1, 4);
+		}
+		void set_sources(ARDOUR::ChanCount const sources) { _sources = sources; }
+		void set_sinks(ARDOUR::ChanCount const sinks) { _sinks = sinks; }
+		void set_splitting(const bool splitting) { _splitting = splitting; }
+	private:
+		bool on_expose_event (GdkEventExpose *);
+		ARDOUR::ChanCount _sources; // signals available to feed into the processor(s)
+		ARDOUR::ChanCount _sinks;   // combined number of outputs of the processor
+		bool _splitting;
+	};
+
+protected:
+	RoutingIcon _routing_icon;
+	PortIcon _input_icon;
+	PortIcon _output_icon;
 };
 
 class PluginInsertProcessorEntry : public ProcessorEntry
@@ -209,17 +250,9 @@ public:
 	void hide_things ();
 
 private:
-	void setup_visuals ();
 	void plugin_insert_splitting_changed ();
-
-	/* XXX: this seems a little ridiculous just for a simple scaleable icon */
-	class SplittingIcon : public Gtk::DrawingArea {
-	private:
-		bool on_expose_event (GdkEventExpose *);
-	};
-
 	boost::shared_ptr<ARDOUR::PluginInsert> _plugin_insert;
-	SplittingIcon _splitting_icon;
+
 	PBD::ScopedConnection _splitting_connection;
 };
 
@@ -232,6 +265,7 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 		ProcessorsPaste,
 		ProcessorsDelete,
 		ProcessorsSelectAll,
+		ProcessorsSelectNone,
 		ProcessorsToggleActive,
 		ProcessorsAB,
 	};
@@ -243,7 +277,7 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 	void set_route (boost::shared_ptr<ARDOUR::Route>);
 	void set_width (Width);
 
-	void processor_operation (ProcessorOperation);
+	bool processor_operation (ProcessorOperation);
 
 	void select_all_processors ();
 	void deselect_all_processors ();
@@ -253,11 +287,13 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 
 	void hide_things ();
 
+	bool edit_aux_send(boost::shared_ptr<ARDOUR::Processor>);
+
         /* Everything except a WindowProxy object should use this to get the window */
 	Gtk::Window* get_processor_ui (boost::shared_ptr<ARDOUR::Processor>) const;
 
         /* a WindowProxy object can use this */
-        Gtk::Window* get_editor_window (boost::shared_ptr<ARDOUR::Processor>);
+        Gtk::Window* get_editor_window (boost::shared_ptr<ARDOUR::Processor>, bool);
         Gtk::Window* get_generic_editor_window (boost::shared_ptr<ARDOUR::Processor>);
 
         void edit_processor (boost::shared_ptr<ARDOUR::Processor>);
@@ -295,6 +331,8 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 	RouteProcessorSelection& _rr_selection;
 
 	void route_going_away ();
+
+        bool is_editor_mixer_strip() const;
 
 	Gtkmm2ext::DnDVBox<ProcessorEntry> processor_display;
 	Gtk::ScrolledWindow    processor_scroller;
@@ -397,7 +435,9 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 	void route_property_changed (const PBD::PropertyChange&);
 	std::string generate_processor_title (boost::shared_ptr<ARDOUR::PluginInsert> pi);
 
-	std::list<ProcessorWindowProxy*> _processor_window_info;
+        //typedef std::list<ProcessorWindowProxy*> ProcessorWindowProxies;
+        //ProcessorWindowProxies _processor_window_info;
+
         ProcessorWindowProxy* find_window_proxy (boost::shared_ptr<ARDOUR::Processor>) const;
 
 	void set_processor_ui (boost::shared_ptr<ARDOUR::Processor>, Gtk::Window *);
@@ -409,6 +449,7 @@ class ProcessorBox : public Gtk::HBox, public PluginInterestedObject, public ARD
 	void mixer_strip_delivery_changed (boost::weak_ptr<ARDOUR::Delivery>);
 
 	XMLNode* entry_gui_object_state (ProcessorEntry *);
+	PBD::ScopedConnection amp_config_connection;
 };
 
 #endif /* __ardour_gtk_processor_box__ */

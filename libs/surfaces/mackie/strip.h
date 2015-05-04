@@ -23,6 +23,8 @@ namespace ARDOUR {
 	class ChannelCount;
 }
 
+namespace ArdourSurface {
+
 namespace Mackie {
 
 class Control;
@@ -61,6 +63,7 @@ public:
 
 	void handle_button (Button&, ButtonState bs);
 	void handle_fader (Fader&, float position);
+	void handle_fader_touch (Fader&, bool touch_on);
 	void handle_pot (Pot&, float delta);
 
 	void periodic (uint64_t now_usecs);
@@ -144,6 +147,7 @@ private:
 	std::map<Evoral::Parameter,Control*> control_by_parameter;
 };
 
+}
 }
 
 #endif /* __ardour_mackie_control_protocol_strip_h__ */

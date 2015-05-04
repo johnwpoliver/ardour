@@ -205,6 +205,9 @@ Bundle::remove_channel (uint32_t ch)
 
 	Glib::Threads::Mutex::Lock lm (_channel_mutex);
 	_channel.erase (_channel.begin () + ch);
+
+	lm.release();
+	emit_changed (ConfigurationChanged);
 }
 
 /** Remove all channels */
@@ -214,6 +217,9 @@ Bundle::remove_channels ()
 	Glib::Threads::Mutex::Lock lm (_channel_mutex);
 
 	_channel.clear ();
+
+	lm.release();
+	emit_changed (ConfigurationChanged);
 }
 
 /** @param p Port name.
@@ -437,27 +443,26 @@ Bundle::connected_to (boost::shared_ptr<Bundle> other, AudioEngine & engine)
 	return true;
 }
 
-/** This must not be called in code executed as a response to a JACK event,
- *  as it uses jack_port_get_all_connections().
+/** This must not be called in code executed as a response to a backend event,
+ *  as it uses the backend port_get_all_connections().
  *  @return true if any of this bundle's channels are connected to anything.
  */
 bool
 Bundle::connected_to_anything (AudioEngine& engine)
 {
+	PortManager& pm (engine);
+
 	for (uint32_t i = 0; i < nchannels().n_total(); ++i) {
 		Bundle::PortList const & ports = channel_ports (i);
 
 		for (uint32_t j = 0; j < ports.size(); ++j) {
-			/* ports[j] may not be an Ardour port, so use JACK directly
+
+			/* ports[j] may not be an Ardour port, so use the port manager directly
 			   rather than doing it with Port.
 			*/
-			jack_port_t* jp = jack_port_by_name (engine.jack(), ports[j].c_str());
-			if (jp) {
-				const char ** c = jack_port_get_all_connections (engine.jack(), jp);
-				if (c) {
-					jack_free (c);
-					return true;
-				}
+
+			if (pm.connected (ports[j])) {
+				return true;
 			}
 		}
 	}
@@ -586,7 +591,7 @@ Bundle::type_channel_to_overall (DataType t, uint32_t c) const
 		++o;
 	}
 
-	/* NOTREACHED */
+	abort(); /* NOTREACHED */
 	return -1;
 }
 

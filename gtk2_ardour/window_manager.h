@@ -47,7 +47,7 @@ namespace WM {
 
 class ProxyBase;
 
-class Manager 
+class Manager : public ARDOUR::SessionHandlePtr
 {
   public:
     static Manager& instance();
@@ -75,7 +75,7 @@ class Manager
     static Manager* _instance;
 };
 	
-class ProxyBase : public sigc::trackable {
+class ProxyBase : public ARDOUR::SessionHandlePtr, public sigc::trackable {
   public:
     ProxyBase (const std::string& name, const std::string& menu_name);
     ProxyBase (const std::string& name, const std::string& menu_name, const XMLNode&);
@@ -106,7 +106,7 @@ class ProxyBase : public sigc::trackable {
     XMLNode& get_state () const;
     
     virtual ARDOUR::SessionHandlePtr* session_handle () = 0;
-    
+
     operator bool() const { return _window != 0; }
     
   protected:
@@ -120,6 +120,9 @@ class ProxyBase : public sigc::trackable {
     mutable int  _width; ///< width
     mutable int  _height; ///< height
     Gtkmm2ext::VisibilityTracker* vistracker;
+
+    void save_pos_and_size ();
+    bool delete_event_handler (GdkEventAny *ev);
     
     void setup ();
 };
@@ -137,7 +140,7 @@ class ProxyTemporary: public ProxyBase {
     Gtk::Window* operator->() { 
 	    return _window;
     }
-    
+
     ARDOUR::SessionHandlePtr* session_handle ();
 };
 	
@@ -148,7 +151,7 @@ class ProxyWithConstructor: public ProxyBase {
 	    : ProxyBase (name, menu_name) , creator (c) {}
 	
     ProxyWithConstructor (const std::string& name, const std::string& menu_name, const boost::function<T*()>& c, const XMLNode* node)
-	    : ProxyBase (name, menu_name, node) , creator (c) {}
+	    : ProxyBase (name, menu_name, *node) , creator (c) {}
 	
     Gtk::Window* get (bool create = false) { 
 	    if (!_window) {
@@ -156,7 +159,7 @@ class ProxyWithConstructor: public ProxyBase {
 			    return 0;
 		    }
 
-		    _window = creator ();
+			_window = dynamic_cast<Gtk::Window*> (creator ());
 
 		    if (_window) {
 			    setup ();
@@ -175,6 +178,15 @@ class ProxyWithConstructor: public ProxyBase {
 	    return dynamic_cast<T*> (_window);
     }
 
+    void set_session(ARDOUR::Session *s) {
+        SessionHandlePtr::set_session (s);
+        ARDOUR::SessionHandlePtr* sp = session_handle ();
+        if (sp) {
+            sp->set_session (s);
+            dynamic_cast<T*>(_window)->set_session(s);
+        }
+    }
+
   private:
     boost::function<T*()>	creator;
 };
@@ -186,7 +198,7 @@ class Proxy : public ProxyBase {
 	    : ProxyBase (name, menu_name) {}
 
     Proxy (const std::string& name, const std::string& menu_name, const XMLNode* node)
-	    : ProxyBase (name, menu_name, node)  {}
+	    : ProxyBase (name, menu_name, *node)  {}
 	
     Gtk::Window* get (bool create = false) { 
 	    if (!_window) {
@@ -211,6 +223,15 @@ class Proxy : public ProxyBase {
     ARDOUR::SessionHandlePtr* session_handle () {
 	    /* may return null */
 	    return dynamic_cast<T*> (_window);
+    }
+
+    void set_session(ARDOUR::Session *s) {
+        SessionHandlePtr::set_session (s);
+        ARDOUR::SessionHandlePtr* sp = session_handle ();
+        if (sp) {
+            sp->set_session (s);
+            dynamic_cast<T*>(_window)->set_session(s);
+        }
     }
 
   private:

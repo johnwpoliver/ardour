@@ -76,7 +76,10 @@ MidiStretch::run (boost::shared_ptr<Region> r, Progress*)
 		return -1;
 
 	boost::shared_ptr<MidiSource> src = region->midi_source(0);
-	src->load_model();
+	{
+		Source::Lock lock(src->mutex());
+		src->load_model(lock);
+	}
 
 	boost::shared_ptr<MidiModel> old_model = src->model();
 
@@ -88,16 +91,16 @@ MidiStretch::run (boost::shared_ptr<Region> r, Progress*)
 
 	Glib::Threads::Mutex::Lock sl (new_src->mutex ());
 
-	new_src->load_model(false, true);
+	new_src->load_model(sl, true);
 	boost::shared_ptr<MidiModel> new_model = new_src->model();
 	new_model->start_write();
 
 	/* Note: pass true into force_discrete for the begin() iterator so that the model doesn't
 	 * do interpolation of controller data when we stretch.
 	 */
-	for (Evoral::Sequence<MidiModel::TimeType>::const_iterator i = old_model->begin (0, true);
+	for (Evoral::Sequence<MidiModel::TimeType>::const_iterator i = old_model->begin (MidiModel::TimeType(), true);
 			i != old_model->end(); ++i) {
-		const double new_time = i->time() * _request.time_fraction;
+		const MidiModel::TimeType new_time = i->time() * (double)_request.time_fraction;
 
 		// FIXME: double copy
 		Evoral::Event<MidiModel::TimeType> ev(*i, true);
@@ -105,7 +108,7 @@ MidiStretch::run (boost::shared_ptr<Region> r, Progress*)
 		new_model->append(ev, Evoral::next_event_id());
 	}
 
-	new_model->end_write (Evoral::Sequence<Evoral::MusicalTime>::DeleteStuckNotes);
+	new_model->end_write (Evoral::Sequence<Evoral::Beats>::DeleteStuckNotes);
 	new_model->set_edited (true);
 
 	new_src->copy_interpolation_from (src);

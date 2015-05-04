@@ -20,12 +20,22 @@
 #ifndef __ardour_butler_h__
 #define __ardour_butler_h__
 
+#include <pthread.h>
+
 #include <glibmm/threads.h>
 
+#ifdef PLATFORM_WINDOWS
+#include "pbd/glib_semaphore.h"
+#endif
+
+#include "pbd/crossthread.h"
 #include "pbd/ringbuffer.h"
 #include "pbd/pool.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/session_handle.h"
+
+
 
 namespace ARDOUR {
 
@@ -36,7 +46,7 @@ namespace ARDOUR {
  *  are empty they are deleted.
  */
 
-class Butler : public SessionHandleRef
+class LIBARDOUR_API Butler : public SessionHandleRef
 {
   public:
 	Butler (Session& session);
@@ -67,11 +77,11 @@ class Butler : public SessionHandleRef
 	};
 
 	pthread_t    thread;
+	bool         have_thread;
 	Glib::Threads::Mutex  request_lock;
         Glib::Threads::Cond   paused;
 	bool         should_run;
 	mutable gint should_do_transport_work;
-	int          request_pipe[2];
 	framecnt_t   audio_dstream_capture_buffer_size;
 	framecnt_t   audio_dstream_playback_buffer_size;
 	uint32_t     midi_dstream_buffer_size;
@@ -80,6 +90,14 @@ class Butler : public SessionHandleRef
 private:
 	void empty_pool_trash ();
 	void config_changed (std::string);
+
+	/**
+	 * Add request to butler thread request queue
+	 */
+	void queue_request (Request::Type r);
+
+	CrossThreadChannel _xthread;
+
 };
 
 } // namespace ARDOUR

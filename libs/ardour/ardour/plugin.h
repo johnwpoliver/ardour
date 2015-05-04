@@ -26,14 +26,16 @@
 #include "pbd/statefuldestructible.h"
 #include "pbd/controllable.h"
 
-#include <jack/types.h>
+#include "ardour/buffer_set.h"
 #include "ardour/chan_count.h"
 #include "ardour/chan_mapping.h"
 #include "ardour/cycles.h"
 #include "ardour/latent.h"
-#include "ardour/plugin_insert.h"
-#include "ardour/types.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/midi_state_tracker.h"
+#include "ardour/parameter_descriptor.h"
+#include "ardour/types.h"
+#include "ardour/variant.h"
 
 #include <vector>
 #include <set>
@@ -44,12 +46,12 @@ namespace ARDOUR {
 class AudioEngine;
 class Session;
 class BufferSet;
-
+class PluginInsert;
 class Plugin;
 
 typedef boost::shared_ptr<Plugin> PluginPtr;
 
-class PluginInfo {
+class LIBARDOUR_API PluginInfo {
   public:
 	PluginInfo () { }
 	virtual ~PluginInfo () { }
@@ -87,41 +89,17 @@ class PluginInfo {
 typedef boost::shared_ptr<PluginInfo> PluginInfoPtr;
 typedef std::list<PluginInfoPtr> PluginInfoList;
 
-class Plugin : public PBD::StatefulDestructible, public Latent
+class LIBARDOUR_API Plugin : public PBD::StatefulDestructible, public Latent
 {
   public:
 	Plugin (ARDOUR::AudioEngine&, ARDOUR::Session&);
 	Plugin (const Plugin&);
 	virtual ~Plugin ();
 
-	struct ParameterDescriptor {
-
-		/* XXX: it would probably be nice if this initialised everything */
-		ParameterDescriptor ()
-			: enumeration (false)
-		{}
-
-		/* essentially a union of LADSPA and VST info */
-
-		bool integer_step;
-		bool toggled;
-		bool logarithmic;
-		bool sr_dependent;
-		std::string label;
-		float lower; ///< if this is a frequency, it will be in Hz (not a fraction of the sample rate)
-		float upper; ///< if this is a frequency, it will be in Hz (not a fraction of the sample rate)
-		float step;
-		float smallstep;
-		float largestep;
-		bool min_unbound;
-		bool max_unbound;
-		bool enumeration;
-	};
-
 	XMLNode& get_state ();
 	virtual int set_state (const XMLNode &, int version);
 
-	virtual void set_insert_info (const PluginInsert*) {}
+	virtual void set_insert_id (PBD::ID id) {}
 
 	virtual std::string unique_id() const = 0;
 	virtual const char * label() const = 0;
@@ -154,8 +132,6 @@ class Plugin : public PBD::StatefulDestructible, public Latent
 	virtual bool parameter_is_control(uint32_t) const = 0;
 	virtual bool parameter_is_input(uint32_t) const = 0;
 	virtual bool parameter_is_output(uint32_t) const = 0;
-
-	typedef std::map<const std::string, const float> ScalePoints;
 
 	virtual boost::shared_ptr<ScalePoints> get_scale_points(uint32_t /*port_index*/) const {
 		return boost::shared_ptr<ScalePoints>();
@@ -190,25 +166,25 @@ class Plugin : public PBD::StatefulDestructible, public Latent
 
 	std::vector<PresetRecord> get_presets ();
 
-        /** @return true if this plugin will respond to MIDI program
+	/** @return true if this plugin will respond to MIDI program
 	 * change messages by changing presets.
 	 *
 	 * This is hard to return a correct value for because most plugin APIs
 	 * do not specify plugin behaviour. However, if you want to force
-         * the display of plugin built-in preset names rather than MIDI program
-         * numbers, return true. If you want a generic description, return
+	 * the display of plugin built-in preset names rather than MIDI program
+	 * numbers, return true. If you want a generic description, return
 	 * false.
-	*/
-        virtual bool presets_are_MIDI_programs() const { return false; }
+	 */
+	virtual bool presets_are_MIDI_programs() const { return false; }
 
-        /** @return true if this plugin is General MIDI compliant, false
+	/** @return true if this plugin is General MIDI compliant, false
 	 * otherwise.
 	 *
 	 * It is important to note that it is is almost impossible for a host
 	 * (e.g. Ardour) to determine this for just about any plugin API
 	 * known as of June 2012
 	 */
-        virtual bool current_preset_uses_general_midi() const { return false; }
+	virtual bool current_preset_uses_general_midi() const { return false; }
 
 	/** @return Last preset to be requested; the settings may have
 	 * been changed since; find out with parameter_changed_since_last_preset.
@@ -242,7 +218,7 @@ class Plugin : public PBD::StatefulDestructible, public Latent
 	/* specific types of plugins can overload this. As of September 2008, only
 	   AUPlugin does this.
 	*/
-	virtual bool can_support_io_configuration (const ChanCount& /*in*/, ChanCount& /*out*/) const { return false; }
+	virtual bool can_support_io_configuration (const ChanCount& /*in*/, ChanCount& /*out*/) { return false; }
 	virtual ChanCount output_streams() const;
 	virtual ChanCount input_streams() const;
 
@@ -255,13 +231,47 @@ class Plugin : public PBD::StatefulDestructible, public Latent
 	void set_cycles (uint32_t c) { _cycles = c; }
 	cycles_t cycles() const { return _cycles; }
 
-        PBD::Signal1<void,uint32_t> StartTouch;
-        PBD::Signal1<void,uint32_t> EndTouch;
+	typedef std::map<uint32_t, ParameterDescriptor> PropertyDescriptors;
+
+	/** Get a descrption of all properties supported by this plugin.
+	 *
+	 * Properties are distinct from parameters in that they are potentially
+	 * dynamic, referred to by key, and do not correspond 1:1 with ports.
+	 *
+	 * For LV2 plugins, properties are implemented by sending/receiving set/get
+	 * messages to/from the plugin via event ports.
+	 */
+	virtual const PropertyDescriptors& get_supported_properties() const {
+		static const PropertyDescriptors nothing;
+		return nothing;
+	}
+
+	virtual const ParameterDescriptor& get_property_descriptor(uint32_t id) const {
+		static const ParameterDescriptor nothing;
+		return nothing;
+	}
+
+	/** Set a property from the UI.
+	 *
+	 * This is not UI-specific, but may only be used by one thread.  If the
+	 * Ardour UI is present, that is the UI thread, but otherwise, any thread
+	 * except the audio thread may call this function as long as it is not
+	 * called concurrently.
+	 */
+	virtual void set_property(uint32_t key, const Variant& value) {}
+
+	/** Emit PropertyChanged for all current property values. */
+	virtual void announce_property_values() {}
+
+	/** Emitted when a property is changed in the plugin. */
+	PBD::Signal2<void, uint32_t, Variant> PropertyChanged;
+
+	PBD::Signal1<void,uint32_t> StartTouch;
+	PBD::Signal1<void,uint32_t> EndTouch;
 
 protected:
 
 	friend class PluginInsert;
-	friend struct PluginInsert::PluginControl;
 
 	virtual void set_parameter (uint32_t which, float val);
 

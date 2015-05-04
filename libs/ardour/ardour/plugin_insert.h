@@ -26,7 +26,9 @@
 #include <boost/weak_ptr.hpp>
 
 #include "ardour/ardour.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
+#include "ardour/parameter_descriptor.h"
 #include "ardour/processor.h"
 #include "ardour/automation_control.h"
 
@@ -40,7 +42,7 @@ class Plugin;
 
 /** Plugin inserts: send data through a plugin
  */
-class PluginInsert : public Processor
+class LIBARDOUR_API PluginInsert : public Processor
 {
   public:
 	PluginInsert (Session&, boost::shared_ptr<Plugin> = boost::shared_ptr<Plugin>());
@@ -69,7 +71,7 @@ class PluginInsert : public Processor
 	bool     set_count (uint32_t num);
 	uint32_t get_count () const { return _plugins.size(); }
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
 
 	bool has_no_inputs() const;
@@ -80,10 +82,13 @@ class PluginInsert : public Processor
 	void realtime_locate ();
 	void monitoring_changed ();
 
+	/** A control that manipulates a plugin parameter (control port). */
 	struct PluginControl : public AutomationControl
 	{
-		PluginControl (PluginInsert* p, const Evoral::Parameter &param,
-				boost::shared_ptr<AutomationList> list = boost::shared_ptr<AutomationList>());
+		PluginControl (PluginInsert*                     p,
+		               const Evoral::Parameter&          param,
+		               const ParameterDescriptor&        desc,
+		               boost::shared_ptr<AutomationList> list=boost::shared_ptr<AutomationList>());
 
 		void set_value (double val);
 		double get_value (void) const;
@@ -94,9 +99,24 @@ class PluginInsert : public Processor
 
 	private:
 		PluginInsert* _plugin;
-		bool _logarithmic;
-		bool _sr_dependent;
-		bool _toggled;
+	};
+
+	/** A control that manipulates a plugin property (message). */
+	struct PluginPropertyControl : public AutomationControl
+	{
+		PluginPropertyControl (PluginInsert*                     p,
+		                       const Evoral::Parameter&          param,
+		                       const ParameterDescriptor&        desc,
+		                       boost::shared_ptr<AutomationList> list=boost::shared_ptr<AutomationList>());
+
+		void set_value (const Variant& val);
+		void set_value (double val);
+		double get_value (void) const;
+		XMLNode& get_state();
+
+	private:
+		PluginInsert* _plugin;
+		Variant       _value;
 	};
 
 	boost::shared_ptr<Plugin> plugin(uint32_t num=0) const {
@@ -122,8 +142,7 @@ class PluginInsert : public Processor
 	}
 
 	PBD::Signal2<void,BufferSet*, BufferSet*> AnalysisDataGathered;
-	/** Emitted when the return value of splitting () has changed */
-	PBD::Signal0<void> SplittingChanged;
+	PBD::Signal0<void> PluginIoReConfigure;
 
 	/** Enumeration of the ways in which we can match our insert's
 	 *  IO to that of the plugin(s).
@@ -160,6 +179,8 @@ class PluginInsert : public Processor
 	BufferSet _signal_analysis_inputs;
 	BufferSet _signal_analysis_outputs;
 
+	ChanCount midi_bypass;
+
 	/** Description of how we can match our plugin's IO to our own insert IO */
 	struct Match {
 		Match () : method (Impossible), plugins (0) {}
@@ -170,12 +191,12 @@ class PluginInsert : public Processor
 		ChanCount hide;        ///< number of channels to hide
 	};
 
-	Match private_can_support_io_configuration (ChanCount const &, ChanCount &) const;
+	Match private_can_support_io_configuration (ChanCount const &, ChanCount &);
 
 	/** details of the match currently being used */
 	Match _match;
 
-	void automation_run (BufferSet& bufs, pframes_t nframes);
+	void automation_run (BufferSet& bufs, framepos_t start, pframes_t nframes);
 	void connect_and_run (BufferSet& bufs, pframes_t nframes, framecnt_t offset, bool with_auto, framepos_t now = 0);
 
 	void create_automatable_parameters ();
@@ -186,8 +207,8 @@ class PluginInsert : public Processor
 	boost::shared_ptr<Plugin> plugin_factory (boost::shared_ptr<Plugin>);
 	void add_plugin (boost::shared_ptr<Plugin>);
 
-        void start_touch (uint32_t param_id);
-        void end_touch (uint32_t param_id);
+	void start_touch (uint32_t param_id);
+	void end_touch (uint32_t param_id);
 };
 
 } // namespace ARDOUR

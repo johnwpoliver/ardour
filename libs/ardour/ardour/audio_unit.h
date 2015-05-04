@@ -48,17 +48,16 @@ namespace ARDOUR {
 class AudioEngine;
 class Session;
 
-struct AUParameterDescriptor : public Plugin::ParameterDescriptor {
+struct LIBARDOUR_API AUParameterDescriptor : public ParameterDescriptor {
 	// additional fields to make operations more efficient
 	AudioUnitParameterID id;
 	AudioUnitScope scope;
 	AudioUnitElement element;
-	float default_value;
 	bool automatable;
-	AudioUnitParameterUnit unit;
+	AudioUnitParameterUnit au_unit;
 };
 
-class AUPlugin : public ARDOUR::Plugin
+class LIBARDOUR_API AUPlugin : public ARDOUR::Plugin
 {
   public:
 	AUPlugin (AudioEngine& engine, Session& session, boost::shared_ptr<CAComponent> comp);
@@ -104,7 +103,7 @@ class AUPlugin : public ARDOUR::Plugin
 
 	bool has_editor () const;
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	ChanCount output_streams() const;
 	ChanCount input_streams() const;
 	bool configure_io (ChanCount in, ChanCount out);
@@ -221,11 +220,11 @@ class AUPlugin : public ARDOUR::Plugin
 
 typedef boost::shared_ptr<AUPlugin> AUPluginPtr;
 
-struct AUPluginCachedInfo {
+struct LIBARDOUR_API AUPluginCachedInfo {
 	std::vector<std::pair<int,int> > io_configs;
 };
 
-class AUPluginInfo : public PluginInfo {
+class LIBARDOUR_API AUPluginInfo : public PluginInfo {
   public:
 	 AUPluginInfo (boost::shared_ptr<CAComponentDescription>);
 	~AUPluginInfo ();
@@ -243,6 +242,7 @@ class AUPluginInfo : public PluginInfo {
 	bool reconfigurable_io() const { return true; }
 
 	static PluginInfoList* discover ();
+	static bool au_get_crashlog (std::string &msg);
 	static void get_names (CAComponentDescription&, std::string& name, std::string& maker);
 	static std::string stringify_descriptor (const CAComponentDescription&);
 
@@ -251,6 +251,11 @@ class AUPluginInfo : public PluginInfo {
   private:
 	boost::shared_ptr<CAComponentDescription> descriptor;
 	UInt32 version;
+	static FILE * _crashlog_fd;
+
+	static void au_start_crashlog (void);
+	static void au_remove_crashlog (void);
+	static void au_crashlog (std::string);
 
 	static void discover_music (PluginInfoList&);
 	static void discover_fx (PluginInfoList&);

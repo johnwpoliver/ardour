@@ -17,7 +17,7 @@
 
 */
 
-#include <dlfcn.h>
+#include <glibmm/module.h>
 
 #include <glibmm/fileutils.h>
 
@@ -29,7 +29,9 @@
 
 #include "ardour/debug.h"
 #include "ardour/control_protocol_manager.h"
-#include "ardour/control_protocol_search_path.h"
+
+#include "ardour/search_paths.h"
+
 
 using namespace ARDOUR;
 using namespace std;
@@ -72,24 +74,52 @@ ControlProtocolManager::set_session (Session* s)
 
 		for (list<ControlProtocolInfo*>::iterator i = control_protocol_info.begin(); i != control_protocol_info.end(); ++i) {
 			if ((*i)->requested || (*i)->mandatory) {
-				
-				instantiate (**i);
-				(*i)->requested = false;
-
-				if ((*i)->protocol) {
-					if ((*i)->state) {
-						(*i)->protocol->set_state (*(*i)->state, Stateful::loading_state_version);
-					} else {
-						/* guarantee a call to
-						   set_state() whether we have
-						   existing state or not
-						*/
-						(*i)->protocol->set_state (XMLNode(""), Stateful::loading_state_version);
-					}
-				}
+				(void) activate (**i);
 			}
 		}
 	}
+}
+
+int
+ControlProtocolManager::activate (ControlProtocolInfo& cpi)
+{
+	ControlProtocol* cp;
+
+	cpi.requested = true;
+
+	if ((cp = instantiate (cpi)) == 0) {
+		return -1;
+	}
+
+	/* we split the set_state() and set_active() operations so that
+	   protocols that need state to configure themselves (e.g. "What device
+	   is connected, or supposed to be connected?") can get it before
+	   actually starting any interaction.
+	*/
+
+	if (cpi.state) {
+		/* force this by tweaking the internals of the state
+		 * XMLNode. Ugh.
+		 */
+		cp->set_state (*cpi.state, Stateful::loading_state_version);
+	} else {
+		/* guarantee a call to
+		   set_state() whether we have
+		   existing state or not
+		*/
+		cp->set_state (XMLNode(""), Stateful::loading_state_version);
+	}
+
+	cp->set_active (true);
+
+	return 0;
+}	
+
+int
+ControlProtocolManager::deactivate (ControlProtocolInfo& cpi)
+{
+	cpi.requested = false;
+	return teardown (cpi);
 }
 
 void
@@ -163,6 +193,12 @@ ControlProtocolManager::teardown (ControlProtocolInfo& cpi)
 	if (cpi.mandatory) {
 		return 0;
 	}
+	
+	/* save current state */
+
+	delete cpi.state;
+	cpi.state = new XMLNode (cpi.protocol->get_state());
+	cpi.state->add_property (X_("active"), "no");
 
 	cpi.descriptor->destroy (cpi.descriptor, cpi.protocol);
 
@@ -179,7 +215,7 @@ ControlProtocolManager::teardown (ControlProtocolInfo& cpi)
 	cpi.protocol = 0;
 	delete cpi.state;
 	cpi.state = 0;
-	dlclose (cpi.descriptor->module);
+	delete (Glib::Module*)cpi.descriptor->module;
 
 	ProtocolStatusChange (&cpi);
 
@@ -209,14 +245,37 @@ ControlProtocolManager::discover_control_protocols ()
 {
 	vector<std::string> cp_modules;
 
+#ifdef COMPILER_MSVC
+   /**
+    * Different build targets (Debug / Release etc) use different versions
+    * of the 'C' runtime (which can't be 'mixed & matched'). Therefore, in
+    * case the supplied search path contains multiple version(s) of a given
+    * module, only select the one(s) which match the current build target
+    */
+	#if defined (_DEBUG)
+		Glib::PatternSpec dll_extension_pattern("*D.dll");
+	#elif defined (RDC_BUILD)
+		Glib::PatternSpec dll_extension_pattern("*RDC.dll");
+	#elif defined (_WIN64)
+		Glib::PatternSpec dll_extension_pattern("*64.dll");
+	#else
+		Glib::PatternSpec dll_extension_pattern("*32.dll");
+	#endif
+#else
+	Glib::PatternSpec dll_extension_pattern("*.dll");
+#endif
+
 	Glib::PatternSpec so_extension_pattern("*.so");
 	Glib::PatternSpec dylib_extension_pattern("*.dylib");
 
-	find_matching_files_in_search_path (control_protocol_search_path (),
-					    so_extension_pattern, cp_modules);
+	find_files_matching_pattern (cp_modules, control_protocol_search_path (),
+	                             dll_extension_pattern);
 
-	find_matching_files_in_search_path (control_protocol_search_path (),
-					    dylib_extension_pattern, cp_modules);
+	find_files_matching_pattern (cp_modules, control_protocol_search_path (),
+	                             so_extension_pattern);
+
+	find_files_matching_pattern (cp_modules, control_protocol_search_path (),
+	                             dylib_extension_pattern);
 
 	DEBUG_TRACE (DEBUG::ControlProtocols, 
 		     string_compose (_("looking for control protocols in %1\n"), control_protocol_search_path().to_string()));
@@ -264,7 +323,7 @@ ControlProtocolManager::control_protocol_discover (string path)
 				     string_compose(_("Control surface protocol discovered: \"%1\"\n"), cpi->name));
 		}
 
-		dlclose (descriptor->module);
+		delete (Glib::Module*)descriptor->module;
 	}
 
 	return 0;
@@ -273,31 +332,31 @@ ControlProtocolManager::control_protocol_discover (string path)
 ControlProtocolDescriptor*
 ControlProtocolManager::get_descriptor (string path)
 {
-	void *module;
+	Glib::Module* module = new Glib::Module(path);
 	ControlProtocolDescriptor *descriptor = 0;
 	ControlProtocolDescriptor* (*dfunc)(void);
-	const char *errstr;
+	void* func = 0;
 
-	if ((module = dlopen (path.c_str(), RTLD_NOW)) == 0) {
-		error << string_compose(_("ControlProtocolManager: cannot load module \"%1\" (%2)"), path, dlerror()) << endmsg;
+	if (!(*module)) {
+		error << string_compose(_("ControlProtocolManager: cannot load module \"%1\" (%2)"), path, Glib::Module::get_last_error()) << endmsg;
+		delete module;
 		return 0;
 	}
 
-
-	dfunc = (ControlProtocolDescriptor* (*)(void)) dlsym (module, "protocol_descriptor");
-
-	if ((errstr = dlerror()) != 0) {
+	if (!module->get_symbol("protocol_descriptor", func)) {
 		error << string_compose(_("ControlProtocolManager: module \"%1\" has no descriptor function."), path) << endmsg;
-		error << errstr << endmsg;
-		dlclose (module);
+		error << Glib::Module::get_last_error() << endmsg;
+		delete module;
 		return 0;
 	}
 
+	dfunc = (ControlProtocolDescriptor* (*)(void))func;
 	descriptor = dfunc();
+
 	if (descriptor) {
-		descriptor->module = module;
+		descriptor->module = (void*)module;
 	} else {
-		dlclose (module);
+		delete module;
 	}
 
 	return descriptor;
@@ -379,22 +438,21 @@ ControlProtocolManager::get_state ()
 
 	for (list<ControlProtocolInfo*>::iterator i = control_protocol_info.begin(); i != control_protocol_info.end(); ++i) {
 
-		XMLNode * child;
-
 		if ((*i)->protocol) {
-			child = &((*i)->protocol->get_state());
-			child->add_property (X_("active"), "yes");
-			// should we update (*i)->state here?  probably.
-			root->add_child_nocopy (*child);
+			XMLNode& child_state ((*i)->protocol->get_state());
+			child_state.add_property (X_("active"), "yes");
+			root->add_child_nocopy (child_state);
 		} else if ((*i)->state) {
-			// keep ownership clear
-			root->add_child_copy (*(*i)->state);
+			XMLNode* child_state = new XMLNode (*(*i)->state);
+			child_state->add_property (X_("active"), "no");
+			root->add_child_nocopy (*child_state);
 		} else {
-			child = new XMLNode (X_("Protocol"));
-			child->add_property (X_("name"), (*i)->name);
-			child->add_property (X_("active"), "no");
-			root->add_child_nocopy (*child);
+			XMLNode* child_state = new XMLNode (X_("Protocol"));
+			child_state->add_property (X_("name"), (*i)->name);
+			child_state->add_property (X_("active"), "no");
+			root->add_child_nocopy (*child_state);
 		}
+
 	}
 
 	return *root;

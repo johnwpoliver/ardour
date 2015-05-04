@@ -19,6 +19,8 @@
 #ifndef __ardour_amp_h__
 #define __ardour_amp_h__
 
+#include "ardour/dB.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/chan_count.h"
 #include "ardour/processor.h"
@@ -32,15 +34,15 @@ class IO;
 /** Applies a declick operation to all audio inputs, passing the same number of
  * audio outputs, and passing through any other types unchanged.
  */
-class Amp : public Processor {
+class LIBARDOUR_API Amp : public Processor {
 public:
-	Amp(Session& s);
+	Amp(Session& s, std::string type = "amp");
 
 	std::string display_name() const;
 
 	bool visible () const;
 
-	bool can_support_io_configuration (const ChanCount& in, ChanCount& out) const;
+	bool can_support_io_configuration (const ChanCount& in, ChanCount& out);
 	bool configure_io (ChanCount in, ChanCount out);
 
 	void run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame, pframes_t nframes, bool);
@@ -58,10 +60,10 @@ public:
 	XMLNode& state (bool full);
 	int set_state (const XMLNode&, int version);
 
-	static void apply_gain (BufferSet& bufs, framecnt_t nframes, gain_t initial, gain_t target);
-	static void apply_simple_gain(BufferSet& bufs, framecnt_t nframes, gain_t target);
+	static gain_t apply_gain (BufferSet& bufs, framecnt_t sample_rate, framecnt_t nframes, gain_t initial, gain_t target, bool midi_amp = true);
+	static void apply_simple_gain(BufferSet& bufs, framecnt_t nframes, gain_t target, bool midi_amp = true);
 
-	static void apply_gain (AudioBuffer& buf, framecnt_t nframes, gain_t initial, gain_t target);
+	static gain_t apply_gain (AudioBuffer& buf, framecnt_t sample_rate, framecnt_t nframes, gain_t initial, gain_t target);
 	static void apply_simple_gain(AudioBuffer& buf, framecnt_t nframes, gain_t target);
 
 	static void declick (BufferSet& bufs, framecnt_t nframes, int dir);
@@ -78,10 +80,13 @@ public:
 	struct GainControl : public AutomationControl {
 		GainControl (std::string name, Session& session, Amp* a, const Evoral::Parameter &param,
 				boost::shared_ptr<AutomationList> al = boost::shared_ptr<AutomationList>() )
-			: AutomationControl (session, param, al, name)
+			: AutomationControl (session, param, ParameterDescriptor(param), al, name)
 			, _amp (a) {
 			set_flags (Controllable::Flag (flags() | Controllable::GainLike));
 			alist()->reset_default (1.0);
+
+			lower_db = accurate_coefficient_to_dB (_desc.lower);
+			range_db = accurate_coefficient_to_dB (_desc.upper) - lower_db;
 		}
 
 		void set_value (double val);
@@ -89,8 +94,12 @@ public:
 		double internal_to_interface (double) const;
 		double interface_to_internal (double) const;
 		double internal_to_user (double) const;
+		double user_to_internal (double) const;
+		std::string get_user_string () const;
 
 		Amp* _amp;
+		double lower_db;
+		double range_db;
 	};
 
 	boost::shared_ptr<GainControl> gain_control() {
@@ -103,18 +112,19 @@ public:
 
 	std::string value_as_string (boost::shared_ptr<AutomationControl>) const;
 
-        static const float max_gain_coefficient;
-
 private:
 	bool   _denormal_protection;
 	bool   _apply_gain;
 	bool   _apply_gain_automation;
 	float  _current_gain;
+	framepos_t _current_automation_frame;
 
 	boost::shared_ptr<GainControl> _gain_control;
 
 	/** Buffer that we should use for gain automation */
 	gain_t* _gain_automation_buffer;
+	std::string _type;
+	bool _midi_amp;
 };
 
 

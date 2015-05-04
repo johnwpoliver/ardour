@@ -25,6 +25,10 @@
 
 #include "ardour/export_profile_manager.h"
 
+#ifdef interface
+#undef interface
+#endif
+
 #include <gtkmm.h>
 #include <sigc++/signal.h>
 #include <boost/shared_ptr.hpp>
@@ -122,7 +126,7 @@ class PortExportChannelSelector : public ExportChannelSelector
 		typedef Gtk::TreeModelColumn<Glib::RefPtr<Gtk::ListStore> > ComboCol;
 		ComboCol                             port_list_col;
 
-		/* Channel struct, that represents the selected port and it's name */
+		/* Channel struct, that represents the selected port and its name */
 
 		struct Channel {
 		  public:
@@ -237,7 +241,6 @@ class TrackExportChannelSelector : public ExportChannelSelector
 	void fill_list();
 	void add_track (boost::shared_ptr<ARDOUR::Route> route);
 	void update_config();
-
 	ChannelConfigList configs;
 
 	Gtk::VBox main_layout;
@@ -248,8 +251,9 @@ class TrackExportChannelSelector : public ExportChannelSelector
 		Gtk::TreeModelColumn<boost::shared_ptr<ARDOUR::Route> > route;
 		Gtk::TreeModelColumn<std::string>     label;
 		Gtk::TreeModelColumn<bool>            selected;
+		Gtk::TreeModelColumn<uint32_t>        order_key;
 
-		TrackCols () { add (route); add(label); add(selected); }
+		TrackCols () { add (route); add(label); add(selected); add(order_key); }
 	};
 	TrackCols                    track_cols;
 

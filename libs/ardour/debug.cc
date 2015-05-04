@@ -29,8 +29,9 @@ uint64_t PBD::DEBUG::MidiSourceIO = PBD::new_debug_bit ("midisourceio");
 uint64_t PBD::DEBUG::MidiPlaylistIO = PBD::new_debug_bit ("midiplaylistio");
 uint64_t PBD::DEBUG::MidiDiskstreamIO = PBD::new_debug_bit ("mididiskstreamio");
 uint64_t PBD::DEBUG::SnapBBT = PBD::new_debug_bit ("snapbbt");
-uint64_t PBD::DEBUG::Configuration = PBD::new_debug_bit ("configuration");
 uint64_t PBD::DEBUG::Latency = PBD::new_debug_bit ("latency");
+uint64_t PBD::DEBUG::LatencyCompensation = PBD::new_debug_bit ("latencycompensation");
+uint64_t PBD::DEBUG::Peaks = PBD::new_debug_bit ("peaks");
 uint64_t PBD::DEBUG::Processors = PBD::new_debug_bit ("processors");
 uint64_t PBD::DEBUG::ProcessThreads = PBD::new_debug_bit ("processthreads");
 uint64_t PBD::DEBUG::Graph = PBD::new_debug_bit ("graph");
@@ -60,5 +61,9 @@ uint64_t PBD::DEBUG::TempoMap = PBD::new_debug_bit ("tempomap");
 uint64_t PBD::DEBUG::OrderKeys = PBD::new_debug_bit ("orderkeys");
 uint64_t PBD::DEBUG::Automation = PBD::new_debug_bit ("automation");
 uint64_t PBD::DEBUG::WiimoteControl = PBD::new_debug_bit ("wiimotecontrol");
+uint64_t PBD::DEBUG::Ports = PBD::new_debug_bit ("Ports");
+uint64_t PBD::DEBUG::AudioEngine = PBD::new_debug_bit ("AudioEngine");
+uint64_t PBD::DEBUG::Soundcloud = PBD::new_debug_bit ("Soundcloud");
+uint64_t PBD::DEBUG::Butler = PBD::new_debug_bit ("Butler");
 
 

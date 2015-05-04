@@ -25,10 +25,7 @@
 #include <string>
 #include <sys/types.h>
 
-#include <libgnomecanvasmm/line.h>
 #include <sigc++/signal.h>
-#include "canvas.h"
-#include "simplerect.h"
 
 #include "evoral/TimeConverter.hpp"
 
@@ -37,7 +34,12 @@
 #include "pbd/memento_command.h"
 
 #include "ardour/automation_list.h"
+#include "ardour/parameter_descriptor.h"
 #include "ardour/types.h"
+
+#include "canvas/types.h"
+#include "canvas/container.h"
+#include "canvas/poly_line.h"
 
 class AutomationLine;
 class ControlPoint;
@@ -46,26 +48,26 @@ class TimeAxisView;
 class AutomationTimeAxisView;
 class Selectable;
 class Selection;
+class PublicEditor;
 
-namespace Gnome {
-	namespace Canvas {
-		class SimpleRect;
-	}
-}
 
 /** A GUI representation of an ARDOUR::AutomationList */
 class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 {
-  public:
+public:
 	enum VisibleAspects {
 		Line = 0x1,
 		ControlPoints = 0x2,
 		SelectedControlPoints = 0x4
 	};
 	
-	AutomationLine (const std::string& name, TimeAxisView&, ArdourCanvas::Group&,
-			boost::shared_ptr<ARDOUR::AutomationList>,
-			Evoral::TimeConverter<double, ARDOUR::framepos_t>* converter = 0);
+	AutomationLine (const std::string&                                 name,
+	                TimeAxisView&                                      tv,
+	                ArdourCanvas::Item&                                parent,
+	                boost::shared_ptr<ARDOUR::AutomationList>          al,
+	                const ARDOUR::ParameterDescriptor&                 desc,
+	                Evoral::TimeConverter<double, ARDOUR::framepos_t>* converter = 0);
+
 	virtual ~AutomationLine ();
 
 	void queue_reset ();
@@ -80,11 +82,11 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 	bool control_points_adjacent (double xval, uint32_t& before, uint32_t& after);
 
 	/* dragging API */
-        virtual void start_drag_single (ControlPoint*, double, float);
-        virtual void start_drag_line (uint32_t, uint32_t, float);
-        virtual void start_drag_multiple (std::list<ControlPoint*>, float, XMLNode *);
-        virtual std::pair<double, float> drag_motion (double, float, bool, bool with_push, uint32_t& final_index);
-        virtual void end_drag (bool with_push, uint32_t final_index);
+	virtual void start_drag_single (ControlPoint*, double, float);
+	virtual void start_drag_line (uint32_t, uint32_t, float);
+	virtual void start_drag_multiple (std::list<ControlPoint*>, float, XMLNode *);
+	virtual std::pair<double, float> drag_motion (double, float, bool, bool with_push, uint32_t& final_index);
+	virtual void end_drag (bool with_push, uint32_t final_index);
 
 	ControlPoint* nth (uint32_t);
 	ControlPoint const * nth (uint32_t) const;
@@ -108,18 +110,19 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 
 	TimeAxisView& trackview;
 
-	ArdourCanvas::Group& canvas_group() const { return *group; }
+	ArdourCanvas::Container& canvas_group() const { return *group; }
 	ArdourCanvas::Item&  parent_group() const { return _parent_group; }
 	ArdourCanvas::Item&  grab_item() const { return *line; }
 
-	std::string get_verbose_cursor_string (double) const;
-        std::string get_verbose_cursor_relative_string (double, double) const;
+	virtual std::string get_verbose_cursor_string (double) const;
+	std::string get_verbose_cursor_relative_string (double, double) const;
 	std::string fraction_to_string (double) const;
-        std::string fraction_to_relative_string (double, double) const;
+	std::string fraction_to_relative_string (double, double) const;
 	double string_to_fraction (std::string const &) const;
 	void   view_to_model_coord (double& x, double& y) const;
 	void   view_to_model_coord_y (double &) const;
 	void   model_to_view_coord (double& x, double& y) const;
+	void   model_to_view_coord_y (double &) const;
 
 	void set_list(boost::shared_ptr<ARDOUR::AutomationList> list);
 	boost::shared_ptr<ARDOUR::AutomationList> the_list() const { return alist; }
@@ -145,7 +148,7 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 	std::pair<ARDOUR::framepos_t, ARDOUR::framepos_t> get_point_x_range () const;
 
 	void set_maximum_time (ARDOUR::framecnt_t);
- 	ARDOUR::framecnt_t maximum_time () const {
+	ARDOUR::framecnt_t maximum_time () const {
 		return _maximum_time;
 	}
 
@@ -154,7 +157,7 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 
 	framepos_t session_position (ARDOUR::AutomationList::const_iterator) const;
 
-  protected:
+protected:
 
 	std::string    _name;
 	guint32   _height;
@@ -167,50 +170,48 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 
 	VisibleAspects _visible;
  
-        bool    _uses_gain_mapping;
-        bool    terminal_points_can_slide;
-        bool    update_pending;
-        bool    have_timeout;
-        bool    no_draw;
-        bool    _is_boolean;
+	bool    _uses_gain_mapping;
+	bool    terminal_points_can_slide;
+	bool    update_pending;
+	bool    have_timeout;
+	bool    no_draw;
+	bool    _is_boolean;
 	/** true if we did a push at any point during the current drag */
 	bool    did_push;
 
-	ArdourCanvas::Group&        _parent_group;
-	ArdourCanvas::Group*        group;
-	ArdourCanvas::Line*         line; /* line */
+	ArdourCanvas::Item&        _parent_group;
+	ArdourCanvas::Container*       group;
+	ArdourCanvas::PolyLine*     line; /* line */
 	ArdourCanvas::Points        line_points; /* coordinates for canvas line */
 	std::vector<ControlPoint*>  control_points; /* visible control points */
 
-        class ContiguousControlPoints : public std::list<ControlPoint*> {
-	  public:
-	    ContiguousControlPoints (AutomationLine& al);
-	    double clamp_dx (double dx);
-	    void move (double dx, double dy);
-	    void compute_x_bounds ();
-	  private:
-	    AutomationLine& line;
-	    double before_x;
-	    double after_x;
+	class ContiguousControlPoints : public std::list<ControlPoint*> {
+public:
+		ContiguousControlPoints (AutomationLine& al);
+		double clamp_dx (double dx);
+		void move (double dx, double dy);
+		void compute_x_bounds (PublicEditor& e);
+private:
+		AutomationLine& line;
+		double before_x;
+		double after_x;
 	};
 
-        friend class ContiguousControlPoints;
+	friend class ContiguousControlPoints;
 
 	typedef boost::shared_ptr<ContiguousControlPoints> CCP;
-        std::vector<CCP> contiguous_points;
+	std::vector<CCP> contiguous_points;
 
-	void sync_model_with_view_point (ControlPoint&);
-	void sync_model_with_view_points (std::list<ControlPoint*>);
-        void start_drag_common (double, float);
-
-	virtual void change_model (ARDOUR::AutomationList::iterator, double x, double y);
+	bool sync_model_with_view_point (ControlPoint&);
+	bool sync_model_with_view_points (std::list<ControlPoint*>);
+	void start_drag_common (double, float);
 
 	void reset_callback (const Evoral::ControlList&);
 	void list_changed ();
 
 	virtual bool event_handler (GdkEvent*);
 
-  private:
+private:
 	std::list<ControlPoint*> _drag_points; ///< points we are dragging
 	std::list<ControlPoint*> _push_points; ///< additional points we are dragging if "push" is enabled
 	bool _drag_had_movement; ///< true if the drag has seen movement, otherwise false
@@ -222,7 +223,8 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 	 */
 	ARDOUR::framecnt_t _offset;
 
-	void show ();
+	bool is_stepped() const;
+	void update_visibility ();
 	void reset_line_coords (ControlPoint&);
 	void add_visible_control_point (uint32_t, uint32_t, double, double, ARDOUR::AutomationList::iterator, uint32_t);
 	double control_point_box_size ();
@@ -233,6 +235,8 @@ class AutomationLine : public sigc::trackable, public PBD::StatefulDestructible
 
 	/** maximum time that a point on this line can be at, relative to the position of its region or start of its track */
 	ARDOUR::framecnt_t _maximum_time;
+
+	const ARDOUR::ParameterDescriptor _desc;
 
 	friend class AudioRegionGainLine;
 };

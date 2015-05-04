@@ -28,7 +28,6 @@
 #include "ardour/session.h"
 
 #include "port_insert_ui.h"
-#include "utils.h"
 #include "gui_thread.h"
 #include "i18n.h"
 
@@ -66,7 +65,7 @@ PortInsertUI::PortInsertUI (Gtk::Window* parent, ARDOUR::Session* sess, boost::s
 void
 PortInsertUI::update_latency_display ()
 {
-        framecnt_t const sample_rate = input_selector.session()->engine().frame_rate();
+        framecnt_t const sample_rate = AudioEngine::instance()->sample_rate();
         if (sample_rate == 0) {
                 latency_display.set_text (_("Disconnected from audio engine"));
         } else {
@@ -93,7 +92,7 @@ PortInsertUI::check_latency_measurement ()
         }
 
         char buf[128];
-        framecnt_t const sample_rate = AudioEngine::instance()->frame_rate();
+        framecnt_t const sample_rate = AudioEngine::instance()->sample_rate();
 
         if (sample_rate == 0) {
                 latency_display.set_text (_("Disconnected from audio engine"));
@@ -176,24 +175,13 @@ PortInsertWindow::PortInsertWindow (ARDOUR::Session* sess, boost::shared_ptr<ARD
 	ok_but->signal_clicked().connect (sigc::mem_fun (*this, &PortInsertWindow::accept));
 
 	signal_delete_event().connect (sigc::mem_fun (*this, &PortInsertWindow::wm_delete), false);
-
-	pi->DropReferences.connect (going_away_connection, invalidator (*this), boost::bind (&PortInsertWindow::plugin_going_away, this), gui_context());
 }
 
 bool
 PortInsertWindow::wm_delete (GdkEventAny* /*event*/)
 {
 	accept ();
-	return true;
-}
-
-void
-PortInsertWindow::plugin_going_away ()
-{
-	ENSURE_GUI_THREAD (*this, &PortInsertWindow::plugin_going_away)
-
-	going_away_connection.disconnect ();
-	delete_when_idle (this);
+	return false;
 }
 
 void

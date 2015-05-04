@@ -34,7 +34,7 @@ namespace AudioGrapher
 static void
 snprintf_bounded_null_filled (char* target, size_t target_size, char const * fmt, ...)
 {
-	char buf[target_size+1];
+	char *buf = (char*)alloca(target_size+1);
 	va_list ap;
 
 	va_start (ap, fmt);
@@ -110,9 +110,13 @@ BroadcastInfo::get_time_reference () const
 		return 0;
 	}
 
-	int64_t ret = (uint32_t) info->time_reference_high;
+	if (info->time_reference_high & 0x80000000) {
+		return 0;
+	}
+
+	int64_t ret = (uint32_t) (info->time_reference_high & 0x7fffffff);
 	ret <<= 32;
-	ret |= (uint32_t) info->time_reference_low;
+	ret |= (uint32_t) (info->time_reference_low & 0xffffffff);
 	return ret;
 }
 

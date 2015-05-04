@@ -24,13 +24,15 @@
 #include "ardour/runtime_functions.h"
 #include <stdint.h>
 
+using std::min;
+using std::max;
 using namespace ARDOUR;
 
 #if defined (ARCH_X86) && defined (BUILD_SSE_OPTIMIZATIONS)
 // Debug wrappers
 
 float
-debug_compute_peak (ARDOUR::Sample *buf, pframes_t nsamples, float current)
+debug_compute_peak (const ARDOUR::Sample *buf, pframes_t nsamples, float current)
 {
 	if ( ((intptr_t)buf % 16) != 0) {
 		std::cerr << "compute_peak(): buffer unaligned!" << std::endl;
@@ -50,7 +52,7 @@ debug_apply_gain_to_buffer (ARDOUR::Sample *buf, pframes_t nframes, float gain)
 }
 
 void
-debug_mix_buffers_with_gain (ARDOUR::Sample *dst, ARDOUR::Sample *src, pframes_t nframes, float gain)
+debug_mix_buffers_with_gain (ARDOUR::Sample *dst, const ARDOUR::Sample *src, pframes_t nframes, float gain)
 {
 	if ( ((intptr_t)dst & 15) != 0) {
 		std::cerr << "mix_buffers_with_gain(): dst unaligned!" << std::endl;
@@ -65,7 +67,7 @@ debug_mix_buffers_with_gain (ARDOUR::Sample *dst, ARDOUR::Sample *src, pframes_t
 }
 
 void
-debug_mix_buffers_no_gain (ARDOUR::Sample *dst, ARDOUR::Sample *src, pframes_t nframes)
+debug_mix_buffers_no_gain (ARDOUR::Sample *dst, const ARDOUR::Sample *src, pframes_t nframes)
 {
 	if ( ((intptr_t)dst & 15) != 0) {
 		std::cerr << "mix_buffers_no_gain(): dst unaligned!" << std::endl;
@@ -93,22 +95,22 @@ default_compute_peak (const ARDOUR::Sample * buf, pframes_t nsamples, float curr
 }
 
 void
-default_find_peaks (const ARDOUR::Sample * buf, pframes_t nframes, float *min, float *max)
+default_find_peaks (const ARDOUR::Sample * buf, pframes_t nframes, float *minf, float *maxf)
 {
 	pframes_t i;
 	float a, b;
 
-	a = *max;
-	b = *min;
+	a = *maxf;
+	b = *minf;
 
 	for (i = 0; i < nframes; i++)
 	{
-		a = fmax (buf[i], a);
-		b = fmin (buf[i], b);
+		a = max (buf[i], a);
+		b = min (buf[i], b);
 	}
 
-	*max = a;
-	*min = b;
+	*maxf = a;
+	*minf = b;
 }
 
 void

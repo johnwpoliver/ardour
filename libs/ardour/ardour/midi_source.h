@@ -34,60 +34,85 @@
 
 namespace ARDOUR {
 
+class MidiChannelFilter;
 class MidiStateTracker;
 class MidiModel;
+
 template<typename T> class MidiRingBuffer;
 
 /** Source for MIDI data */
-class MidiSource : virtual public Source, public boost::enable_shared_from_this<MidiSource>
+class LIBARDOUR_API MidiSource : virtual public Source, public boost::enable_shared_from_this<MidiSource>
 {
   public:
-	typedef double TimeType;
+	typedef Evoral::Beats TimeType;
 
 	MidiSource (Session& session, std::string name, Source::Flag flags = Source::Flag(0));
 	MidiSource (Session& session, const XMLNode&);
 	virtual ~MidiSource ();
 
-	boost::shared_ptr<MidiSource> clone (const std::string& path,
-					     Evoral::MusicalTime begin = Evoral::MinMusicalTime,
-	                                     Evoral::MusicalTime end = Evoral::MaxMusicalTime);
+	/** Write the data in the given time range to another MidiSource
+	 * \param newsrc MidiSource to which data will be written. Should be a
+	 *        new, empty source. If it already has contents, the results are
+	 *        undefined. Source must be writable.
+	 * \param begin time of earliest event that can be written.
+	 * \param end time of latest event that can be written.
+	 * \return zero on success, non-zero if the write failed for any reason.
+	 */
+	int write_to (const Lock&                   lock,
+	              boost::shared_ptr<MidiSource> newsrc,
+	              Evoral::Beats                 begin = Evoral::MinBeats,
+	              Evoral::Beats                 end   = Evoral::MaxBeats);
 
 	/** Read the data in a given time range from the MIDI source.
 	 * All time stamps in parameters are in audio frames (even if the source has tempo time).
-	 * \param dst Ring buffer where read events are written
-	 * \param source_start Start position of the SOURCE in this read context
-	 * \param start Start of range to be read
-	 * \param cnt Length of range to be read (in audio frames)
-	 * \param tracker an optional pointer to MidiStateTracker object, for note on/off tracking
+	 * \param dst Ring buffer where read events are written.
+	 * \param source_start Start position of the SOURCE in this read context.
+	 * \param start Start of range to be read.
+	 * \param cnt Length of range to be read (in audio frames).
+	 * \param tracker an optional pointer to MidiStateTracker object, for note on/off tracking.
+	 * \param filtered Parameters whose MIDI messages will not be returned.
 	 */
-	virtual framecnt_t midi_read (Evoral::EventSink<framepos_t>& dst,
-	                              framepos_t                     source_start,
-	                              framepos_t                     start,
-	                              framecnt_t                     cnt,
-	                              MidiStateTracker*              tracker,
-	                              std::set<Evoral::Parameter> const &) const;
+	virtual framecnt_t midi_read (const Lock&                        lock,
+	                              Evoral::EventSink<framepos_t>&     dst,
+	                              framepos_t                         source_start,
+	                              framepos_t                         start,
+	                              framecnt_t                         cnt,
+	                              MidiStateTracker*                  tracker,
+	                              MidiChannelFilter*                 filter,
+	                              const std::set<Evoral::Parameter>& filtered) const;
 
 	/** Write data from a MidiRingBuffer to this source.
 	 *  @param source Source to read from.
 	 *  @param source_start This source's start position in session frames.
 	 *  @param cnt The length of time to write.
 	 */
-	virtual framecnt_t midi_write (MidiRingBuffer<framepos_t>& src,
+	virtual framecnt_t midi_write (const Lock&                 lock,
+	                               MidiRingBuffer<framepos_t>& src,
 	                               framepos_t                  source_start,
 	                               framecnt_t                  cnt);
 
-	virtual void append_event_unlocked_beats(const Evoral::Event<Evoral::MusicalTime>& ev) = 0;
+	/** Append a single event with a timestamp in beats.
+	 *
+	 * Caller must ensure that the event is later than the last written event.
+	 */
+	virtual void append_event_beats(const Lock&                         lock,
+	                                const Evoral::Event<Evoral::Beats>& ev) = 0;
 
-	virtual void append_event_unlocked_frames(const Evoral::Event<framepos_t>& ev,
-	                                          framepos_t                       source_start) = 0;
+	/** Append a single event with a timestamp in frames.
+	 *
+	 * Caller must ensure that the event is later than the last written event.
+	 */
+	virtual void append_event_frames(const Lock&                      lock,
+	                                 const Evoral::Event<framepos_t>& ev,
+	                                 framepos_t                       source_start) = 0;
 
 	virtual bool       empty () const;
 	virtual framecnt_t length (framepos_t pos) const;
 	virtual void       update_length (framecnt_t);
 
-	virtual void mark_streaming_midi_write_started (NoteMode mode);
-	virtual void mark_streaming_write_started ();
-	virtual void mark_streaming_write_completed ();
+	virtual void mark_streaming_midi_write_started (const Lock& lock, NoteMode mode);
+	virtual void mark_streaming_write_started (const Lock& lock);
+	virtual void mark_streaming_write_completed (const Lock& lock);
 
 	/** Mark write starting with the given time parameters.
 	 *
@@ -109,8 +134,9 @@ class MidiSource : virtual public Source, public boost::enable_shared_from_this<
 	 * etc.
 	 */
 	virtual void mark_midi_streaming_write_completed (
-		Evoral::Sequence<Evoral::MusicalTime>::StuckNoteOption stuck_option,
-		Evoral::MusicalTime                                    when = 0);
+		const Lock&                                      lock,
+		Evoral::Sequence<Evoral::Beats>::StuckNoteOption stuck_option,
+		Evoral::Beats                                    when = Evoral::Beats());
 
 	virtual void session_saved();
 
@@ -124,22 +150,24 @@ class MidiSource : virtual public Source, public boost::enable_shared_from_this<
 
 	bool length_mutable() const { return true; }
 
-	void set_length_beats(double l) { _length_beats = l; }
-	double length_beats() const { return _length_beats; }
+	void     set_length_beats(TimeType l) { _length_beats = l; }
+	TimeType length_beats() const         { return _length_beats; }
 
-	virtual void load_model(bool lock=true, bool force_reload=false) = 0;
-	virtual void destroy_model() = 0;
+	virtual void load_model(const Glib::Threads::Mutex::Lock& lock, bool force_reload=false) = 0;
+	virtual void destroy_model(const Glib::Threads::Mutex::Lock& lock) = 0;
 
-	/** This must be called with the source lock held whenever the
-	 *  source/model contents have been changed (reset iterators/cache/etc).
+	/** Reset cached information (like iterators) when things have changed.
+	 * @param lock Source lock, which must be held by caller.
+	 * @param notes If non-NULL, currently active notes are added to this set.
 	 */
-	void invalidate();
+	void invalidate(const Glib::Threads::Mutex::Lock&                       lock,
+	                std::set<Evoral::Sequence<Evoral::Beats>::WeakNotePtr>* notes=NULL);
 
-	void set_note_mode(NoteMode mode);
+	void set_note_mode(const Glib::Threads::Mutex::Lock& lock, NoteMode mode);
 
 	boost::shared_ptr<MidiModel> model() { return _model; }
-	void set_model (boost::shared_ptr<MidiModel>);
-	void drop_model();
+	void set_model(const Glib::Threads::Mutex::Lock& lock, boost::shared_ptr<MidiModel>);
+	void drop_model(const Glib::Threads::Mutex::Lock& lock);
 
 	Evoral::ControlList::InterpolationStyle interpolation_of (Evoral::Parameter) const;
 	void set_interpolation_of (Evoral::Parameter, Evoral::ControlList::InterpolationStyle);
@@ -159,20 +187,23 @@ class MidiSource : virtual public Source, public boost::enable_shared_from_this<
 	PBD::Signal2<void, Evoral::Parameter, AutoState> AutomationStateChanged;
 
   protected:
-	virtual void flush_midi() = 0;
+	virtual void flush_midi(const Lock& lock) = 0;
 
-	virtual framecnt_t read_unlocked (Evoral::EventSink<framepos_t>& dst,
+	virtual framecnt_t read_unlocked (const Lock&                    lock,
+	                                  Evoral::EventSink<framepos_t>& dst,
 	                                  framepos_t                     position,
 	                                  framepos_t                     start,
 	                                  framecnt_t                     cnt,
-	                                  MidiStateTracker*              tracker) const = 0;
+	                                  MidiStateTracker*              tracker,
+	                                  MidiChannelFilter*             filter) const = 0;
 
 	/** Write data to this source from a MidiRingBuffer.
 	 *  @param source Buffer to read from.
 	 *  @param position This source's start position in session frames.
 	 *  @param cnt The duration of this block to write for.
 	 */
-	virtual framecnt_t write_unlocked (MidiRingBuffer<framepos_t>& source,
+	virtual framecnt_t write_unlocked (const Lock&                 lock,
+	                                   MidiRingBuffer<framepos_t>& source,
 	                                   framepos_t                  position,
 	                                   framecnt_t                  cnt) = 0;
 
@@ -181,11 +212,11 @@ class MidiSource : virtual public Source, public boost::enable_shared_from_this<
 	boost::shared_ptr<MidiModel> _model;
 	bool                         _writing;
 
-	mutable Evoral::Sequence<Evoral::MusicalTime>::const_iterator _model_iter;
-	mutable bool                                                  _model_iter_valid;
+	mutable Evoral::Sequence<Evoral::Beats>::const_iterator _model_iter;
+	mutable bool                                            _model_iter_valid;
 
-	mutable double     _length_beats;
-	mutable framepos_t _last_read_end;
+	mutable Evoral::Beats _length_beats;
+	mutable framepos_t    _last_read_end;
 
 	/** The total duration of the current capture. */
 	framepos_t _capture_length;

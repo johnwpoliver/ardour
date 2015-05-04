@@ -26,6 +26,7 @@
 #include "ardour/midi_patch_manager.h"
 #include "ardour/processor.h"
 #include "ardour/plugin.h"
+#include "ardour/plugin_insert.h"
 #include "ardour/rc_configuration.h"
 
 #include "i18n.h"
@@ -119,7 +120,7 @@ InstrumentInfo::get_controller_name (Evoral::Parameter param) const
 	}
 	
 	boost::shared_ptr<ChannelNameSet> chan_names(
-		dev_names->channel_name_set_by_device_mode_and_channel(
+		dev_names->channel_name_set_by_channel(
 			external_instrument_mode, param.channel()));
 	if (!chan_names) {
 		return "";

@@ -20,7 +20,6 @@
 #include <algorithm>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <cstdio>
 #include <ctime>
 #include <cstdlib>
@@ -28,11 +27,7 @@
 #include "pbd/file_utils.h"
 
 #include "ardour/revision.h"
-#include "ardour/version.h"
 #include "ardour/filesystem_paths.h"
-
-#include "utils.h"
-#include "version.h"
 
 #include "about.h"
 #include "configinfo.h"
@@ -41,11 +36,19 @@
 
 #include "i18n.h"
 
+#ifdef WAF_BUILD
+#include "gtk2ardour-version.h"
+#endif
+
 using namespace Gtk;
 using namespace Gdk;
 using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
+
+#ifndef CODENAME
+#define CODENAME ""
+#endif
 
 #ifdef WITH_PAYMENT_OPTIONS
 
@@ -126,13 +129,16 @@ static const char* authors[] = {
 	N_("Hans Baier"),
 	N_("Ben Bell"),
 	N_("Sakari Bergen"),
+	N_("Christian Borss"),
 	N_("Chris Cannam"),
+	N_("Jeremy Carter"),
 	N_("Jesse Chappell"),
 	N_("Thomas Charbonnel"),
 	N_("Sam Chessman"),
 	N_("André Colomb"),
 	N_("Paul Davis"),
 	N_("Gerard van Dongen"),
+	N_("John Emmas"),
 	N_("Colin Fletcher"),
 	N_("Dave Flick"),
 	N_("Hans Fugal"),
@@ -152,6 +158,7 @@ static const char* authors[] = {
 	N_("Armand Klenk"),
 	N_("Julien de Kozak"),
 	N_("Matt Krai"),
+	N_("Georg Krause"),
 	N_("Nick Lanham"),
 	N_("Colin Law"),
 	N_("Joshua Leach"),
@@ -159,6 +166,7 @@ static const char* authors[] = {
 	N_("Nick Mainsbridge"),
 	N_("Tim Mayberry"),
 	N_("Doug Mclain"),
+	N_("Todd Naugle"),
 	N_("Jack O'Quin"),
 	N_("Nimal Ratnayake"),
 	N_("David Robillard"),
@@ -175,6 +183,7 @@ static const char* authors[] = {
 	N_("Mike Täht"),
 	N_("Roy Vegard"),
 	N_("Thorsten Wilms"),
+	N_("Grygorii Zharun"),
 	0
 };
 
@@ -185,7 +194,8 @@ static const char* translators[] = {
 \n\tRobert Schwede <schwede@ironshark.com>\
 \n\tBenjamin Scherrer <realhangman@web.de>\
 \n\tEdgar Aichinger <edogawa@aon.at>\
-\n\tRichard Oax <richard@pagliacciempire.de>\n"),
+\n\tRichard Oax <richard@pagliacciempire.de>\
+\n\tRobin Gloster <robin@loc-com.de>\n"),
 	N_("Italian:\n\tFilippo Pappalardo <filippo@email.it>\n\tRaffaele Morelli <raffaele.morelli@gmail.com>\n"),
 	N_("Portuguese:\n\tRui Nuno Capela <rncbc@rncbc.org>\n"),
 	N_("Brazilian Portuguese:\n\tAlexander da Franca Fernandes <alexander@nautae.eti.br>\
@@ -264,7 +274,7 @@ patent must be licensed for everyone's free use or not licensed at all.\n\
   The precise terms and conditions for copying, distribution and\n\
 modification follow.\n\
 \n\
-		    GNU GENERAL PUBLIC LICENSE\n\
+""		    GNU GENERAL PUBLIC LICENSE\n\
    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION\n\
 \n\
   0. This License applies to any program or other work which contains\n\
@@ -546,7 +556,9 @@ proprietary programs.  If your program is a subroutine library, you may\n\
 consider it more useful to permit linking proprietary applications with the\n\
 library.  If this is what you want to do, use the GNU Library General\n\
 Public License instead of this License.\n\
-");
+"); /* Note that at the start of (approximately) line 265, the above license
+       text has been split into two concatenated tokens (to satisfy compilation
+       under MSVC). Hopefully this won't affect gcc */
 
 About::About ()
 	: config_info (0)
@@ -560,9 +572,9 @@ About::About ()
 
 	std::string splash_file;
 
-	SearchPath spath(ardour_data_search_path());
+	Searchpath spath(ardour_data_search_path());
 
-	if (find_file_in_search_path (spath, "splash.png", splash_file)) {
+	if (find_file (spath, "splash.png", splash_file)) {
 		set_logo (Gdk::Pixbuf::create_from_file (splash_file));
 	} else {
 		error << "Could not find splash file" << endmsg;
@@ -576,13 +588,13 @@ About::About ()
 	}
 
 	set_translator_credits (t);
-	set_copyright (_("Copyright (C) 1999-2013 Paul Davis\n"));
+	set_copyright (_("Copyright (C) 1999-2015 Paul Davis\n"));
 	set_license (gpl);
 	set_name (X_("Ardour"));
 	set_website (X_("http://ardour.org/"));
 	set_website_label (_("http://ardour.org/"));
-	set_version ((string_compose(_("%1\n(built from revision %2)"),
-				     VERSIONSTRING,
+	set_version ((string_compose(_("%1%2\n(built from revision %3)"),
+				     VERSIONSTRING, CODENAME,
 				     revision)));
 
 	Gtk::Button* config_button = manage (new Button (_("Config")));
@@ -590,6 +602,11 @@ About::About ()
 	get_action_area()->add (*config_button);
 	get_action_area()->reorder_child (*config_button, 0);
 	config_button->signal_clicked().connect (mem_fun (*this, &About::show_config_info));
+
+	Gtk::Button *btn = static_cast<Gtk::Button*>(get_widget_for_response(Gtk::RESPONSE_CANCEL));
+	if (btn) {
+		btn->signal_clicked().connect(sigc::mem_fun(static_cast<Gtk::Window*>(this), &Gtk::Window::hide));
+	}
 }
 
 About::~About ()

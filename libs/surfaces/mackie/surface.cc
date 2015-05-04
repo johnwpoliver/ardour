@@ -24,7 +24,6 @@
 #include <cmath>
 
 #include "midi++/port.h"
-#include "midi++/manager.h"
 
 #include "ardour/automation_control.h"
 #include "ardour/debug.h"
@@ -54,11 +53,12 @@
 
 using namespace std;
 using namespace PBD;
-using namespace Mackie;
 using ARDOUR::Route;
 using ARDOUR::Panner;
 using ARDOUR::Pannable;
 using ARDOUR::AutomationControl;
+using namespace ArdourSurface;
+using namespace Mackie;
 
 #define ui_context() MackieControlProtocol::instance() /* a UICallback-derived object that specifies the event loop for signal handling */
 
@@ -87,7 +87,11 @@ Surface::Surface (MackieControlProtocol& mcp, const std::string& device_name, ui
 {
 	DEBUG_TRACE (DEBUG::MackieControl, "Surface::Surface init\n");
 	
-	_port = new SurfacePort (*this);
+	try {
+		_port = new SurfacePort (*this);
+	} catch (...) {
+		throw failed_constructor ();
+	}
 
 	/* only the first Surface object has global controls */
 
@@ -136,6 +140,39 @@ Surface::~Surface ()
 	delete _port;
 
 	DEBUG_TRACE (DEBUG::MackieControl, "Surface::~Surface done\n");
+}
+
+XMLNode&
+Surface::get_state()
+{
+	char buf[64];
+	snprintf (buf, sizeof (buf), X_("surface-%u"), _number);
+	XMLNode* node = new XMLNode (buf);
+
+	node->add_child_nocopy (_port->get_state());
+
+	return *node;
+}
+
+int
+Surface::set_state (const XMLNode& node, int version)
+{
+	char buf[64];
+	snprintf (buf, sizeof (buf), X_("surface-%u"), _number);
+	XMLNode* mynode = node.child (buf);
+
+	if (!mynode) {
+		return 0;
+	}
+
+	XMLNode* portnode = mynode->child (X_("Port"));
+	if (portnode) {
+		if (_port->set_state (*portnode, version)) {
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
 const MidiByteArray& 
@@ -333,7 +370,7 @@ Surface::connect_to_signals ()
 		p->controller.connect_same_thread (*this, boost::bind (&Surface::handle_midi_controller_message, this, _1, _2));
 		/* Button messages are NoteOn */
 		p->note_on.connect_same_thread (*this, boost::bind (&Surface::handle_midi_note_on_message, this, _1, _2));
-		/* Button messages are NoteOn. libmidi++ sends note-on w/velocity = 0 as note-off so catch them too */
+		/* Button messages are NoteOn but libmidi++ sends note-on w/velocity = 0 as note-off so catch them too */
 		p->note_off.connect_same_thread (*this, boost::bind (&Surface::handle_midi_note_on_message, this, _1, _2));
 		/* Fader messages are Pitchbend */
 		uint32_t i;
@@ -350,14 +387,13 @@ Surface::connect_to_signals ()
 void
 Surface::handle_midi_pitchbend_message (MIDI::Parser&, MIDI::pitchbend_t pb, uint32_t fader_id)
 {
-	/* Pitchbend messages are fader messages. Nothing in the data we get
+	/* Pitchbend messages are fader position messages. Nothing in the data we get
 	 * from the MIDI::Parser conveys the fader ID, which was given by the
 	 * channel ID in the status byte.
 	 *
 	 * Instead, we have used bind() to supply the fader-within-strip ID 
 	 * when we connected to the per-channel pitchbend events.
 	 */
-
 
 	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("Surface::handle_midi_pitchbend_message on port %3, fader = %1 value = %2\n",
 							   fader_id, pb, _number));
@@ -391,6 +427,28 @@ Surface::handle_midi_note_on_message (MIDI::Parser &, MIDI::EventTwoBytes* ev)
 	
 	if (_mcp.device_info().no_handshake()) {
 		turn_it_on ();
+	}
+
+	/* fader touch sense is given by "buttons" 0xe..0xe7 and 0xe8 for the
+	 * master. 
+	 */
+
+	if (ev->note_number >= 0xE0 && ev->note_number <= 0xE8) {
+		Fader* fader = faders[ev->note_number];
+
+		DEBUG_TRACE (DEBUG::MackieControl, string_compose ("Surface: fader touch message, fader = %1\n", fader));
+
+		if (fader) {
+
+			Strip* strip = dynamic_cast<Strip*> (&fader->group());
+
+			if (ev->velocity > 64) {
+				strip->handle_fader_touch (*fader, true);
+			} else {
+				strip->handle_fader_touch (*fader, false);
+			}
+		}
+		return;
 	}
 
 	Button* button = buttons[ev->note_number];
@@ -480,8 +538,10 @@ Surface::handle_midi_sysex (MIDI::Parser &, MIDI::byte * raw_bytes, size_t count
 		   LCP: Connection Challenge 
 		*/
 		if (bytes[4] == 0x10 || bytes[4] == 0x11) {
+			DEBUG_TRACE (DEBUG::MackieControl, "Logic Control Device connection challenge\n");
 			write_sysex (host_connection_query (bytes));
 		} else {
+			DEBUG_TRACE (DEBUG::MackieControl, string_compose ("Mackie Control Device ready, current status = %1\n", _active));
 			if (!_active) {
 				turn_it_on ();
 			}
@@ -489,6 +549,7 @@ Surface::handle_midi_sysex (MIDI::Parser &, MIDI::byte * raw_bytes, size_t count
 		break;
 
 	case 0x03: /* LCP Connection Confirmation */
+		DEBUG_TRACE (DEBUG::MackieControl, "Logic Control Device confirms connection, ardour replies\n");
 		if (bytes[4] == 0x10 || bytes[4] == 0x11) {
 			write_sysex (host_connection_confirmation (bytes));
 			_active = true;
@@ -496,6 +557,7 @@ Surface::handle_midi_sysex (MIDI::Parser &, MIDI::byte * raw_bytes, size_t count
 		break;
 
 	case 0x04: /* LCP: Confirmation Denied */
+		DEBUG_TRACE (DEBUG::MackieControl, "Logic Control Device denies connection\n");
 		_active = false;
 		break;
 	default:
@@ -574,6 +636,8 @@ Surface::turn_it_on ()
 
 	_active = true;
 
+	_mcp.device_ready ();
+
 	for (Strips::iterator s = strips.begin(); s != strips.end(); ++s) {
 		(*s)->notify_all ();
 	}
@@ -583,12 +647,6 @@ Surface::turn_it_on ()
 	if (_mcp.device_info ().has_global_controls ()) {
 		_mcp.update_global_button (Button::Read, _mcp.metering_active ());
 	}
-}
-
-void 
-Surface::handle_port_inactive (SurfacePort*)
-{
-	_active = false;
 }
 
 void 
@@ -708,6 +766,8 @@ Surface::map_routes (const vector<boost::shared_ptr<Route> >& routes)
 {
 	vector<boost::shared_ptr<Route> >::const_iterator r;
 	Strips::iterator s = strips.begin();
+
+	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("Mapping %1 routes", routes.size()));
 
 	for (r = routes.begin(); r != routes.end() && s != strips.end(); ++s) {
 

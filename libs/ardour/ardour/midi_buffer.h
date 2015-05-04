@@ -21,15 +21,18 @@
 #define __ardour_midi_buffer_h__
 
 #include "evoral/midi_util.h"
+#include "evoral/EventSink.hpp"
+
 #include "midi++/event.h"
+
 #include "ardour/buffer.h"
-#include "ardour/event_type_map.h"
+#include "ardour/parameter_types.h"
 
 namespace ARDOUR {
 
 
 /** Buffer containing 8-bit unsigned char (MIDI) data. */
-class MidiBuffer : public Buffer
+class LIBARDOUR_API MidiBuffer : public Buffer, public Evoral::EventSink<framepos_t>
 {
 public:
 	typedef framepos_t TimeType;
@@ -44,23 +47,31 @@ public:
 	void copy(const MidiBuffer& copy);
 
 	bool     push_back(const Evoral::MIDIEvent<TimeType>& event);
-	bool     push_back(const jack_midi_event_t& event);
 	bool     push_back(TimeType time, size_t size, const uint8_t* data);
+
 	uint8_t* reserve(TimeType time, size_t size);
 
 	void resize(size_t);
+	size_t size() const { return _size; }
+	bool empty() const { return _size == 0; }
 
+	bool insert_event(const Evoral::MIDIEvent<TimeType>& event);
 	bool merge_in_place(const MidiBuffer &other);
 
+	/** EventSink interface for non-RT use (export, bounce). */
+	uint32_t write(TimeType time, Evoral::EventType type, uint32_t size, const uint8_t* buf);
+
 	template<typename BufferType, typename EventType>
-	class iterator_base {
+		class iterator_base
+	{
 	public:
-		iterator_base<BufferType, EventType>(BufferType& b, framecnt_t o) 
-		     : buffer(&b), offset(o) {}
-                iterator_base<BufferType, EventType>(const iterator_base<BufferType,EventType>& o) 
-		     : buffer (o.buffer), offset(o.offset) {}
-	    
-	        inline iterator_base<BufferType,EventType> operator= (const iterator_base<BufferType,EventType>& o) {
+		iterator_base<BufferType, EventType>(BufferType& b, framecnt_t o)
+			: buffer(&b), offset(o) {}
+
+		iterator_base<BufferType, EventType>(const iterator_base<BufferType,EventType>& o)
+			: buffer (o.buffer), offset(o.offset) {}
+
+		inline iterator_base<BufferType,EventType> operator= (const iterator_base<BufferType,EventType>& o) {
 			if (&o != this) {
 				buffer = o.buffer;
 				offset = o.offset;
@@ -72,17 +83,22 @@ public:
 			uint8_t* ev_start = buffer->_data + offset + sizeof(TimeType);
 			int event_size = Evoral::midi_event_size(ev_start);
 			assert(event_size >= 0);
-			return EventType(EventTypeMap::instance().midi_event_type(*ev_start),
+			return EventType(midi_parameter_type(*ev_start),
 					*((TimeType*)(buffer->_data + offset)),
 					event_size, ev_start);
 		}
+
 		inline EventType operator*() {
 			uint8_t* ev_start = buffer->_data + offset + sizeof(TimeType);
 			int event_size = Evoral::midi_event_size(ev_start);
 			assert(event_size >= 0);
-			return EventType(EventTypeMap::instance().midi_event_type(*ev_start),
-					*((TimeType*)(buffer->_data + offset)),
+			return EventType(midi_parameter_type(*ev_start),
+					*(reinterpret_cast<TimeType*>((uintptr_t)(buffer->_data + offset))),
 					event_size, ev_start);
+		}
+
+		inline TimeType * timeptr() {
+			return reinterpret_cast<TimeType*>((uintptr_t)(buffer->_data + offset));
 		}
 
 		inline iterator_base<BufferType, EventType>& operator++() {
@@ -92,12 +108,15 @@ public:
 			offset += sizeof(TimeType) + event_size;
 			return *this;
 		}
+
 		inline bool operator!=(const iterator_base<BufferType, EventType>& other) const {
 			return (buffer != other.buffer) || (offset != other.offset);
 		}
+
 		inline bool operator==(const iterator_base<BufferType, EventType>& other) const {
 			return (buffer == other.buffer) && (offset == other.offset);
 		}
+
 		BufferType*     buffer;
 		size_t          offset;
 	};
@@ -111,7 +130,7 @@ public:
 	const_iterator begin() const { return const_iterator(*this, 0); }
 	const_iterator end()   const { return const_iterator(*this, _size); }
 
-        iterator erase(const iterator& i) {
+	iterator erase(const iterator& i) {
 		assert (i.buffer == this);
 		uint8_t* ev_start = _data + i.offset + sizeof (TimeType);
 		int event_size = Evoral::midi_event_size (ev_start);
@@ -123,7 +142,7 @@ public:
 
 		size_t total_data_deleted = sizeof(TimeType) + event_size;
 
-		if (i.offset + total_data_deleted >= _size) {
+		if (i.offset + total_data_deleted > _size) {
 			_size = 0;
 			return end();
 		}
@@ -154,14 +173,14 @@ public:
 	 * its MIDI status byte.
 	 */
 	static bool second_simultaneous_midi_byte_is_first (uint8_t, uint8_t);
-	
+
 private:
 	friend class iterator_base< MidiBuffer, Evoral::MIDIEvent<TimeType> >;
 	friend class iterator_base< const MidiBuffer, const Evoral::MIDIEvent<TimeType> >;
 
 	uint8_t* _data; ///< timestamp, event, timestamp, event, ...
+	pframes_t _size;
 };
-
 
 } // namespace ARDOUR
 

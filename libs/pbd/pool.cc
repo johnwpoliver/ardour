@@ -24,6 +24,7 @@
 #include <cassert>
 
 #include "pbd/pool.h"
+#include "pbd/pthread_utils.h"
 #include "pbd/error.h"
 #include "pbd/debug.h"
 #include "pbd/compose.h"
@@ -69,7 +70,7 @@ Pool::alloc ()
 
 	if (free_list.read (&ptr, 1) < 1) {
 		fatal << "CRITICAL: " << _name << " POOL OUT OF MEMORY - RECOMPILE WITH LARGER SIZE!!" << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		return 0;
 	} else {
 		return ptr;
@@ -178,12 +179,12 @@ PerThreadPool::create_per_thread_pool (string n, unsigned long isize, unsigned l
  *  calling create_per_thread_pool in the current thread.
  */
 CrossThreadPool*
-PerThreadPool::per_thread_pool ()
+PerThreadPool::per_thread_pool (bool must_exist)
 {
 	CrossThreadPool* p = _key.get();
-	if (!p) {
-		fatal << "programming error: no per-thread pool \"" << _name << "\" for thread " << pthread_self() << endmsg;
-		/*NOTREACHED*/
+	if (!p && must_exist) {
+		fatal << "programming error: no per-thread pool \"" << _name << "\" for thread " << pthread_name() << endmsg;
+		abort(); /*NOTREACHED*/
 	}
 	return p;
 }
@@ -221,16 +222,39 @@ CrossThreadPool::CrossThreadPool  (string n, unsigned long isize, unsigned long 
 	
 }
 
+void
+CrossThreadPool::flush_pending_with_ev (void *ptr)
+{
+	push (ptr);
+	flush_pending ();
+}
+
+void
+CrossThreadPool::flush_pending ()
+{
+	void* ptr;
+	bool did_release = false;
+	
+	DEBUG_TRACE (DEBUG::Pool, string_compose ("%1 %2 has %3 pending free entries waiting, status size %4 free %5 used %6\n", pthread_name(), name(), pending.read_space(),
+	                                          total(), available(), used()));
+	                                          
+	while (pending.read (&ptr, 1) == 1) {
+		DEBUG_TRACE (DEBUG::Pool, string_compose ("%1 %2 pushes back a pending free list entry before allocating\n", pthread_name(), name()));
+		free_list.write (&ptr, 1);
+		did_release = true;
+	}
+
+	if (did_release) {
+		DEBUG_TRACE (DEBUG::Pool, string_compose ("Pool size: %1 free %2 used %3 pending now %4\n", total(), available(), used(), pending_size()));
+	}
+}
+
 void*
 CrossThreadPool::alloc () 
 {
-	void* ptr;
-
-	DEBUG_TRACE (DEBUG::Pool, string_compose ("%1 %2 has %3 pending free entries waiting\n", pthread_self(), name(), pending.read_space()));
-	while (pending.read (&ptr, 1) == 1) {
-		DEBUG_TRACE (DEBUG::Pool, string_compose ("%1 %2 pushes back a pending free list entry before allocating\n", pthread_self(), name()));
-		free_list.write (&ptr, 1);
-	}
+	/* process anything waiting to be deleted (i.e. moved back to the free list)  */
+	flush_pending ();
+	/* now allocate from the potentially larger free list */
 	return Pool::alloc ();
 }
 

@@ -13,9 +13,10 @@
     <Button name="Touch" plain="Editor/selected-marker-to-next-region-boundary"/>
     <Button name="Pan" plain="Transport/GotoStart"/>
     <Button name="Send" plain="Transport/GotoEnd"/>
+    <Button name="Play" plain="Transport/ToggleRoll"/>
     <Button name="Read" plain="Transport/ToggleAutoPlay"/>
     <Button name="Save" plain="Transport/ToggleAutoReturn"/>
-    <Button name="ChannelLeft" plain="Editor/select-next-route"/>
+    <Button name="ChannelLeft" plain="Editor/select-prev-route"/>
     <Button name="ChannelRight" plain="Editor/select-next-route"/>
     <Button name="FrmRight" plain="Editor/playhead-to-previous-region-boundary"/>
     <Button name="PunchOut" plain="Editor/playhead-to-next-region-boundary"/>

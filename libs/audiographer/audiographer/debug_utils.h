@@ -3,17 +3,21 @@
 
 #include "flag_field.h"
 
+#include <cstdlib>
 #include <string>
 
 #ifdef __GNUC__
 #include <cxxabi.h>
+#include <cstdlib>
 #endif
+
+#include "audiographer/visibility.h"
 
 namespace AudioGrapher
 {
 
 /// Utilities for debugging
-struct DebugUtils
+struct LIBAUDIOGRAPHER_API DebugUtils
 {
 	/// Returns the demangled name of the object passed as the parameter
 	template<typename T>
@@ -24,7 +28,7 @@ struct DebugUtils
 		char * res = abi::__cxa_demangle (typeid(obj).name(), 0, 0, &status);
 		if (status == 0) {
 			std::string s(res);
-			free (res);
+			std::free (res);
 			return s;
 		}
 #endif

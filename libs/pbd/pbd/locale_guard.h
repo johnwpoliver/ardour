@@ -20,12 +20,20 @@
 #ifndef __pbd_locale_guard__
 #define __pbd_locale_guard__
 
+#include "pbd/libpbd_visibility.h"
+
+#include <string>
+
 namespace PBD {
 
-struct LocaleGuard {
+struct LIBPBD_API LocaleGuard {
     LocaleGuard (const char*);
     ~LocaleGuard ();
-    const char* old;
+
+	static std::string current;
+
+private:
+    char* old;
 };
 
 }

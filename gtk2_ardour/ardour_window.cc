@@ -30,6 +30,7 @@
 using namespace std;
 using namespace Gtk;
 using namespace Gtkmm2ext;
+using namespace ARDOUR_UI_UTILS;
 
 ArdourWindow::ArdourWindow (string title)
 	: Window ()
@@ -37,7 +38,7 @@ ArdourWindow::ArdourWindow (string title)
 {
 	set_title (title);
 	init ();
-	set_position (Gtk::WIN_POS_MOUSE);
+	set_position (Gtk::WIN_POS_CENTER);
 }
 
 ArdourWindow::ArdourWindow (Gtk::Window& parent, string /*title*/)
@@ -57,21 +58,31 @@ ArdourWindow::~ArdourWindow ()
 bool
 ArdourWindow::on_key_press_event (GdkEventKey* ev)
 {
-	return relay_key_press (ev, this);
+	bool handled = Gtk::Window::on_key_press_event (ev);
+
+	if (!handled) {
+		if (!get_modal()) {
+			handled = relay_key_press (ev, this);
+		}
+	}
+
+	return handled;
 }
 
 bool
-ArdourWindow::on_enter_notify_event (GdkEventCrossing *ev)
+ArdourWindow::on_focus_in_event (GdkEventFocus *ev)
 {
-	Keyboard::the_keyboard().enter_window (ev, this);
-	return Window::on_enter_notify_event (ev);
+	Keyboard::the_keyboard().focus_in_window (ev, this);
+	return Window::on_focus_in_event (ev);
 }
 
 bool
-ArdourWindow::on_leave_notify_event (GdkEventCrossing *ev)
+ArdourWindow::on_focus_out_event (GdkEventFocus *ev)
 {
-	Keyboard::the_keyboard().leave_window (ev, this);
-	return Window::on_leave_notify_event (ev);
+	if (!get_modal()) {
+		Keyboard::the_keyboard().focus_out_window (ev, this);
+	}
+	return Window::on_focus_out_event (ev);
 }
 
 void
@@ -84,7 +95,6 @@ ArdourWindow::on_unmap ()
 bool
 ArdourWindow::on_delete_event (GdkEventAny*)
 {
-	hide ();
 	return false;
 }
 
@@ -92,8 +102,9 @@ void
 ArdourWindow::init ()
 {
 	set_border_width (10);
+	add_events (Gdk::FOCUS_CHANGE_MASK);
 
-        /* ArdourWindows are not dialogs (they have no "OK" or "Close" button) but
+      /* ArdourWindows are not dialogs (they have no "OK" or "Close" button) but
            they should be considered part of the same "window level" as a dialog. This
            works on X11 and Quartz, in that:
            
@@ -103,7 +114,7 @@ ArdourWindow::init ()
                vice versa.
         */
 
-	if (ARDOUR_UI::instance()->config()->all_floating_windows_are_dialogs.get()) {
+	if (ARDOUR_UI::config()->get_all_floating_windows_are_dialogs()) {
 		set_type_hint (Gdk::WINDOW_TYPE_HINT_DIALOG);
 	} else {
 		set_type_hint (Gdk::WINDOW_TYPE_HINT_UTILITY);

@@ -65,13 +65,14 @@ REGIONLISTSORTTYPE(BySourceFileName)
 REGIONLISTSORTTYPE(ByStartInFile)
 REGIONLISTSORTTYPE(ByTimestamp)
 
-MOUSEMODE(MouseGain)
+/* Changing this order will break step_mouse_mode */
 MOUSEMODE(MouseObject)
 MOUSEMODE(MouseRange)
-MOUSEMODE(MouseDraw)
+MOUSEMODE(MouseCut)
 MOUSEMODE(MouseTimeFX)
-MOUSEMODE(MouseZoom)
 MOUSEMODE(MouseAudition)
+MOUSEMODE(MouseDraw)
+MOUSEMODE(MouseContent)
 
 /* Changing this order will break the menu */
 ZOOMFOCUS(ZoomFocusLeft)

@@ -68,8 +68,10 @@ Track::init ()
 	/* don't add rec_enable_control to controls because we don't want it to
 	 * appear as an automatable parameter
 	 */
+	track_number_changed.connect_same_thread (*this, boost::bind (&Track::resync_track_name, this));
+	_session.config.ParameterChanged.connect_same_thread (*this, boost::bind (&Track::parameter_changed, this, _1));
 
-        return 0;
+	return 0;
 }
 
 void
@@ -176,7 +178,11 @@ Track::freeze_state() const
 }
 
 Track::RecEnableControl::RecEnableControl (boost::shared_ptr<Track> t)
-	: AutomationControl (t->session(), RecEnableAutomation, boost::shared_ptr<AutomationList>(), X_("recenable"))
+	: AutomationControl (t->session(),
+	                     RecEnableAutomation,
+	                     ParameterDescriptor(Evoral::Parameter(RecEnableAutomation)),
+	                     boost::shared_ptr<AutomationList>(),
+	                     X_("recenable"))
 	, track (t)
 {
 	boost::shared_ptr<AutomationList> gl(new AutomationList(Evoral::Parameter(RecEnableAutomation)));
@@ -284,6 +290,28 @@ Track::set_record_enabled (bool yn, void *src)
 	_rec_enable_control->Changed ();
 }
 
+void
+Track::parameter_changed (string const & p)
+{
+	if (p == "track-name-number") {
+		resync_track_name ();
+	}
+	else if (p == "track-name-take") {
+		resync_track_name ();
+	}
+	else if (p == "take-name") {
+		if (_session.config.get_track_name_take()) {
+			resync_track_name ();
+		}
+	}
+}
+
+void
+Track::resync_track_name ()
+{
+	set_name(name());
+}
+
 bool
 Track::set_name (const string& str)
 {
@@ -293,6 +321,29 @@ Track::set_name (const string& str)
 		/* this messes things up if done while recording */
 		return false;
 	}
+
+	string diskstream_name = "";
+	if (_session.config.get_track_name_take () && !_session.config.get_take_name ().empty()) {
+		// Note: any text is fine, legalize_for_path() fixes this later
+		diskstream_name += _session.config.get_take_name ();
+		diskstream_name += "_";
+	}
+	const int64_t tracknumber = track_number();
+	if (tracknumber > 0 && _session.config.get_track_name_number()) {
+		char num[64], fmt[10];
+		snprintf(fmt, sizeof(fmt), "%%0%d" PRId64, _session.track_number_decimals());
+		snprintf(num, sizeof(num), fmt, tracknumber);
+		diskstream_name += num;
+		diskstream_name += "_";
+	}
+	diskstream_name += str;
+
+	if (diskstream_name == _diskstream_name) {
+		return true;
+	}
+	_diskstream_name = diskstream_name;
+
+	_diskstream->set_write_source_name (diskstream_name);
 
 	boost::shared_ptr<Track> me = boost::dynamic_pointer_cast<Track> (shared_from_this ());
 	if (_diskstream->playlist()->all_regions_empty () && _session.playlists->playlists_for_track (me).size() == 1) {
@@ -347,6 +398,9 @@ Track::no_roll (pframes_t nframes, framepos_t start_frame, framepos_t end_frame,
 
 	if (!_active) {
 		silence (nframes);
+		if (_meter_point == MeterInput && (_monitoring & MonitorInput || _diskstream->record_enabled())) {
+			_meter->reset();
+		}
 		return 0;
 	}
 
@@ -369,35 +423,30 @@ Track::no_roll (pframes_t nframes, framepos_t start_frame, framepos_t end_frame,
 
 	bool be_silent;
 
-	if (_have_internal_generator) {
-		/* since the instrument has no input streams,
-		   there is no reason to send any signal
-		   into the route.
-		*/
+	MonitorState const s = monitoring_state ();
+	/* we are not rolling, so be silent even if we are monitoring disk, as there
+	   will be no disk data coming in.
+	*/
+	switch (s) {
+	case MonitoringSilence:
 		be_silent = true;
-
-	} else {
-
-		MonitorState const s = monitoring_state ();
-		/* we are not rolling, so be silent even if we are monitoring disk, as there
-		   will be no disk data coming in.
-		*/
-		switch (s) {
-		case MonitoringSilence:
-			/* if there is an instrument, be_silent should always
-			   be false
-			*/
-			be_silent = (the_instrument_unlocked() == 0);
-			break;
-		case MonitoringDisk:
-			be_silent = true;
-			break;
-		case MonitoringInput:
-			be_silent = false;
-			break;
-		}
+		break;
+	case MonitoringDisk:
+		be_silent = true;
+		break;
+	case MonitoringInput:
+		be_silent = false;
+		break;
+	default:
+		be_silent = false;
+		break;
 	}
-
+	
+	//if we have an internal generator, let it play regardless of monitoring state
+	if (_have_internal_generator) {
+		be_silent = false;
+	}
+	
 	_amp->apply_gain_automation (false);
 
 	/* if have_internal_generator, or .. */
@@ -405,15 +454,47 @@ Track::no_roll (pframes_t nframes, framepos_t start_frame, framepos_t end_frame,
 	if (be_silent) {
 
 		if (_meter_point == MeterInput) {
-			/* still need input monitoring */
-			_input->process_input (_meter, start_frame, end_frame, nframes);
+			/* still need input monitoring and metering */
+
+			bool const track_rec = _diskstream->record_enabled ();
+			bool const auto_input = _session.config.get_auto_input ();
+			bool const software_monitor = Config->get_monitoring_model() == SoftwareMonitoring;
+			bool const tape_machine_mode = Config->get_tape_machine_mode ();
+			bool no_meter = false;
+
+			/* this needs a proper K-map
+			 * and should be separated into a function similar to monitoring_state()
+			 * that also handles roll() states in audio_track.cc, midi_track.cc and route.cc
+			 *
+			 * see http://www.oofus.co.uk/ardour/Ardour3MonitorModesV3.pdf
+			 */
+			if (!auto_input && !track_rec) {
+				no_meter=true;
+			}
+			else if (tape_machine_mode && !track_rec && auto_input) {
+				no_meter=true;
+			}
+			else if (!software_monitor && tape_machine_mode && !track_rec) {
+				no_meter=true;
+			}
+			else if (!software_monitor && !tape_machine_mode && !track_rec && !auto_input) {
+				no_meter=true;
+			}
+
+			if (no_meter) {
+				BufferSet& bufs (_session.get_silent_buffers (n_process_buffers()));
+				_meter->run (bufs, 0, 0, nframes, true);
+				_input->process_input (boost::shared_ptr<Processor>(), start_frame, end_frame, nframes);
+			} else {
+				_input->process_input (_meter, start_frame, end_frame, nframes);
+			}
 		}
 
 		passthru_silence (start_frame, end_frame, nframes, 0);
 
 	} else {
 
-		BufferSet& bufs = _session.get_scratch_buffers (n_process_buffers());
+		BufferSet& bufs = _session.get_route_buffers (n_process_buffers());
 		
 		fill_buffers_with_input (bufs, _input, nframes);
 
@@ -439,6 +520,10 @@ Track::silent_roll (pframes_t nframes, framepos_t /*start_frame*/, framepos_t /*
 {
 	Glib::Threads::RWLock::ReaderLock lm (_processor_lock, Glib::Threads::TRY_LOCK);
 	if (!lm.locked()) {
+		framecnt_t playback_distance = _diskstream->calculate_playback_distance(nframes);
+		if (can_internal_playback_seek(playback_distance)) {
+			internal_playback_seek(playback_distance);
+		}
 		return 0;
 	}
 
@@ -458,7 +543,7 @@ Track::silent_roll (pframes_t nframes, framepos_t /*start_frame*/, framepos_t /*
 
 	framecnt_t playback_distance;
 
-	BufferSet& bufs (_session.get_silent_buffers (n_process_buffers()));
+	BufferSet& bufs (_session.get_route_buffers (n_process_buffers(), true));
 
 	int const dret = _diskstream->process (bufs, _session.transport_frame(), nframes, playback_distance, false);
 	need_butler = _diskstream->commit (playback_distance);
@@ -508,15 +593,15 @@ Track::playlist ()
 }
 
 void
-Track::request_jack_monitors_input (bool m)
+Track::request_input_monitoring (bool m)
 {
-	_diskstream->request_jack_monitors_input (m);
+	_diskstream->request_input_monitoring (m);
 }
 
 void
-Track::ensure_jack_monitors_input (bool m)
+Track::ensure_input_monitoring (bool m)
 {
-	_diskstream->ensure_jack_monitors_input (m);
+	_diskstream->ensure_input_monitoring (m);
 }
 
 bool
@@ -537,10 +622,10 @@ Track::set_capture_offset ()
 	_diskstream->set_capture_offset ();
 }
 
-list<boost::shared_ptr<Source> >
-Track::steal_write_sources()
+std::string
+Track::steal_write_source_name()
 {
-        return _diskstream->steal_write_sources ();
+        return _diskstream->steal_write_source_name ();
 }
 
 void
@@ -677,9 +762,9 @@ Track::speed () const
 }
 
 void
-Track::prepare_to_stop (framepos_t p)
+Track::prepare_to_stop (framepos_t t, framepos_t a)
 {
-	_diskstream->prepare_to_stop (p);
+	_diskstream->prepare_to_stop (t, a);
 }
 
 void
@@ -866,7 +951,7 @@ Track::monitoring_state () const
 		}
 	}
 
-	/* NOTREACHED */
+	abort(); /* NOTREACHED */
 	return MonitoringSilence;
 }
 
@@ -945,6 +1030,14 @@ Track::set_monitoring (MonitorChoice mc)
 MeterState
 Track::metering_state () const
 {
-	return _diskstream->record_enabled() ? MeteringInput : MeteringRoute;
+	bool rv;
+	if (_session.transport_rolling ()) {
+		// audio_track.cc || midi_track.cc roll() runs meter IFF:
+		rv = _meter_point == MeterInput && (_monitoring & MonitorInput || _diskstream->record_enabled());
+	} else {
+		// track no_roll() always metering if
+		rv = _meter_point == MeterInput;
+	}
+	return rv ? MeteringInput : MeteringRoute;
 }
 

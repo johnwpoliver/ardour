@@ -25,6 +25,8 @@
 #include "pbd/xml++.h"
 #include "pbd/signals.h"
 
+#include <gtkmm/textview.h>
+
 #include "gtkmm2ext/widget_state.h"
 
 #include "ardour/ardour.h"
@@ -49,8 +51,9 @@ namespace Gtk {
 	class Widget;
 }
 
-class BindableToggleButton;
 class ArdourButton;
+class ArdourWindow;
+class IOSelectorWindow;
 
 class RouteUI : public virtual AxisView
 {
@@ -112,9 +115,13 @@ class RouteUI : public virtual AxisView
 	void send_blink (bool);
 	sigc::connection send_blink_connection;
 
+	sigc::connection rec_blink_connection;
+
 	Gtk::Menu* mute_menu;
 	Gtk::Menu* solo_menu;
 	Gtk::Menu* sends_menu;
+
+	boost::shared_ptr<ARDOUR::Delivery> _current_delivery;
 
 	bool mute_press(GdkEventButton*);
 	bool mute_release(GdkEventButton*);
@@ -133,6 +140,9 @@ class RouteUI : public virtual AxisView
 	void monitoring_changed ();
 	void update_monitoring_display ();
 
+	void edit_input_configuration ();
+	void edit_output_configuration ();
+
 	void step_gain_up ();
 	void step_gain_down ();
 	void page_gain_up ();
@@ -147,7 +157,6 @@ class RouteUI : public virtual AxisView
 
 	void solo_changed(bool, void*);
 	void solo_changed_so_update_mute ();
-	void mute_changed(void*);
 	void listen_changed(void*);
 	virtual void processors_changed (ARDOUR::RouteProcessorChange) {}
 	void route_rec_enable_changed();
@@ -178,9 +187,6 @@ class RouteUI : public virtual AxisView
 
 	int  set_color_from_route ();
 
-	void remove_this_route (bool apply_to_selection = false);
-	static gint idle_remove_this_route (RouteUI *);
-
 	void route_rename();
 
 	virtual void property_changed (const PBD::PropertyChange&);
@@ -205,7 +211,7 @@ class RouteUI : public virtual AxisView
 	void disconnect_input ();
 	void disconnect_output ();
 
-	virtual void update_rec_display ();
+	virtual void blink_rec_display (bool onoff);
 	void update_mute_display ();
 
 	void update_solo_display ();
@@ -225,9 +231,25 @@ class RouteUI : public virtual AxisView
 	 *  by a click on the `Sends' button.  The parameter is the route that the sends are
 	 *  to, or 0 if no route is now in this mode.
 	 */
-	static sigc::signal<void, boost::shared_ptr<ARDOUR::Route> > BusSendDisplayChanged;
+	static PBD::Signal1<void, boost::shared_ptr<ARDOUR::Route> > BusSendDisplayChanged;
+
+	void comment_editor_done_editing ();
+	void setup_comment_editor ();
+	void open_comment_editor ();
+	void toggle_comment_editor ();
+
+	gint comment_key_release_handler (GdkEventKey*);
+	void comment_changed (void *src);
+	void comment_edited ();
+	bool ignore_comment_edit;
 
    protected:
+
+	ArdourWindow*  comment_window;
+	Gtk::TextView* comment_area;
+	IOSelectorWindow *input_selector;
+	IOSelectorWindow *output_selector;
+
 	PBD::ScopedConnectionList route_connections;
 	bool self_destruct;
 
@@ -250,6 +272,7 @@ class RouteUI : public virtual AxisView
 	void check_rec_enable_sensitivity ();
 	void parameter_changed (std::string const &);
 	void relabel_solo_button ();
+	void track_mode_changed ();
 
 	std::string route_state_id () const;
 

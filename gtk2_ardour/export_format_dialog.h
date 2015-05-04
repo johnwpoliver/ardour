@@ -32,6 +32,10 @@
 #include "ardour_dialog.h"
 #include "audio_clock.h"
 
+#ifdef interface
+#undef interface
+#endif
+
 #include <gtkmm.h>
 
 class ExportFormatDialog : public ArdourDialog, public PBD::ScopedConnectionList {
@@ -175,6 +179,11 @@ class ExportFormatDialog : public ArdourDialog, public PBD::ScopedConnectionList
 	Gtk::CheckButton silence_end_checkbox;
 	AudioClock       silence_end_clock;
 
+	/* Post-export hook */
+	
+	Gtk::Label       command_label;
+	Gtk::Entry       command_entry;
+
 	/* Format table */
 
 	struct CompatibilityCols : public Gtk::TreeModelColumnRecord
@@ -302,11 +311,14 @@ class ExportFormatDialog : public ArdourDialog, public PBD::ScopedConnectionList
 
 	Gtk::CheckButton with_cue;
 	Gtk::CheckButton with_toc;
+	Gtk::CheckButton with_mp4chaps;
 
 	Gtk::VBox cue_toc_vbox;
 
 	void update_with_toc ();
 	void update_with_cue ();
+	void update_with_mp4chaps();
+	void update_command ();
 
 	Gtk::TreeView sample_format_view;
 	Gtk::TreeView dither_type_view;

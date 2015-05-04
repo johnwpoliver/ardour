@@ -21,21 +21,29 @@
 
 #include <cassert>
 #include <list>
+#include <stdint.h>
+
 #include <boost/pool/pool.hpp>
 #include <boost/pool/pool_alloc.hpp>
+
 #include <glibmm/threads.h>
+
 #include "pbd/signals.h"
+
+#include "evoral/visibility.h"
 #include "evoral/types.hpp"
 #include "evoral/Range.hpp"
 #include "evoral/Parameter.hpp"
+#include "evoral/ParameterDescriptor.hpp"
 
 namespace Evoral {
 
 class Curve;
+class TypeMap;
 
 /** A single event (time-stamped value) for a control
  */
-class ControlEvent {
+class LIBEVORAL_API ControlEvent {
 public:
 	ControlEvent (double w, double v)
 		: when (w), value (v), coeff (0)
@@ -67,7 +75,7 @@ public:
 
 /** A list (sequence) of time-stamped values for a control
  */
-class ControlList
+class LIBEVORAL_API ControlList
 {
 public:
 	typedef std::list<ControlEvent*> EventList;
@@ -76,12 +84,12 @@ public:
 	typedef EventList::const_iterator const_iterator;
 	typedef EventList::const_reverse_iterator const_reverse_iterator;
 
-	ControlList (const Parameter& id);
+	ControlList (const Parameter& id, const ParameterDescriptor& desc);
 	ControlList (const ControlList&);
 	ControlList (const ControlList&, double start, double end);
 	virtual ~ControlList();
 
-	virtual boost::shared_ptr<ControlList> create(Parameter id);
+	virtual boost::shared_ptr<ControlList> create(const Parameter& id, const ParameterDescriptor& desc);
 
         void dump (std::ostream&);
 
@@ -96,9 +104,12 @@ public:
 	const Parameter& parameter() const                 { return _parameter; }
 	void             set_parameter(const Parameter& p) { _parameter = p; }
 
+	const ParameterDescriptor& descriptor() const                           { return _desc; }
+	void                       set_descriptor(const ParameterDescriptor& d) { _desc = d; }
+
 	EventList::size_type size() const { return _events.size(); }
         double length() const { 		
-		Glib::Threads::Mutex::Lock lm (_lock);
+		Glib::Threads::RWLock::ReaderLock lm (_lock);
 		return _events.empty() ? 0.0 : _events.back()->when;
 	}
 	bool empty() const { return _events.empty(); }
@@ -113,9 +124,9 @@ public:
 	void slide (iterator before, double distance);
 	void shift (double before, double distance);
 
-	virtual bool clamp_value (double& /*when*/, double& /*value*/) const { return true; }
-
-        virtual void add (double when, double value);
+	virtual void add (double when, double value, bool with_guards=true, bool with_default=true);
+	virtual void editor_add (double when, double value);
+	
 	void fast_simple_add (double when, double value);
 
 	void erase_range (double start, double end);
@@ -125,13 +136,26 @@ public:
 	bool move_ranges (std::list< RangeMove<double> > const &);
 	void modify (iterator, double, double);
 
-        void thin ();
+	/** Thin the number of events in this list.
+	 *
+	 * The thinning factor has no units but corresponds to the area of a
+	 * triangle computed between three points in the list.  If the area is
+	 * large, it indicates significant non-linearity between the points.
+	 *
+	 * During automation recording we thin the recorded points using this
+	 * value.  If a point is sufficiently co-linear with its neighbours (as
+	 * defined by the area of the triangle formed by three of them), we will
+	 * not include it in the list.  The larger the value, the more points are
+	 * excluded, so this effectively measures the amount of thinning to be
+	 * done.
+	 */
+	void thin (double thinning_factor);
 
 	boost::shared_ptr<ControlList> cut (double, double);
 	boost::shared_ptr<ControlList> copy (double, double);
 	void clear (double, double);
 
-	bool paste (ControlList&, double position, float times);
+	bool paste (const ControlList&, double position, float times);
 
 	void set_yrange (double min, double max) {
 		_min_yval = min;
@@ -160,18 +184,18 @@ public:
 	std::pair<ControlList::iterator,ControlList::iterator> control_points_adjacent (double when);
 
 	template<class T> void apply_to_points (T& obj, void (T::*method)(const ControlList&)) {
-		Glib::Threads::Mutex::Lock lm (_lock);
+		Glib::Threads::RWLock::WriterLock lm (_lock);
 		(obj.*method)(*this);
 	}
 
 	double eval (double where) {
-		Glib::Threads::Mutex::Lock lm (_lock);
+		Glib::Threads::RWLock::ReaderLock lm (_lock);
 		return unlocked_eval (where);
 	}
 
 	double rt_safe_eval (double where, bool& ok) {
 
-		Glib::Threads::Mutex::Lock lm (_lock, Glib::Threads::TRY_LOCK);
+		Glib::Threads::RWLock::ReaderLock lm (_lock, Glib::Threads::TRY_LOCK);
 
 		if ((ok = lm.locked())) {
 			return unlocked_eval (where);
@@ -199,10 +223,10 @@ public:
 	};
 
 	const EventList& events() const { return _events; }
-	double default_value() const { return _parameter.normal(); }
+	double default_value() const { return _default_value; }
 
 	// FIXME: const violations for Curve
-	Glib::Threads::Mutex& lock()         const { return _lock; }
+	Glib::Threads::RWLock& lock()       const { return _lock; }
 	LookupCache& lookup_cache() const { return _lookup_cache; }
 	SearchCache& search_cache() const { return _search_cache; }
 
@@ -239,7 +263,7 @@ public:
 	virtual bool writing() const { return false; }
 	virtual bool touch_enabled() const { return false; }
         void start_write_pass (double time);
-	void write_pass_finished (double when);
+        void write_pass_finished (double when, double thinning_factor=0.0);
         void set_in_write_pass (bool, bool add_point = false, double when = 0.0);
         bool in_write_pass () const;
 
@@ -247,9 +271,6 @@ public:
 	mutable PBD::Signal0<void> Dirty;
 	/** Emitted when our interpolation style changes */
 	PBD::Signal1<void, InterpolationStyle> InterpolationChanged;
-
-        static void set_thinning_factor (double d);
-        static double thinning_factor() { return _thinning_factor; }
 
 	bool operator!= (ControlList const &) const;
 
@@ -265,6 +286,10 @@ protected:
 	boost::shared_ptr<ControlList> cut_copy_clear (double, double, int op);
 	bool erase_range_internal (double start, double end, EventList &);
 
+	void     maybe_add_insert_guard (double when);
+	iterator erase_from_iterator_to (iterator iter, double when);
+	bool     maybe_insert_straight_line (double when, double value);
+
 	virtual void maybe_signal_changed ();
 
 	void _x_scale (double factor);
@@ -272,10 +297,12 @@ protected:
 	mutable LookupCache   _lookup_cache;
 	mutable SearchCache   _search_cache;
 
+	mutable Glib::Threads::RWLock _lock;
+
 	Parameter             _parameter;
+	ParameterDescriptor   _desc;
 	InterpolationStyle    _interpolation;
 	EventList             _events;
-	mutable Glib::Threads::Mutex   _lock;
 	int8_t                _frozen;
 	bool                  _changed_when_thawed;
 	double                _min_yval;
@@ -284,8 +311,6 @@ protected:
 	bool                  _sort_pending;
 
 	Curve* _curve;
-
-        static double _thinning_factor;
 
   private:
     iterator   most_recent_insert_iterator;

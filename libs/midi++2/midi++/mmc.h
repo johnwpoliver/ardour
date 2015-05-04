@@ -20,22 +20,27 @@
 #ifndef __midipp_mmc_h_h__
 #define __midipp_mmc_h_h__
 
-#include <jack/types.h>
 #include "timecode/time.h"
+
 #include "pbd/signals.h"
 #include "pbd/ringbuffer.h"
+
+#include "midi++/libmidi_visibility.h"
 #include "midi++/types.h"
 #include "midi++/parser.h"
+
+namespace ARDOUR {
+	class PortEngine;
+}
 
 namespace MIDI {
 
 class Port;
 class Parser;
 class MachineControlCommand;
-class Manager;	
 
 /** Class to handle incoming and outgoing MIDI machine control messages */
-class MachineControl 
+class LIBMIDIPP_API MachineControl 
 {
   public:
 	typedef PBD::Signal1<void,MachineControl&> MMCSignal;
@@ -89,7 +94,9 @@ class MachineControl
 		cmdResume = 0x7F
 	};
 	
-	MachineControl (Manager *, jack_client_t *);
+        MachineControl ();
+    
+        void set_ports (MIDI::Port* input, MIDI::Port* output);
 
 	Port* input_port() { return _input_port; }
 	Port* output_port() { return _output_port; }
@@ -100,7 +107,7 @@ class MachineControl
 	byte send_device_id () const { return _send_device_id; }
 	void enable_send (bool);
 	bool send_enabled () const { return _enable_send; }
-	void send (MachineControlCommand const &);
+	void send (MachineControlCommand const &, timestamp_t when);
 
 	static bool is_mmc (byte *sysex_buf, size_t len);
 
@@ -280,7 +287,7 @@ class MachineControl
  *  In an ideal world we might use a class hierarchy for this, but objects of this type
  *  have to be allocated off the stack for RT safety.
  */
-class MachineControlCommand
+class LIBMIDIPP_API MachineControlCommand
 {
 public:
 	MachineControlCommand () : _command (MachineControl::Command (0)) {}

@@ -29,14 +29,15 @@ using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
 
-AutomationControl::AutomationControl(
-		ARDOUR::Session& session,
-		const Evoral::Parameter& parameter,
-		boost::shared_ptr<ARDOUR::AutomationList> list,
-		const string& name)
+AutomationControl::AutomationControl(ARDOUR::Session&                          session,
+                                     const Evoral::Parameter&                  parameter,
+                                     const ParameterDescriptor&                desc,
+                                     boost::shared_ptr<ARDOUR::AutomationList> list,
+                                     const string&                             name)
 	: Controllable (name.empty() ? EventTypeMap::instance().to_symbol(parameter) : name)
-	, Evoral::Control(parameter, list)
+	, Evoral::Control(parameter, desc, list)
 	, _session(session)
+	, _desc(desc)
 {
 }
 
@@ -61,15 +62,6 @@ AutomationControl::set_value (double value)
 {
 	bool to_list = _list && ((AutomationList*)_list.get())->automation_write();
 
-        if (to_list && parameter().toggled()) {
-
-                // store the previous value just before this so any
-                // interpolation works right
-
-
-                _list->add (get_double(), _session.transport_frame()-1);
-        }
-
 	Control::set_double (value, _session.transport_frame(), to_list);
 
 	Changed(); /* EMIT SIGNAL */
@@ -85,9 +77,12 @@ AutomationControl::set_list (boost::shared_ptr<Evoral::ControlList> list)
 void
 AutomationControl::set_automation_state (AutoState as)
 {
-	if (as != alist()->automation_state()) {
+	if (_list && as != alist()->automation_state()) {
 
 		alist()->set_automation_state (as);
+		if (_desc.toggled) {
+			return;  // No watch for boolean automation
+		}
 
 		if (as == Write) {
 			AutomationWatch::instance().add_automation_watch (shared_from_this());
@@ -111,21 +106,36 @@ AutomationControl::set_automation_state (AutoState as)
 void
 AutomationControl::set_automation_style (AutoStyle as)
 {
+	if (!_list) return;
 	alist()->set_automation_style (as);
 }
 
 void
 AutomationControl::start_touch(double when)
 {
-	set_touching (true);
-	alist()->start_touch(when);
-	AutomationWatch::instance().add_automation_watch (shared_from_this());
+	if (!_list) return;
+	if (!touching()) {
+		if (alist()->automation_state() == Touch) {
+			alist()->start_touch (when);
+			if (!_desc.toggled) {
+				AutomationWatch::instance().add_automation_watch (shared_from_this());
+			}
+		}
+		set_touching (true);
+	}
 }
 
 void
 AutomationControl::stop_touch(bool mark, double when)
 {
-	set_touching (false);
-	alist()->stop_touch (mark, when);
-	AutomationWatch::instance().remove_automation_watch (shared_from_this());
+	if (!_list) return;
+	if (touching()) {
+		set_touching (false);
+		if (alist()->automation_state() == Touch) {
+			alist()->stop_touch (mark, when);
+			if (!_desc.toggled) {
+				AutomationWatch::instance().remove_automation_watch (shared_from_this());
+			}
+		}
+	}
 }

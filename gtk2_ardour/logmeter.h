@@ -34,7 +34,17 @@ alt_log_meter (float power)
 }
 #endif
 
-inline float
+/* prototypes - avoid compiler warning */
+static inline float log_meter (float db);
+static inline float meter_deflect_ppm (float);
+static inline float meter_deflect_din (float);
+static inline float meter_deflect_nordic (float);
+static inline float meter_deflect_vu (float);
+static inline float meter_deflect_k (float, float);
+
+
+
+static inline float
 log_meter (float db)
 {
          gfloat def = 0.0f; /* Meter deflection %age */
@@ -63,6 +73,98 @@ log_meter (float db)
 	 */
 
          return def/115.0f;
+}
+
+static inline float
+log_meter0dB (float db)
+{
+         gfloat def = 0.0f; /* Meter deflection %age */
+
+         if (db < -70.0f) {
+                 def = 0.0f;
+         } else if (db < -60.0f) {
+                 def = (db + 70.0f) * 0.25f;
+         } else if (db < -50.0f) {
+                 def = (db + 60.0f) * 0.5f + 2.5f;
+         } else if (db < -40.0f) {
+                 def = (db + 50.0f) * 0.75f + 7.5f;
+         } else if (db < -30.0f) {
+                 def = (db + 40.0f) * 1.5f + 15.0f;
+         } else if (db < -20.0f) {
+                 def = (db + 30.0f) * 2.0f + 30.0f;
+         } else if (db < 0.0f) {
+                 def = (db + 20.0f) * 2.5f + 50.0f;
+         } else {
+		 def = 100.0f;
+	 }
+	return def/100.0f;
+}
+
+static inline float
+meter_deflect_ppm (float db)
+{
+	if (db < -30) {
+		// 2.258 == ((-30 + 32.0)/ 28.0) / 10^(-30 / 20);
+		return (dB_to_coefficient(db) * 2.258769757f);
+	} else {
+		const float rv = (db + 32.0f) / 28.0f;
+		if (rv < 1.0) {
+			return rv;
+		} else {
+			return 1.0;
+		}
+	}
+}
+
+static inline float
+meter_deflect_din (float db)
+{
+	float rv = dB_to_coefficient(db);
+	rv = sqrtf (sqrtf (2.3676f * rv)) - 0.1803f;
+	if (rv >= 1.0) {
+		return 1.0;
+	} else {
+		return (rv > 0 ? rv : 0.0);
+	}
+}
+
+static inline float
+meter_deflect_nordic (float db)
+{
+	if (db < -60) {
+		return 0.0;
+	} else {
+		const float rv = (db + 60.0f) / 54.0f;
+		if (rv < 1.0) {
+			return rv;
+		} else {
+			return 1.0;
+		}
+	}
+}
+
+static inline float
+meter_deflect_vu (float db)
+{
+	const float rv = 6.77165f * dB_to_coefficient(db);
+	if (rv > 1.0) return 1.0;
+	return rv;
+}
+
+static inline float
+meter_deflect_k (float db, float krange)
+{
+	db+=krange;
+	if (db < -40.0f) {
+		return (dB_to_coefficient(db) * 500.0f / (krange + 45.0f));
+	} else {
+		const float rv = (db + 45.0f) / (krange + 45.0f);
+		if (rv < 1.0) {
+			return rv;
+		} else {
+			return 1.0;
+		}
+	}
 }
 
 #endif /* __ardour_gtk_log_meter_h__ */

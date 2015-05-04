@@ -22,11 +22,12 @@
 #include <cairo.h>
 #include "gtkmm2ext/keyboard.h"
 #include "ardour/bundle.h"
+#include "canvas/colors.h"
+#include "utils.h"
 #include "port_matrix_row_labels.h"
 #include "port_matrix.h"
 #include "port_matrix_body.h"
 #include "i18n.h"
-#include "utils.h"
 
 using namespace std;
 
@@ -234,7 +235,9 @@ PortMatrixRowLabels::render_bundle_name (
 	cairo_text_extents (cr, b->name().c_str(), &ext);
 	double const off = (grid_spacing() - ext.height) / 2;
 
- 	set_source_rgb (cr, text_colour());
+	Gdk::Color textcolor;
+	ARDOUR_UI_UTILS::set_color_from_rgba(textcolor, ArdourCanvas::contrasting_text_color(ARDOUR_UI_UTILS::gdk_color_to_rgba(bg_colour)));
+	set_source_rgb (cr, textcolor);
  	cairo_move_to (cr, xoff + x + name_pad(), yoff + name_pad() + off);
  	cairo_show_text (cr, b->name().c_str());
 }
@@ -260,7 +263,9 @@ PortMatrixRowLabels::render_channel_name (
 		cairo_text_extents (cr, bc.bundle->channel_name(bc.channel).c_str(), &ext);
 		double const off = (grid_spacing() - ext.height) / 2;
 
-		set_source_rgb (cr, text_colour());
+		Gdk::Color textcolor;
+		ARDOUR_UI_UTILS::set_color_from_rgba(textcolor, ArdourCanvas::contrasting_text_color(ARDOUR_UI_UTILS::gdk_color_to_rgba(bg_colour)));
+		set_source_rgb (cr, textcolor);
 		cairo_move_to (cr, port_name_x() + xoff + name_pad(), yoff + name_pad() + off);
 		cairo_show_text (cr, bc.bundle->channel_name(bc.channel).c_str());
 	}

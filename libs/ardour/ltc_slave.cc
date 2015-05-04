@@ -19,11 +19,11 @@
 */
 #include <iostream>
 #include <errno.h>
-#include <poll.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "pbd/error.h"
+#include "pbd/pthread_utils.h"
 
 #include "ardour/debug.h"
 #include "ardour/slave.h"
@@ -52,6 +52,7 @@ LTC_Slave::LTC_Slave (Session& s)
 	delayedlocked = 10;
 	monotonic_cnt = 0;
 	fps_detected=false;
+	sync_lock_broken = false;
 
 	ltc_timecode = session.config.get_timecode_format();
 	a3e_timecode = session.config.get_timecode_format();
@@ -124,6 +125,7 @@ LTC_Slave::resync_xrun()
 {
 	DEBUG_TRACE (DEBUG::LTC, "LTC resync_xrun()\n");
 	engine_dll_initstate = 0;
+	sync_lock_broken = false;
 }
 
 void
@@ -131,10 +133,11 @@ LTC_Slave::resync_latency()
 {
 	DEBUG_TRACE (DEBUG::LTC, "LTC resync_latency()\n");
 	engine_dll_initstate = 0;
+	sync_lock_broken = false;
 
 	if (!session.deletion_in_progress() && session.ltc_output_io()) { /* check if Port exits */
 		boost::shared_ptr<Port> ltcport = session.ltc_input_port();
-		ltcport->get_connected_latency_range(ltc_slave_latency, false);
+		ltcport->get_connected_latency_range (ltc_slave_latency, false);
 	}
 }
 
@@ -147,12 +150,13 @@ LTC_Slave::reset()
 	transport_direction = 0;
 	ltc_speed = 0;
 	engine_dll_initstate = 0;
+	sync_lock_broken = false;
 }
 
 void
-LTC_Slave::parse_ltc(const jack_nframes_t nframes, const jack_default_audio_sample_t * const in, const framecnt_t posinfo)
+LTC_Slave::parse_ltc(const ARDOUR::pframes_t nframes, const Sample* const in, const ARDOUR::framecnt_t posinfo)
 {
-	jack_nframes_t i;
+	pframes_t i;
 	unsigned char sound[8192];
 	if (nframes > 8192) {
 		/* TODO warn once or wrap, loop conversion below
@@ -381,6 +385,8 @@ LTC_Slave::process_ltc(framepos_t const /*now*/)
 			timecode_negative_offset, timecode_offset
 			);
 
+		ltc_frame += ltc_slave_latency.max + session.worst_playback_latency();
+
 		framepos_t cur_timestamp = frame.off_end + 1;
 		DEBUG_TRACE (DEBUG::LTC, string_compose ("LTC F: %1 LF: %2  N: %3 L: %4\n", ltc_frame, last_ltc_frame, cur_timestamp, last_timestamp));
 		if (frame.off_end + 1 <= last_timestamp || last_timestamp == 0) {
@@ -413,35 +419,35 @@ LTC_Slave::init_engine_dll (framepos_t pos, int32_t inc)
 }
 
 /* main entry point from session_process.cc
- * called from jack_process callback context
- * so it is OK to use jack_port_get_buffer()
+ * called from process callback context
+ * so it is OK to use get_buffer()
  */
 bool
 LTC_Slave::speed_and_position (double& speed, framepos_t& pos)
 {
 	bool engine_init_called = false;
-	framepos_t now = session.engine().frame_time_at_cycle_start();
+	framepos_t now = session.engine().sample_time_at_cycle_start();
 	framepos_t sess_pos = session.transport_frame(); // corresponds to now
-	framecnt_t nframes = session.engine().frames_per_cycle();
+	framecnt_t nframes = session.engine().samples_per_cycle();
 
-	jack_default_audio_sample_t *in;
+	Sample* in;
 
 	boost::shared_ptr<Port> ltcport = session.ltc_input_port();
 
-	in = (jack_default_audio_sample_t*) jack_port_get_buffer (ltcport->jack_port(), nframes);
+	in = (Sample*) AudioEngine::instance()->port_engine().get_buffer (ltcport->port_handle(), nframes);
 
 	frameoffset_t skip = now - (monotonic_cnt + nframes);
 	monotonic_cnt = now;
-	DEBUG_TRACE (DEBUG::LTC, string_compose ("speed_and_position - TID:%1 | latency: %2 | skip %3\n", ::pthread_self(), ltc_slave_latency.max, skip));
+	DEBUG_TRACE (DEBUG::LTC, string_compose ("speed_and_position - TID:%1 | latency: %2 | skip %3\n", pthread_name(), ltc_slave_latency.max, skip));
 
 	if (last_timestamp == 0) {
 		engine_dll_initstate = 0;
-		delayedlocked++;
+		if (delayedlocked < 10) ++delayedlocked;
 	}
 	else if (engine_dll_initstate != transport_direction && ltc_speed != 0) {
 		engine_dll_initstate = transport_direction;
 		init_engine_dll(last_ltc_frame + rint(ltc_speed * double(2 * nframes + now - last_timestamp)),
-				session.engine().frames_per_cycle());
+				session.engine().samples_per_cycle());
 		engine_init_called = true;
 	}
 
@@ -463,7 +469,7 @@ LTC_Slave::speed_and_position (double& speed, framepos_t& pos)
 			reset();
 		}
 
-		parse_ltc(nframes, in, now - ltc_slave_latency.max );
+		parse_ltc(nframes, in, now);
 		process_ltc(now);
 	}
 
@@ -473,7 +479,8 @@ LTC_Slave::speed_and_position (double& speed, framepos_t& pos)
 		pos = session.transport_frame();
 		return true;
 	} else if (ltc_speed != 0) {
-		delayedlocked = 0;
+		if (delayedlocked > 1) delayedlocked--;
+		else if (current_delta == 0) delayedlocked = 0;
 	}
 
 	if (abs(now - last_timestamp) > FLYWHEEL_TIMEOUT) {
@@ -521,8 +528,8 @@ LTC_Slave::speed_and_position (double& speed, framepos_t& pos)
 		t0 = t1;
 		t1 += b * e + e2;
 		e2 += c * e;
-		speed_flt = (t1 - t0) / double(session.engine().frames_per_cycle());
-		DEBUG_TRACE (DEBUG::LTC, string_compose ("LTC engine DLL t0:%1 t1:%2 err:%3 spd:%4 ddt:%5\n", t0, t1, e, speed_flt, e2 - session.engine().frames_per_cycle() ));
+		speed_flt = (t1 - t0) / double(session.engine().samples_per_cycle());
+		DEBUG_TRACE (DEBUG::LTC, string_compose ("LTC engine DLL t0:%1 t1:%2 err:%3 spd:%4 ddt:%5\n", t0, t1, e, speed_flt, e2 - session.engine().samples_per_cycle() ));
 	} else {
 		DEBUG_TRACE (DEBUG::LTC, string_compose ("LTC adjusting elapsed (no DLL) from %1 by %2\n", elapsed, (2 * nframes * ltc_speed)));
 		speed_flt = 0;
@@ -547,6 +554,11 @@ LTC_Slave::speed_and_position (double& speed, framepos_t& pos)
 	/* provide a .1% deadzone to lock the speed */
 	if (fabs(speed - 1.0) <= 0.001) {
 	        speed = 1.0;
+	}
+
+	if (speed != 0 && delayedlocked == 0 && fabsf(speed) != 1.0) {
+		sync_lock_broken = true;
+		DEBUG_TRACE (DEBUG::LTC, string_compose ("LTC speed not locked %1 %2\n", speed, ltc_speed));
 	}
 
 	return true;
@@ -588,10 +600,11 @@ LTC_Slave::approximate_current_delta() const
 	if (last_timestamp == 0 || engine_dll_initstate == 0) {
 		snprintf(delta, sizeof(delta), "\u2012\u2012\u2012\u2012");
 	} else if ((monotonic_cnt - last_timestamp) > 2 * frames_per_ltc_frame) {
-		snprintf(delta, sizeof(delta), _("flywheel"));
+		snprintf(delta, sizeof(delta), "%s", _("flywheel"));
 	} else {
-		snprintf(delta, sizeof(delta), "\u0394<span foreground=\"green\" face=\"monospace\" >%s%s%" PRIi64 "</span>sm",
-				LEADINGZERO(abs(current_delta)), PLUSMINUS(-current_delta), abs(current_delta));
+		snprintf(delta, sizeof(delta), "\u0394<span foreground=\"%s\" face=\"monospace\" >%s%s%lld</span>sm",
+				sync_lock_broken ? "red" : "green",
+				LEADINGZERO(llabs(current_delta)), PLUSMINUS(-current_delta), llabs(current_delta));
 	}
 	return std::string(delta);
 }

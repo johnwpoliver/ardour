@@ -32,14 +32,17 @@
 
 #include "pbd/convert.h"
 #include "pbd/basename.h"
+#include "pbd/file_utils.h"
 #include "pbd/mountpoint.h"
 #include "pbd/stl_delete.h"
 #include "pbd/strsplit.h"
 #include "pbd/shortpath.h"
+#include "pbd/stacktrace.h"
 #include "pbd/enumwriter.h"
 
 #include <sndfile.h>
 
+#include <glib/gstdio.h>
 #include <glibmm/miscutils.h>
 #include <glibmm/fileutils.h>
 #include <glibmm/threads.h>
@@ -114,6 +117,22 @@ AudioFileSource::AudioFileSource (Session& s, const string& path, const string& 
 	}
 }
 
+/** Constructor used for existing internal-to-session files during crash
+ * recovery. File must exist
+ */
+AudioFileSource::AudioFileSource (Session& s, const string& path, Source::Flag flags, bool /* ignored-exists-for-prototype differentiation */)
+	: Source (s, DataType::AUDIO, path, flags)
+	, AudioSource (s, path)
+	, FileSource (s, DataType::AUDIO, path, string(), flags)
+{
+        /* note that origin remains empty */
+
+	if (init (_path, true)) {
+		throw failed_constructor ();
+	}
+}
+
+
 /** Constructor used for existing internal-to-session files via XML.  File must exist. */
 AudioFileSource::AudioFileSource (Session& s, const XMLNode& node, bool must_exist)
 	: Source (s, node)
@@ -133,8 +152,8 @@ AudioFileSource::~AudioFileSource ()
 {
 	DEBUG_TRACE (DEBUG::Destruction, string_compose ("AudioFileSource destructor %1, removable? %2\n", _path, removable()));
 	if (removable()) {
-		unlink (_path.c_str());
-		unlink (peakpath.c_str());
+		::g_unlink (_path.c_str());
+		::g_unlink (peakpath.c_str());
 	}
 }
 
@@ -186,12 +205,12 @@ AudioFileSource::find_broken_peakfile (string peak_path, string audio_path)
 		/* Nasty band-aid for older sessions that were created before we
 		   used libsndfile for all audio files.
 		*/
-
-
+#ifndef PLATFORM_WINDOWS // there's no old_peak_path() for windows
 		str = old_peak_path (audio_path);
 		if (Glib::file_test (str, Glib::FILE_TEST_EXISTS)) {
 			peak_path = str;
 		}
+#endif
 	}
 
 	return peak_path;
@@ -218,7 +237,10 @@ AudioFileSource::old_peak_path (string audio_path)
 
 	char buf[32];
 #ifdef __APPLE__
-	snprintf (buf, sizeof (buf), "%u-%u-%d.peak", stat_mount.st_ino, stat_file.st_ino, _channel);
+	snprintf (buf, sizeof (buf), "%llu-%llu-%d.peak",
+			(unsigned long long)stat_mount.st_ino,
+			(unsigned long long)stat_file.st_ino,
+			_channel);
 #else
 	snprintf (buf, sizeof (buf), "%" PRId64 "-%" PRId64 "-%d.peak", (int64_t) stat_mount.st_ino, (int64_t) stat_file.st_ino, _channel);
 #endif
@@ -280,19 +302,19 @@ AudioFileSource::set_state (const XMLNode& node, int version)
 }
 
 void
-AudioFileSource::mark_streaming_write_completed ()
+AudioFileSource::mark_streaming_write_completed (const Lock& lock)
 {
 	if (!writable()) {
 		return;
 	}
 
-	AudioSource::mark_streaming_write_completed ();
+	AudioSource::mark_streaming_write_completed (lock);
 }
 
 int
 AudioFileSource::move_dependents_to_trash()
 {
-	return ::unlink (peakpath.c_str());
+	return ::g_unlink (peakpath.c_str());
 }
 
 void
@@ -395,3 +417,4 @@ AudioFileSource::get_interleave_buffer (framecnt_t size)
 
 	return ssb->buf;
 }
+	

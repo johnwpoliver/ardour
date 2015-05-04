@@ -65,7 +65,8 @@ WiimoteControlProtocol::set_active (bool yn)
 	DEBUG_TRACE (DEBUG::WiimoteControl, string_compose ("WiimoteControlProtocol::set_active init with yn: '%1'\n", yn));
 
 	/* do nothing if the active state is not changing */
-	if (yn == _active) {
+
+	if (yn == active()) {
 		return 0;
 	}
 
@@ -77,8 +78,7 @@ WiimoteControlProtocol::set_active (bool yn)
 		result = stop ();
 	}
 
-	/* remember new active state */
-	_active = yn;
+	ControlProtocol::set_active (yn);
 
 	DEBUG_TRACE (DEBUG::WiimoteControl, "WiimoteControlProtocol::set_active done\n");
 
@@ -88,10 +88,9 @@ WiimoteControlProtocol::set_active (bool yn)
 XMLNode&
 WiimoteControlProtocol::get_state ()
 {
-	XMLNode *node = new XMLNode ("Protocol");
-	node->add_property (X_("name"), ARDOUR::ControlProtocol::_name);
-	node->add_property (X_("feedback"), "0");
-	return *node;
+	XMLNode& node (ControlProtocol::get_state());
+	node.add_property (X_("feedback"), "0");
+	return node;
 }
 
 int
@@ -209,11 +208,10 @@ WiimoteControlProtocol::connect_idle ()
 {
 	DEBUG_TRACE (DEBUG::WiimoteControl, "WiimoteControlProtocol::connect_idle init\n");
 
-	bool retry = true;
+	bool retry = false;
 
 	if (connect_wiimote ()) {
 		stop_wiimote_discovery ();
-		retry = false;
 	}
 
 	DEBUG_TRACE (DEBUG::WiimoteControl, "WiimoteControlProtocol::connect_idle done\n");
@@ -229,30 +227,29 @@ WiimoteControlProtocol::connect_wiimote ()
 		return true;
 	}
 
-	bool success = true;
+	bool success = false;
 
 	// if we don't have a Wiimote yet, try to discover it; if that
 	// fails, wait for a short period of time and try again
-	if (!wiimote) {
+	for (int i = 0; i < 5; ++i) {
 		cerr << "Wiimote: Not discovered yet, press 1+2 to connect" << endl;
 
 		bdaddr_t bdaddr = {{ 0, 0, 0, 0, 0, 0 }};
 		wiimote = cwiid_open (&bdaddr, 0);
 		callback_thread_registered = false;
-		if (!wiimote) {
-			success = false;
-		} else {
+		if (wiimote) {
 			// a Wiimote was discovered
 			cerr << "Wiimote: Connected successfully" << endl;
 
 			// attach the WiimoteControlProtocol object to the Wiimote handle
 			if (cwiid_set_data (wiimote, this)) {
 				cerr << "Wiimote: Failed to attach control protocol" << endl;
-				success = false;
+			} else {
+				success = true;
+				// clear the last button state to start processing events cleanly
+				button_state = 0;
+				break;
 			}
-
-			// clear the last button state to start processing events cleanly
-			button_state = 0;
 		}
 	}
 
@@ -450,7 +447,7 @@ wiimote_control_protocol_mesg_callback (cwiid_wiimote_t *wiimote, int mesg_count
 {
 	DEBUG_TRACE (DEBUG::WiimoteControl, "WiimoteControlProtocol::mesg_callback init\n");
 
-	WiimoteControlProtocol *protocol = (WiimoteControlProtocol *)cwiid_get_data (wiimote);
+	WiimoteControlProtocol *protocol = reinterpret_cast<WiimoteControlProtocol*> (const_cast<void*>(cwiid_get_data (wiimote)));
 
 	if (protocol) {
 		protocol->wiimote_callback (mesg_count, mesg);

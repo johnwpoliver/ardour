@@ -25,12 +25,12 @@
 #include <gtkmm/image.h>
 #include <gtkmm/scrolledwindow.h>
 
-#include <libgnomecanvasmm/line.h>
 
 #include "pbd/memento_command.h"
 #include "ardour/automation_list.h"
 #include "evoral/Curve.hpp"
 #include "ardour/crossfade.h"
+#include "ardour/dB.h"
 #include "ardour/session.h"
 #include "ardour/auditioner.h"
 #include "ardour/audioplaylist.h"
@@ -41,15 +41,16 @@
 
 #include <gtkmm2ext/gtk_ui.h>
 
+#include "canvas/rectangle.h"
+#include "canvas/wave_view.h"
+#include "canvas/line.h"
+#include "canvas/polygon.h"
+
 #include "ardour_ui.h"
 #include "crossfade_edit.h"
 #include "rgb_macros.h"
 #include "keyboard.h"
-#include "utils.h"
 #include "gui_thread.h"
-#include "canvas_impl.h"
-#include "simplerect.h"
-#include "waveview.h"
 #include "actions.h"
 
 using namespace std;
@@ -127,38 +128,33 @@ CrossfadeEditor::CrossfadeEditor (Session* s, boost::shared_ptr<Crossfade> xf, d
 	point_grabbed = false;
 	toplevel = 0;
 
-	canvas = new ArdourCanvas::CanvasAA ();
+	canvas = new ArdourCanvas::GtkCanvas ();
 	canvas->signal_size_allocate().connect (sigc::mem_fun(*this, &CrossfadeEditor::canvas_allocation));
 	canvas->set_size_request (425, 200);
 
-	toplevel = new ArdourCanvas::SimpleRect (*(canvas->root()));
-	toplevel->property_x1() =  0.0;
-	toplevel->property_y1() =  0.0;
-	toplevel->property_x2() =  10.0;
-	toplevel->property_y2() =  10.0;
-	toplevel->property_fill() =  true;
-	toplevel->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorBase.get();
-	toplevel->property_outline_pixels() =  0;
-	toplevel->signal_event().connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
+	toplevel = new ArdourCanvas::Rectangle (canvas->root());
+	toplevel->set (ArdourCanvas::Rect (0, 0, 10, 10));
+	toplevel->set_fill (true);
+	toplevel->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorBase());
+	toplevel->set_outline (false);
+	toplevel->Event.connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
 
-	fade[Out].line = new ArdourCanvas::Line (*(canvas->root()));
-	fade[Out].line->property_width_pixels() = 1;
-	fade[Out].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLine.get();
+	fade[Out].line = new ArdourCanvas::PolyLine (canvas->root());
+	fade[Out].line->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorLine());
 
-	fade[Out].shading = new ArdourCanvas::Polygon (*(canvas->root()));
-	fade[Out].shading->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLineShading.get();
+	fade[Out].shading = new ArdourCanvas::Polygon (canvas->root());
+	fade[Out].shading->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorLineShading());
 
-	fade[In].line = new ArdourCanvas::Line (*(canvas->root()));
-	fade[In].line->property_width_pixels() = 1;
-	fade[In].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLine.get();
+	fade[In].line = new ArdourCanvas::PolyLine (canvas->root());
+	fade[In].line->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorLine());
 
-	fade[In].shading = new ArdourCanvas::Polygon (*(canvas->root()));
-	fade[In].shading->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLineShading.get();
+	fade[In].shading = new ArdourCanvas::Polygon (canvas->root());
+	fade[In].shading->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorLineShading());
 
-	fade[In].shading->signal_event().connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
-	fade[In].line->signal_event().connect (sigc::mem_fun (*this, &CrossfadeEditor::curve_event));
-	fade[Out].shading->signal_event().connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
-	fade[Out].line->signal_event().connect (sigc::mem_fun (*this, &CrossfadeEditor::curve_event));
+	fade[In].shading->Event.connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
+	fade[In].line->Event.connect (sigc::mem_fun (*this, &CrossfadeEditor::curve_event));
+	fade[Out].shading->Event.connect (sigc::mem_fun (*this, &CrossfadeEditor::canvas_event));
+	fade[Out].line->Event.connect (sigc::mem_fun (*this, &CrossfadeEditor::curve_event));
 
 	select_in_button.set_name (X_("CrossfadeEditCurveButton"));
 	select_out_button.set_name (X_("CrossfadeEditCurveButton"));
@@ -465,15 +461,14 @@ CrossfadeEditor::make_point ()
 {
 	Point* p = new Point;
 
-	p->box = new ArdourCanvas::SimpleRect (*(canvas->root()));
-	p->box->property_fill() = true;
-	p->box->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorPointFill.get();
-	p->box->property_outline_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorPointOutline.get();
-	p->box->property_outline_pixels() = 1;
+	p->box = new ArdourCanvas::Rectangle (canvas->root());
+	p->box->set_fill (true);
+	p->box->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorPointFill());
+	p->box->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorPointOutline());
 
 	p->curve = fade[current].line;
 
-	p->box->signal_event().connect (sigc::bind (sigc::mem_fun (*this, &CrossfadeEditor::point_event), p));
+	p->box->Event.connect (sigc::bind (sigc::mem_fun (*this, &CrossfadeEditor::point_event), p));
 
 	return p;
 }
@@ -520,11 +515,7 @@ CrossfadeEditor::Point::move_to (double nx, double ny, double xfract, double yfr
 	double x1 = nx - half_size;
 	double x2 = nx + half_size;
 
-	box->property_x1() = x1;
-	box->property_x2() = x2;
-
-	box->property_y1() = ny - half_size;
-	box->property_y2() = ny + half_size;
+	box->set (ArdourCanvas::Rect (x1, ny - half_size, x2, ny + half_size));
 
 	x = xfract;
 	y = yfract;
@@ -534,15 +525,20 @@ void
 CrossfadeEditor::canvas_allocation (Gtk::Allocation& /*alloc*/)
 {
 	if (toplevel) {
-		toplevel->property_x1() = 0.0;
-		toplevel->property_y1() = 0.0;
-		toplevel->property_x2() = (double) canvas->get_allocation().get_width() + canvas_border;
-		toplevel->property_y2() = (double) canvas->get_allocation().get_height() + canvas_border;
+		toplevel->set (
+			ArdourCanvas::Rect (
+				0,
+				0,
+				canvas->get_allocation().get_width() + canvas_border,
+				canvas->get_allocation().get_height() + canvas_border
+				)
+			);
 	}
 
-	canvas->set_scroll_region (0.0, 0.0,
-				   canvas->get_allocation().get_width(),
-				   canvas->get_allocation().get_height());
+	/* XXX: CANVAS */
+//	canvas->set_scroll_region (0.0, 0.0,
+//				   canvas->get_allocation().get_width(),
+//				   canvas->get_allocation().get_height());
 
 	Point* end = make_point ();
 	PointSorter cmp;
@@ -622,9 +618,9 @@ CrossfadeEditor::canvas_allocation (Gtk::Allocation& /*alloc*/)
 
 		yoff = n * ht;
 
-		(*i)->property_y() = yoff;
-		(*i)->property_height() = ht;
-		(*i)->property_samples_per_unit() = spu;
+		(*i)->set_y_position (yoff);
+		(*i)->set_height (ht);
+		(*i)->set_samples_per_pixel (spu);
 	}
 
 	ht = canvas->get_allocation().get_height() / xfade->out()->n_channels();
@@ -634,9 +630,9 @@ CrossfadeEditor::canvas_allocation (Gtk::Allocation& /*alloc*/)
 
 		yoff = n * ht;
 
-		(*i)->property_y() = yoff;
-		(*i)->property_height() = ht;
-		(*i)->property_samples_per_unit() = spu;
+		(*i)->set_y_position (yoff);
+		(*i)->set_height (ht);
+		(*i)->set_samples_per_pixel (spu);
 	}
 
 }
@@ -681,11 +677,11 @@ CrossfadeEditor::redraw ()
 	ArdourCanvas::Points spts;
 
 	while (pts.size() < npoints) {
-		pts.push_back (Gnome::Art::Point (0,0));
+		pts.push_back (ArdourCanvas::Duple (0,0));
 	}
 
 	while (spts.size() < npoints + 3) {
-		spts.push_back (Gnome::Art::Point (0,0));
+		spts.push_back (ArdourCanvas::Duple (0,0));
 	}
 
 	/* the shade coordinates *MUST* be in anti-clockwise order.
@@ -695,36 +691,36 @@ CrossfadeEditor::redraw ()
 
 		/* lower left */
 
-		spts[0].set_x (canvas_border);
-		spts[0].set_y (effective_height() + canvas_border);
+		spts[0].x = canvas_border;
+		spts[0].y = effective_height() + canvas_border;
 
 		/* lower right */
 
-		spts[1].set_x (effective_width() + canvas_border);
-		spts[1].set_y (effective_height() + canvas_border);
+		spts[1].x = effective_width() + canvas_border;
+		spts[1].y = effective_height() + canvas_border;
 
 		/* upper right */
 
-		spts[2].set_x (effective_width() + canvas_border);
-		spts[2].set_y (canvas_border);
+		spts[2].x = effective_width() + canvas_border;
+		spts[2].y = canvas_border;
 
 
 	} else {
 
 		/*  upper left */
 
-		spts[0].set_x (canvas_border);
-		spts[0].set_y (canvas_border);
+		spts[0].x = canvas_border;
+		spts[0].y = canvas_border;
 
 		/* lower left */
 
-		spts[1].set_x (canvas_border);
-		spts[1].set_y (effective_height() + canvas_border);
+		spts[1].x = canvas_border;
+		spts[1].y = effective_height() + canvas_border;
 
 		/* lower right */
 
-		spts[2].set_x (effective_width() + canvas_border);
-		spts[2].set_y (effective_height() + canvas_border);
+		spts[2].x = effective_width() + canvas_border;
+		spts[2].y = effective_height() + canvas_border;
 
 	}
 
@@ -734,15 +730,15 @@ CrossfadeEditor::redraw ()
 
 		double y = vec[i];
 
-		pts[i].set_x (canvas_border + i);
-		pts[i].set_y  (y_coordinate (y));
+		pts[i].x = canvas_border + i;
+		pts[i].y = y_coordinate (y);
 
-		spts[last_spt - i].set_x (canvas_border + i);
-		spts[last_spt - i].set_y (pts[i].get_y());
+		spts[last_spt - i].x = canvas_border + i;
+		spts[last_spt - i].y = pts[i].y;
 	}
 
-	fade[current].line->property_points() = pts;
-	fade[current].shading->property_points() = spts;
+	fade[current].line->set (pts);
+	fade[current].shading->set (pts);
 
 	for (vector<ArdourCanvas::WaveView*>::iterator i = fade[current].waves.begin(); i != fade[current].waves.end(); ++i) {
 		(*i)->property_gain_src() = static_cast<Evoral::Curve*>(&fade[current].gain_curve.curve());
@@ -785,7 +781,7 @@ CrossfadeEditor::apply_preset (Preset *preset)
 void
 CrossfadeEditor::apply ()
 {
-	_session->begin_reversible_command (_("Edit crossfade"));
+	the_editor().begin_reversible_command (_("Edit crossfade"));
 
 	XMLNode& before = xfade->get_state ();
 
@@ -798,7 +794,7 @@ CrossfadeEditor::apply ()
 			)
 		);
 
-	_session->commit_reversible_command ();
+	the_editor().commit_reversible_command ();
 }
 
 void
@@ -889,87 +885,86 @@ CrossfadeEditor::build_presets ()
 	/* FADE IN */
 
 	p = new Preset ("Linear (-6dB)", "fadein-linear");
-	p->push_back (PresetPoint (0, 0));
-	p->push_back (PresetPoint (0.000000, 0.000000));
+	p->push_back (PresetPoint (0.000000, GAIN_COEFF_SMALL));
 	p->push_back (PresetPoint (0.166667, 0.166366));
 	p->push_back (PresetPoint (0.333333, 0.332853));
 	p->push_back (PresetPoint (0.500000, 0.499459));
 	p->push_back (PresetPoint (0.666667, 0.666186));
 	p->push_back (PresetPoint (0.833333, 0.833033));
-	p->push_back (PresetPoint (1.000000, 1.000000));
+	p->push_back (PresetPoint (1.000000, GAIN_COEFF_UNITY));
 	fade_in_presets->push_back (p);
 
 	p = new Preset ("S(1)-curve", "fadein-S1");
-	p->push_back (PresetPoint (0, 0));
+	p->push_back (PresetPoint (0, GAIN_COEFF_SMALL));
 	p->push_back (PresetPoint (0.1, 0.01));
 	p->push_back (PresetPoint (0.2, 0.03));
 	p->push_back (PresetPoint (0.8, 0.97));
 	p->push_back (PresetPoint (0.9, 0.99));
-	p->push_back (PresetPoint (1, 1));
+	p->push_back (PresetPoint (1, GAIN_COEFF_UNITY));
 	fade_in_presets->push_back (p);
 
 	p = new Preset ("S(2)-curve", "fadein-S2");
-	p->push_back (PresetPoint (0.0, 0.0));
+	p->push_back (PresetPoint (0.0, GAIN_COEFF_SMALL));
 	p->push_back (PresetPoint (0.055, 0.222));
 	p->push_back (PresetPoint (0.163, 0.35));
 	p->push_back (PresetPoint (0.837, 0.678));
 	p->push_back (PresetPoint (0.945, 0.783));
-	p->push_back (PresetPoint (1.0, 1.0));
+	p->push_back (PresetPoint (1.0, GAIN_COEFF_UNITY));
 	fade_in_presets->push_back (p);
 
 	p = new Preset ("Constant power (-3dB)", "fadein-constant-power");
 
-	p->push_back (PresetPoint (0.000000, 0.000000));
+	p->push_back (PresetPoint (0.000000, GAIN_COEFF_SMALL));
 	p->push_back (PresetPoint (0.166667, 0.282192));
 	p->push_back (PresetPoint (0.333333, 0.518174));
 	p->push_back (PresetPoint (0.500000, 0.707946));
 	p->push_back (PresetPoint (0.666667, 0.851507));
 	p->push_back (PresetPoint (0.833333, 0.948859));
-	p->push_back (PresetPoint (1.000000, 1.000000));
+	p->push_back (PresetPoint (1.000000, GAIN_COEFF_UNITY));
 
 	fade_in_presets->push_back (p);
 
 	if (!Profile->get_sae()) {
 
 	  	p = new Preset ("Short cut", "fadein-short-cut");
-		p->push_back (PresetPoint (0, 0));
+		p->push_back (PresetPoint (0, GAIN_COEFF_SMALL));
 		p->push_back (PresetPoint (0.389401, 0.0333333));
 		p->push_back (PresetPoint (0.629032, 0.0861111));
 		p->push_back (PresetPoint (0.829493, 0.233333));
 		p->push_back (PresetPoint (0.9447, 0.483333));
 		p->push_back (PresetPoint (0.976959, 0.697222));
-		p->push_back (PresetPoint (1, 1));
+		p->push_back (PresetPoint (1, GAIN_COEFF_UNITY));
 		fade_in_presets->push_back (p);
 
 		p = new Preset ("Slow cut", "fadein-slow-cut");
-		p->push_back (PresetPoint (0, 0));
+		p->push_back (PresetPoint (0, GAIN_COEFF_SMALL));
 		p->push_back (PresetPoint (0.304147, 0.0694444));
 		p->push_back (PresetPoint (0.529954, 0.152778));
 		p->push_back (PresetPoint (0.725806, 0.333333));
 		p->push_back (PresetPoint (0.847926, 0.558333));
 		p->push_back (PresetPoint (0.919355, 0.730556));
-		p->push_back (PresetPoint (1, 1));
+		p->push_back (PresetPoint (1, GAIN_COEFF_UNITY));
 		fade_in_presets->push_back (p);
 
 		p = new Preset ("Fast cut", "fadein-fast-cut");
-		p->push_back (PresetPoint (0, 0));
+		p->push_back (PresetPoint (0, GAIN_COEFF_SMALL));
 		p->push_back (PresetPoint (0.0737327, 0.308333));
 		p->push_back (PresetPoint (0.246544, 0.658333));
 		p->push_back (PresetPoint (0.470046, 0.886111));
 		p->push_back (PresetPoint (0.652074, 0.972222));
 		p->push_back (PresetPoint (0.771889, 0.988889));
-		p->push_back (PresetPoint (1, 1));
+		p->push_back (PresetPoint (1, GAIN_COEFF_UNITY));
 		fade_in_presets->push_back (p);
 
 		p = new Preset ("Long cut", "fadein-long-cut");
-		p->push_back (PresetPoint (0, 0));
+		p->push_back (PresetPoint (0, GAIN_COEFF_SMALL));
 		p->push_back (PresetPoint (0.0207373, 0.197222));
 		p->push_back (PresetPoint (0.0645161, 0.525));
 		p->push_back (PresetPoint (0.152074, 0.802778));
 		p->push_back (PresetPoint (0.276498, 0.919444));
 		p->push_back (PresetPoint (0.481567, 0.980556));
 		p->push_back (PresetPoint (0.767281, 1));
-		p->push_back (PresetPoint (1, 1));
+		p->push_back (PresetPoint (1, GAIN_COEFF_UNITY));
 		fade_in_presets->push_back (p);
 	}
 
@@ -977,85 +972,84 @@ CrossfadeEditor::build_presets ()
 
 	// p = new Preset ("regout.xpm");
 	p = new Preset ("Linear (-6dB cut)", "fadeout-linear");
-	p->push_back (PresetPoint (0, 1));
-	p->push_back (PresetPoint (0.000000, 1.000000));
+	p->push_back (PresetPoint (0.000000, GAIN_COEFF_UNITY));
 	p->push_back (PresetPoint (0.166667, 0.833033));
 	p->push_back (PresetPoint (0.333333, 0.666186));
 	p->push_back (PresetPoint (0.500000, 0.499459));
 	p->push_back (PresetPoint (0.666667, 0.332853));
 	p->push_back (PresetPoint (0.833333, 0.166366));
-	p->push_back (PresetPoint (1.000000, 0.000000));
+	p->push_back (PresetPoint (1.000000, GAIN_COEFF_SMALL));
 	fade_out_presets->push_back (p);
 
 	p = new Preset ("S(1)-Curve", "fadeout-S1");
-	p->push_back (PresetPoint (0, 1));
+	p->push_back (PresetPoint (0, GAIN_COEFF_UNITY));
 	p->push_back (PresetPoint (0.1, 0.99));
 	p->push_back (PresetPoint (0.2, 0.97));
 	p->push_back (PresetPoint (0.8, 0.03));
 	p->push_back (PresetPoint (0.9, 0.01));
-	p->push_back (PresetPoint (1, 0));
+	p->push_back (PresetPoint (1, GAIN_COEFF_SMALL));
 	fade_out_presets->push_back (p);
 
 	p = new Preset ("S(2)-Curve", "fadeout-S2");
-	p->push_back (PresetPoint (0.0, 1.0));
+	p->push_back (PresetPoint (0.0, GAIN_COEFF_UNITY));
 	p->push_back (PresetPoint (0.163, 0.678));
 	p->push_back (PresetPoint (0.055, 0.783));
 	p->push_back (PresetPoint (0.837, 0.35));
 	p->push_back (PresetPoint (0.945, 0.222));
-	p->push_back (PresetPoint (1.0, 0.0));
+	p->push_back (PresetPoint (1.0, GAIN_COEFF_SMALL));
 	fade_out_presets->push_back (p);
 
 	// p = new Preset ("linout.xpm");
 	p = new Preset ("Constant power (-3dB cut)", "fadeout-constant-power");
-	p->push_back (PresetPoint (0.000000, 1.000000));
+	p->push_back (PresetPoint (0.000000, GAIN_COEFF_UNITY));
 	p->push_back (PresetPoint (0.166667, 0.948859));
 	p->push_back (PresetPoint (0.333333, 0.851507));
 	p->push_back (PresetPoint (0.500000, 0.707946));
 	p->push_back (PresetPoint (0.666667, 0.518174));
 	p->push_back (PresetPoint (0.833333, 0.282192));
-	p->push_back (PresetPoint (1.000000, 0.000000));
+	p->push_back (PresetPoint (1.000000, GAIN_COEFF_SMALL));
 	fade_out_presets->push_back (p);
 
 	if (!Profile->get_sae()) {
 		// p = new Preset ("hiout.xpm");
 		p = new Preset ("Short cut", "fadeout-short-cut");
-		p->push_back (PresetPoint (0, 1));
-		p->push_back (PresetPoint (0.305556, 1));
+		p->push_back (PresetPoint (0, GAIN_COEFF_UNITY));
+		p->push_back (PresetPoint (0.305556, GAIN_COEFF_UNITY));
 		p->push_back (PresetPoint (0.548611, 0.991736));
 		p->push_back (PresetPoint (0.759259, 0.931129));
 		p->push_back (PresetPoint (0.918981, 0.68595));
 		p->push_back (PresetPoint (0.976852, 0.22865));
-		p->push_back (PresetPoint (1, 0));
+		p->push_back (PresetPoint (1, GAIN_COEFF_SMALL));
 		fade_out_presets->push_back (p);
 
 		p = new Preset ("Slow cut", "fadeout-slow-cut");
-		p->push_back (PresetPoint (0, 1));
+		p->push_back (PresetPoint (0, GAIN_COEFF_UNITY));
 		p->push_back (PresetPoint (0.228111, 0.988889));
 		p->push_back (PresetPoint (0.347926, 0.972222));
 		p->push_back (PresetPoint (0.529954, 0.886111));
 		p->push_back (PresetPoint (0.753456, 0.658333));
 		p->push_back (PresetPoint (0.9262673, 0.308333));
-		p->push_back (PresetPoint (1, 0));
+		p->push_back (PresetPoint (1, GAIN_COEFF_SMALL));
 		fade_out_presets->push_back (p);
 
 		p = new Preset ("Fast cut", "fadeout-fast-cut");
-		p->push_back (PresetPoint (0, 1));
+		p->push_back (PresetPoint (0, GAIN_COEFF_UNITY));
 		p->push_back (PresetPoint (0.080645, 0.730556));
 		p->push_back (PresetPoint (0.277778, 0.289256));
 		p->push_back (PresetPoint (0.470046, 0.152778));
 		p->push_back (PresetPoint (0.695853, 0.0694444));
-		p->push_back (PresetPoint (1, 0));
+		p->push_back (PresetPoint (1, GAIN_COEFF_SMALL));
 		fade_out_presets->push_back (p);
 
 		// p = new Preset ("loout.xpm");
 		p = new Preset ("Long cut", "fadeout-long-cut");
-		p->push_back (PresetPoint (0, 1));
+		p->push_back (PresetPoint (0, GAIN_COEFF_UNITY));
 		p->push_back (PresetPoint (0.023041, 0.697222));
 		p->push_back (PresetPoint (0.0553,   0.483333));
 		p->push_back (PresetPoint (0.170507, 0.233333));
 		p->push_back (PresetPoint (0.370968, 0.0861111));
 		p->push_back (PresetPoint (0.610599, 0.0333333));
-		p->push_back (PresetPoint (1, 0));
+		p->push_back (PresetPoint (1, GAIN_COEFF_SMALL));
 		fade_out_presets->push_back (p);
 
 	}
@@ -1069,17 +1063,17 @@ CrossfadeEditor::curve_select_clicked (WhichFade wf)
 	if (wf == In) {
 
 		for (vector<ArdourCanvas::WaveView*>::iterator i = fade[In].waves.begin(); i != fade[In].waves.end(); ++i) {
-			(*i)->property_wave_color() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorWave.get();
-			(*i)->property_fill_color() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorWave.get();
+			(*i)->set_outline_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorWave());
+			(*i)->set_fill_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorWave());
 		}
 
 		for (vector<ArdourCanvas::WaveView*>::iterator i = fade[Out].waves.begin(); i != fade[Out].waves.end(); ++i) {
-			(*i)->property_wave_color() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorWave.get();
-			(*i)->property_fill_color() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorWave.get();
+			(*i)->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorWave());
+			(*i)->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorWave());
 		}
 
-		fade[In].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorLine.get();
-		fade[Out].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLine.get();
+		fade[In].line->set_outline_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorLine());
+		fade[Out].line->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorLine());
 		fade[Out].shading->hide();
 		fade[In].shading->show();
 
@@ -1094,17 +1088,17 @@ CrossfadeEditor::curve_select_clicked (WhichFade wf)
 	} else {
 
 		for (vector<ArdourCanvas::WaveView*>::iterator i = fade[In].waves.begin(); i != fade[In].waves.end(); ++i) {
-			(*i)->property_wave_color() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorWave.get();
-			(*i)->property_fill_color() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorWave.get();
+			(*i)->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorWave());
+			(*i)->set_fill_color (ARDOUR_UI::config()->get_CrossfadeEditorWave());
 		}
 
 		for (vector<ArdourCanvas::WaveView*>::iterator i = fade[Out].waves.begin(); i != fade[Out].waves.end(); ++i) {
-			(*i)->property_wave_color() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorWave.get();
-			(*i)->property_fill_color() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorWave.get();
+			(*i)->set_outline_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorWave());
+			(*i)->set_fill_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorWave());
 		}
 
-		fade[Out].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorLine.get();
-		fade[In].line->property_fill_color_rgba() = ARDOUR_UI::config()->canvasvar_CrossfadeEditorLine.get();
+		fade[Out].line->set_outline_color (ARDOUR_UI::config()->get_SelectedCrossfadeEditorLine());
+		fade[In].line->set_outline_color (ARDOUR_UI::config()->get_CrossfadeEditorLine());
 		fade[In].shading->hide();
 		fade[Out].shading->show();
 
@@ -1146,9 +1140,9 @@ CrossfadeEditor::make_waves (boost::shared_ptr<AudioRegion> region, WhichFade wh
 	double spu;
 
 	if (which == In) {
-		color = ARDOUR_UI::config()->canvasvar_SelectedCrossfadeEditorWave.get();
+		color = ARDOUR_UI::config()->get_SelectedCrossfadeEditorWave();
 	} else {
-		color = ARDOUR_UI::config()->canvasvar_CrossfadeEditorWave.get();
+		color = ARDOUR_UI::config()->get_CrossfadeEditorWave();
 	}
 
 	ht = canvas->get_allocation().get_height() / (double) nchans;
@@ -1162,29 +1156,22 @@ CrossfadeEditor::make_waves (boost::shared_ptr<AudioRegion> region, WhichFade wh
 		gdouble yoff = n * ht;
 
 		if (region->audio_source(n)->peaks_ready (boost::bind (&CrossfadeEditor::peaks_ready, this, boost::weak_ptr<AudioRegion>(region), which), &_peaks_ready_connection, gui_context())) {
-			WaveView* waveview = new WaveView (*(canvas->root()));
+			ArdourCanvas::WaveView* waveview = new ArdourCanvas::WaveView (canvas->root(), region);
 
-			waveview->property_data_src() = region.get();
-			waveview->property_cache_updater() =  true;
-			waveview->property_cache() = WaveView::create_cache();
-			waveview->property_channel() = n;
-			waveview->property_length_function() = (void*) region_length_from_c;
-			waveview->property_sourcefile_length_function() = (void*) sourcefile_length_from_c;
-			waveview->property_peak_function() = (void*) region_read_peaks_from_c;
+			waveview->set_channel (n);
 			waveview->property_gain_function() = (void*) curve_get_vector_from_c;
 			waveview->property_gain_src() = static_cast<Evoral::Curve*>(&fade[which].gain_curve.curve());
-			waveview->property_x() = canvas_border;
-			waveview->property_y() = yoff;
-			waveview->property_height() = ht;
-			waveview->property_samples_per_unit() = spu;
+			waveview->set_x_position (canvas_border);
+			waveview->set_y_position (yoff);
+			waveview->set_height (ht);
+			waveview->set_samples_per_pixel (spu);
 			waveview->property_amplitude_above_axis() = 2.0;
-			waveview->property_wave_color() = color;
-			waveview->property_fill_color() = color;
+			waveview->set_outline_color (color);
+			waveview->set_fill_color (color);
 
-			if (which==In)
-				waveview->property_region_start() = region->start();
-			else
-				waveview->property_region_start() = region->start()+region->length()-xfade->length();
+			if (which != In) {
+				waveview->set_region_start (region->start() + region->length() - xfade->length());
+			}
 
 			waveview->lower_to_bottom();
 			fade[which].waves.push_back (waveview);

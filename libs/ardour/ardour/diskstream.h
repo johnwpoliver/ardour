@@ -34,6 +34,7 @@
 #include "ardour/ardour.h"
 #include "ardour/chan_count.h"
 #include "ardour/session_object.h"
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/utils.h"
 #include "ardour/public_diskstream.h"
@@ -54,7 +55,7 @@ class BufferSet;
 /** Parent class for classes which can stream data to and from disk.
  *  These are used by Tracks to get playback and put recorded data.
  */
-class Diskstream : public SessionObject, public PublicDiskstream
+class LIBARDOUR_API Diskstream : public SessionObject, public PublicDiskstream
 {
   public:
 	enum Flag {
@@ -69,6 +70,17 @@ class Diskstream : public SessionObject, public PublicDiskstream
 	virtual ~Diskstream();
 
 	virtual bool set_name (const std::string& str);
+	virtual bool set_write_source_name (const std::string& str);
+
+	std::string write_source_name () const {
+		if (_write_source_name.empty()) {
+			return name();
+		} else {
+			return _write_source_name;
+		}
+	}
+
+	virtual std::string steal_write_source_name () { return std::string(); }
 
 	boost::shared_ptr<ARDOUR::IO> io() const { return _io; }
 	void set_track (ARDOUR::Track *);
@@ -126,15 +138,19 @@ class Diskstream : public SessionObject, public PublicDiskstream
 
 	ChanCount n_channels() { return _n_channels; }
 
-	static framecnt_t disk_io_frames() { return disk_io_chunk_frames; }
-	static void set_disk_io_chunk_frames (framecnt_t n) { disk_io_chunk_frames = n; }
+	static framecnt_t disk_read_frames() { return disk_read_chunk_frames; }
+	static framecnt_t disk_write_frames() { return disk_write_chunk_frames; }
+	static void set_disk_read_chunk_frames (framecnt_t n) { disk_read_chunk_frames = n; }
+	static void set_disk_write_chunk_frames (framecnt_t n) { disk_write_chunk_frames = n; }
+	static framecnt_t default_disk_read_chunk_frames ();
+	static framecnt_t default_disk_write_chunk_frames ();
 
 	/* Stateful */
 	virtual XMLNode& get_state(void);
 	virtual int      set_state(const XMLNode&, int version);
 
-	virtual void request_jack_monitors_input (bool) {}
-	virtual void ensure_jack_monitors_input (bool) {}
+	virtual void request_input_monitoring (bool) {}
+	virtual void ensure_input_monitoring (bool) {}
 
 	framecnt_t   capture_offset() const { return _capture_offset; }
 	virtual void set_capture_offset ();
@@ -193,6 +209,7 @@ class Diskstream : public SessionObject, public PublicDiskstream
 	friend class Track;
 
     virtual int  process (BufferSet&, framepos_t transport_frame, pframes_t nframes, framecnt_t &, bool need_disk_signal) = 0;
+    virtual frameoffset_t calculate_playback_distance (pframes_t nframes) = 0;
 	virtual bool commit  (framecnt_t) = 0;
 
 	//private:
@@ -242,7 +259,7 @@ class Diskstream : public SessionObject, public PublicDiskstream
 	virtual void set_align_style_from_io() {}
 	virtual void setup_destructive_playlist () {}
 	virtual void use_destructive_playlist () {}
-	virtual void prepare_to_stop (framepos_t pos);
+	virtual void prepare_to_stop (framepos_t transport_pos, framepos_t audible_frame);
 
 	void engage_record_enable ();
 	void disengage_record_enable ();
@@ -255,7 +272,9 @@ class Diskstream : public SessionObject, public PublicDiskstream
 		framecnt_t& rec_nframes, framecnt_t& rec_offset
 		);
 
-	static framecnt_t disk_io_chunk_frames;
+	static framecnt_t disk_read_chunk_frames;
+	static framecnt_t disk_write_chunk_frames;
+
 	std::vector<CaptureInfo*> capture_info;
 	mutable Glib::Threads::Mutex capture_info_lock;
 
@@ -307,6 +326,8 @@ class Diskstream : public SessionObject, public PublicDiskstream
 	framepos_t     playback_sample;
 
 	bool          in_set_state;
+
+	std::string   _write_source_name;
 
 	Glib::Threads::Mutex state_lock;
 

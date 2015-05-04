@@ -24,6 +24,10 @@
 #include <stdint.h>
 #include <cstdio>
 
+#if __clang__
+#include "evoral/Note.hpp"
+#endif
+
 #include "pbd/compose.h"
 #include "pbd/error.h"
 
@@ -31,7 +35,7 @@
 #include "evoral/ControlList.hpp"
 #include "evoral/ControlSet.hpp"
 #include "evoral/EventSink.hpp"
-#include "evoral/MIDIParameters.hpp"
+#include "evoral/ParameterDescriptor.hpp"
 #include "evoral/Sequence.hpp"
 #include "evoral/TypeMap.hpp"
 #include "evoral/midi_util.h"
@@ -57,15 +61,22 @@ namespace Evoral {
 template<typename Time>
 Sequence<Time>::const_iterator::const_iterator()
 	: _seq(NULL)
+	, _event(boost::shared_ptr< Event<Time> >(new Event<Time>()))
+	, _active_patch_change_message (0)
+	, _type(NIL)
 	, _is_end(true)
 	, _control_iter(_control_iters.end())
+	, _force_discrete(false)
 {
-	_event = boost::shared_ptr< Event<Time> >(new Event<Time>());
 }
 
 /** @param force_discrete true to force ControlLists to use discrete evaluation, otherwise false to get them to use their configured mode */
 template<typename Time>
-Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t, bool force_discrete, std::set<Evoral::Parameter> const & filtered)
+Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>&              seq,
+                                               Time                               t,
+                                               bool                               force_discrete,
+                                               const std::set<Evoral::Parameter>& filtered,
+                                               const std::set<WeakNotePtr>*       active_notes)
 	: _seq(&seq)
 	, _active_patch_change_message (0)
 	, _type(NIL)
@@ -83,6 +94,17 @@ Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t
 	}
 
 	_lock = seq.read_lock();
+
+	// Add currently active notes, if given
+	if (active_notes) {
+		for (typename std::set<WeakNotePtr>::const_iterator i = active_notes->begin();
+		     i != active_notes->end(); ++i) {
+			NotePtr note = i->lock();
+			if (note && note->time() <= t && note->end_time() > t) {
+				_active_notes.push(note);
+			}
+		}
+	}
 
 	// Find first note which begins at or after t
 	_note_iter = seq.note_lower_bound(t);
@@ -107,10 +129,10 @@ Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t
 	assert (_patch_change_iter == seq.patch_changes().end() || (*_patch_change_iter)->time() >= t);
 
 	// Find first control event after t
-	ControlIterator earliest_control(boost::shared_ptr<ControlList>(), DBL_MAX, 0.0);
 	_control_iters.reserve(seq._controls.size());
 	bool   found                  = false;
 	size_t earliest_control_index = 0;
+	double earliest_control_x     = DBL_MAX;
 	for (Controls::const_iterator i = seq._controls.begin(); i != seq._controls.end(); ++i) {
 
 		if (filtered.find (i->first) != filtered.end()) {
@@ -121,10 +143,10 @@ Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t
 		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Iterator: control: %1\n", seq._type_map.to_symbol(i->first)));
 		double x, y;
 		bool ret;
-		if (_force_discrete) {
-			ret = i->second->list()->rt_safe_earliest_event_discrete_unlocked (t, x, y, true);
+		if (_force_discrete || i->second->list()->interpolation() == ControlList::Discrete) {
+			ret = i->second->list()->rt_safe_earliest_event_discrete_unlocked (t.to_double(), x, y, true);
 		} else {
-			ret = i->second->list()->rt_safe_earliest_event_unlocked(t, x, y, true);
+			ret = i->second->list()->rt_safe_earliest_event_unlocked(t.to_double(), x, y, true);
 		}
 		if (!ret) {
 			DEBUG_TRACE (DEBUG::Sequence, string_compose ("Iterator: CC %1 (size %2) has no events past %3\n",
@@ -134,9 +156,10 @@ Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t
 
 		assert(x >= 0);
 
-		if (y < i->first.min() || y > i->first.max()) {
+		const ParameterDescriptor& desc = seq.type_map().descriptor(i->first);
+		if (y < desc.lower || y > desc.upper) {
 			cerr << "ERROR: Controller value " << y
-			     << " out of range [" << i->first.min() << "," << i->first.max()
+			     << " out of range [" << desc.lower << "," << desc.upper
 			     << "], event ignored" << endl;
 			continue;
 		}
@@ -147,94 +170,51 @@ Sequence<Time>::const_iterator::const_iterator(const Sequence<Time>& seq, Time t
 		_control_iters.push_back(new_iter);
 
 		// Found a new earliest_control
-		if (x < earliest_control.x) {
-			earliest_control = new_iter;
+		if (x < earliest_control_x) {
+			earliest_control_x     = x;
 			earliest_control_index = _control_iters.size() - 1;
-			found = true;
+			found                  = true;
 		}
 	}
 
 	if (found) {
 		_control_iter = _control_iters.begin() + earliest_control_index;
 		assert(_control_iter != _control_iters.end());
+		assert(_control_iter->list);
 	} else {
 		_control_iter = _control_iters.end();
 	}
 
-	// Now find the earliest event overall and point to it
-	Time earliest_t = t;
+	// Choose the earliest event overall to point to
+	choose_next(t);
 
-	if (_note_iter != seq.notes().end()) {
-		_type = NOTE_ON;
-		earliest_t = (*_note_iter)->time();
-	}
+	// Allocate a new event for storing the current event in MIDI format
+	_event = boost::shared_ptr< Event<Time> >(
+		new Event<Time>(0, Time(), 4, NULL, true));
 
-	if (_sysex_iter != seq.sysexes().end()
-	    && ((*_sysex_iter)->time() < earliest_t || _type == NIL)) {
-		_type = SYSEX;
-		earliest_t = (*_sysex_iter)->time();
-	}
+	// Set event from chosen sub-iterator
+	set_event();
 
-	if (_patch_change_iter != seq.patch_changes().end() && ((*_patch_change_iter)->time() < earliest_t || _type == NIL)) {
-		_type = PATCH_CHANGE;
-		earliest_t = (*_patch_change_iter)->time ();
-	}
-
-	if (_control_iter != _control_iters.end()
-	    && earliest_control.list && earliest_control.x >= t
-	    && (earliest_control.x < earliest_t || _type == NIL)) {
-		_type = CONTROL;
-		earliest_t = earliest_control.x;
-	}
-
-	switch (_type) {
-	case NOTE_ON:
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Starting at note on event @ %1\n", earliest_t));
-		_event = boost::shared_ptr<Event<Time> > (new Event<Time> ((*_note_iter)->on_event(), true));
-		_active_notes.push(*_note_iter);
-		break;
-	case SYSEX:
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Starting at sysex event @ %1\n", earliest_t));
-		_event = boost::shared_ptr< Event<Time> >(
-			new Event<Time>(*(*_sysex_iter), true));
-		break;
-	case CONTROL:
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Starting at control event @ %1\n", earliest_t));
-		seq.control_to_midi_event(_event, earliest_control);
-		break;
-	case PATCH_CHANGE:
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Starting at patch change event @ %1\n", earliest_t));
-		_event = boost::shared_ptr<Event<Time> > (new Event<Time> ((*_patch_change_iter)->message (_active_patch_change_message), true));
-		break;
-	default:
-		break;
-	}
-
-	if (_type == NIL || !_event || _event->size() == 0) {
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Starting at end @ %1\n", t));
-		_type   = NIL;
-		_is_end = true;
+	if (_is_end) {
+		DEBUG_TRACE(DEBUG::Sequence,
+		            string_compose("Starting at end @ %1\n", t));
 	} else {
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("New iterator = 0x%1 : 0x%2 @ %3\n",
-		                                              (int)_event->event_type(),
-		                                              (int)((MIDIEvent<Time>*)_event.get())->type(),
-		                                              _event->time()));
-
-		assert(midi_event_is_valid(_event->buffer(), _event->size()));
+		DEBUG_TRACE(DEBUG::Sequence,
+		            string_compose("Starting at type 0x%1 : 0x%2 @ %3\n",
+		                           (int)_event->event_type(),
+		                           (int)((MIDIEvent<Time>*)_event.get())->type(),
+		                           _event->time()));
 	}
-
-}
-
-template<typename Time>
-Sequence<Time>::const_iterator::~const_iterator()
-{
 }
 
 template<typename Time>
 void
-Sequence<Time>::const_iterator::invalidate()
+Sequence<Time>::const_iterator::invalidate(std::set< boost::weak_ptr< Note<Time> > >* notes)
 {
 	while (!_active_notes.empty()) {
+		if (notes) {
+			notes->insert(_active_notes.top());
+		}
 		_active_notes.pop();
 	}
 	_type = NIL;
@@ -245,8 +225,98 @@ Sequence<Time>::const_iterator::invalidate()
 		_patch_change_iter = _seq->patch_changes().end();
 		_active_patch_change_message = 0;
 	}
+	_control_iters.clear();
 	_control_iter = _control_iters.end();
 	_lock.reset();
+}
+
+template<typename Time>
+Time
+Sequence<Time>::const_iterator::choose_next(Time earliest_t)
+{
+	_type = NIL;
+
+	// Next earliest note on
+	if (_note_iter != _seq->notes().end()) {
+		_type      = NOTE_ON;
+		earliest_t = (*_note_iter)->time();
+	}
+
+	// Use the next note off iff it's earlier or the same time as the note on
+	if ((!_active_notes.empty())) {
+		if (_type == NIL || _active_notes.top()->end_time() <= earliest_t) {
+			_type      = NOTE_OFF;
+			earliest_t = _active_notes.top()->end_time();
+		}
+	}
+
+	// Use the next earliest controller iff it's earlier than the note event
+	if (_control_iter != _control_iters.end() &&
+	    _control_iter->list && _control_iter->x != DBL_MAX) {
+		if (_type == NIL || _control_iter->x < earliest_t.to_double()) {
+			_type      = CONTROL;
+			earliest_t = Time(_control_iter->x);
+		}
+	}
+
+	// Use the next earliest SysEx iff it's earlier than the controller
+	if (_sysex_iter != _seq->sysexes().end()) {
+		if (_type == NIL || (*_sysex_iter)->time() < earliest_t) {
+			_type      = SYSEX;
+			earliest_t = (*_sysex_iter)->time();
+		}
+	}
+
+	// Use the next earliest patch change iff it's earlier than the SysEx
+	if (_patch_change_iter != _seq->patch_changes().end()) {
+		if (_type == NIL || (*_patch_change_iter)->time() < earliest_t) {
+			_type      = PATCH_CHANGE;
+			earliest_t = (*_patch_change_iter)->time();
+		}
+	}
+	return earliest_t;
+}
+
+template<typename Time>
+void
+Sequence<Time>::const_iterator::set_event()
+{
+	switch (_type) {
+	case NOTE_ON:
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = note on\n");
+		*_event = (*_note_iter)->on_event();
+		_active_notes.push(*_note_iter);
+		break;
+	case NOTE_OFF:
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = note off\n");
+		assert(!_active_notes.empty());
+		*_event = _active_notes.top()->off_event();
+		// We don't pop the active note until we increment past it
+		break;
+	case SYSEX:
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = sysex\n");
+		*_event = *(*_sysex_iter);
+		break;
+	case CONTROL:
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = control\n");
+		_seq->control_to_midi_event(_event, *_control_iter);
+		break;
+	case PATCH_CHANGE:
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = program change\n");
+		*_event = (*_patch_change_iter)->message (_active_patch_change_message);
+		break;
+	default:
+		_is_end = true;
+		break;
+	}
+
+	if (_type == NIL || !_event || _event->size() == 0) {
+		DEBUG_TRACE(DEBUG::Sequence, "iterator = end\n");
+		_type   = NIL;
+		_is_end = true;
+	} else {
+		assert(midi_event_is_valid(_event->buffer(), _event->size()));
+	}
 }
 
 template<typename Time>
@@ -281,17 +351,16 @@ Sequence<Time>::const_iterator::operator++()
 		++_note_iter;
 		break;
 	case NOTE_OFF:
+		_active_notes.pop();
 		break;
 	case CONTROL:
 		// Increment current controller iterator
 		if (_force_discrete || _control_iter->list->interpolation() == ControlList::Discrete) {
 			ret = _control_iter->list->rt_safe_earliest_event_discrete_unlocked (
-				_control_iter->x, x, y, false
-			                                                                     );
+				_control_iter->x, x, y, false);
 		} else {
 			ret = _control_iter->list->rt_safe_earliest_event_linear_unlocked (
-				_control_iter->x + time_between_interpolated_controller_outputs, x, y, false
-			                                                                   );
+				_control_iter->x + time_between_interpolated_controller_outputs, x, y, false);
 		}
 		assert(!ret || x > _control_iter->x);
 		if (ret) {
@@ -326,83 +395,11 @@ Sequence<Time>::const_iterator::operator++()
 		assert(false);
 	}
 
-	// Now find the earliest event overall and point to it
-	_type = NIL;
-	Time earliest_t = std::numeric_limits<Time>::max();
+	// Choose the earliest event overall to point to
+	choose_next(std::numeric_limits<Time>::max());
 
-	// Next earliest note on
-	if (_note_iter != _seq->notes().end()) {
-		_type = NOTE_ON;
-		earliest_t = (*_note_iter)->time();
-	}
-
-	// Use the next note off iff it's earlier or the same time as the note on
-#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
-	// issue 0005121 When in Percussive mode, all note offs go missing, which jams all MIDI instruments that they stop playing
-	// remove this code since it drowns MIDI instruments by stealing all voices and crashes LinuxSampler
-	if (!_seq->percussive() && (!_active_notes.empty())) {
-#else
-	if ((!_active_notes.empty())) {
-#endif
-		if (_type == NIL || _active_notes.top()->end_time() <= earliest_t) {
-			_type = NOTE_OFF;
-			earliest_t = _active_notes.top()->end_time();
-		}
-	}
-
-	// Use the next earliest controller iff it's earlier than the note event
-	if (_control_iter != _control_iters.end() && _control_iter->x != DBL_MAX) {
-		if (_type == NIL || _control_iter->x < earliest_t) {
-			_type = CONTROL;
-			earliest_t = _control_iter->x;
-		}
-	}
-
-	// Use the next earliest SysEx iff it's earlier than the controller
-	if (_sysex_iter != _seq->sysexes().end()) {
-		if (_type == NIL || (*_sysex_iter)->time() < earliest_t) {
-			_type = SYSEX;
-			earliest_t = (*_sysex_iter)->time();
-		}
-	}
-
-	// Use the next earliest patch change iff it's earlier than the SysEx
-	if (_patch_change_iter != _seq->patch_changes().end()) {
-		if (_type == NIL || (*_patch_change_iter)->time() < earliest_t) {
-			_type = PATCH_CHANGE;
-			earliest_t = (*_patch_change_iter)->time();
-		}
-	}
-
-	// Set event to reflect new position
-	switch (_type) {
-	case NOTE_ON:
-		// DEBUG_TRACE(DEBUG::Sequence, "iterator = note on\n");
-		*_event = (*_note_iter)->on_event();
-		_active_notes.push(*_note_iter);
-		break;
-	case NOTE_OFF:
-		// DEBUG_TRACE(DEBUG::Sequence, "iterator = note off\n");
-		assert(!_active_notes.empty());
-		*_event = _active_notes.top()->off_event();
-		_active_notes.pop();
-		break;
-	case CONTROL:
-		//DEBUG_TRACE(DEBUG::Sequence, "iterator = control\n");
-		_seq->control_to_midi_event(_event, *_control_iter);
-		break;
-	case SYSEX:
-		//DEBUG_TRACE(DEBUG::Sequence, "iterator = sysex\n");
-		*_event = *(*_sysex_iter);
-		break;
-	case PATCH_CHANGE:
-		//DEBUG_TRACE(DEBUG::Sequence, "iterator = patch change\n");
-		*_event = (*_patch_change_iter)->message (_active_patch_change_message);
-		break;
-	default:
-		//DEBUG_TRACE(DEBUG::Sequence, "iterator = end\n");
-		_is_end = true;
-	}
+	// Set event from chosen sub-iterator
+	set_event();
 
 	assert(_is_end || (_event->size() > 0 && _event->buffer() && _event->buffer()[0] != '\0'));
 
@@ -465,7 +462,7 @@ Sequence<Time>::Sequence(const TypeMap& type_map)
 	, _overlap_pitch_resolution (FirstOnFirstOff)
 	, _writing(false)
 	, _type_map(type_map)
-	, _end_iter(*this, DBL_MAX, false, std::set<Evoral::Parameter> ())
+	, _end_iter(*this, std::numeric_limits<Time>::max(), false, std::set<Evoral::Parameter> ())
 	, _percussive(false)
 	, _lowest_note(127)
 	, _highest_note(0)
@@ -487,7 +484,7 @@ Sequence<Time>::Sequence(const Sequence<Time>& other)
 	, _overlap_pitch_resolution (other._overlap_pitch_resolution)
 	, _writing(false)
 	, _type_map(other._type_map)
-	, _end_iter(*this, DBL_MAX, false, std::set<Evoral::Parameter> ())
+	, _end_iter(*this, std::numeric_limits<Time>::max(), false, std::set<Evoral::Parameter> ())
 	, _percussive(other._percussive)
 	, _lowest_note(other._lowest_note)
 	, _highest_note(other._highest_note)
@@ -532,7 +529,7 @@ Sequence<Time>::control_to_midi_event(
 
 	// initialize the event pointer with a new event, if necessary
 	if (!ev) {
-		ev = boost::shared_ptr< Event<Time> >(new Event<Time>(event_type, 0, 3, NULL, true));
+		ev = boost::shared_ptr< Event<Time> >(new Event<Time>(event_type, Time(), 3, NULL, true));
 	}
 
 	uint8_t midi_type = _type_map.parameter_midi_type(iter.list->parameter());
@@ -544,7 +541,7 @@ Sequence<Time>::control_to_midi_event(
 		assert(iter.list->parameter().id() <= INT8_MAX);
 		assert(iter.y <= INT8_MAX);
 
-		ev->set_time(iter.x);
+		ev->set_time(Time(iter.x));
 		ev->realloc(3);
 		ev->buffer()[0] = MIDI_CMD_CONTROL + iter.list->parameter().channel();
 		ev->buffer()[1] = (uint8_t)iter.list->parameter().id();
@@ -556,7 +553,7 @@ Sequence<Time>::control_to_midi_event(
 		assert(iter.list->parameter().channel() < 16);
 		assert(iter.y <= INT8_MAX);
 
-		ev->set_time(iter.x);
+		ev->set_time(Time(iter.x));
 		ev->realloc(2);
 		ev->buffer()[0] = MIDI_CMD_PGM_CHANGE + iter.list->parameter().channel();
 		ev->buffer()[1] = (uint8_t)iter.y;
@@ -567,7 +564,7 @@ Sequence<Time>::control_to_midi_event(
 		assert(iter.list->parameter().channel() < 16);
 		assert(iter.y < (1<<14));
 
-		ev->set_time(iter.x);
+		ev->set_time(Time(iter.x));
 		ev->realloc(3);
 		ev->buffer()[0] = MIDI_CMD_BENDER + iter.list->parameter().channel();
 		ev->buffer()[1] = uint16_t(iter.y) & 0x7F; // LSB
@@ -579,7 +576,7 @@ Sequence<Time>::control_to_midi_event(
 		assert(iter.list->parameter().channel() < 16);
 		assert(iter.y <= INT8_MAX);
 
-		ev->set_time(iter.x);
+		ev->set_time(Time(iter.x));
 		ev->realloc(2);
 		ev->buffer()[0] = MIDI_CMD_CHANNEL_PRESSURE + iter.list->parameter().channel();
 		ev->buffer()[1] = (uint8_t)iter.y;
@@ -641,39 +638,33 @@ Sequence<Time>::end_write (StuckNoteOption option, Time when)
 
 	DEBUG_TRACE (DEBUG::Sequence, string_compose ("%1 : end_write (%2 notes) delete stuck option %3 @ %4\n", this, _notes.size(), option, when));
 
-	#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
-	if (!_percussive) {
-	#endif
-		for (typename Notes::iterator n = _notes.begin(); n != _notes.end() ;) {
-			typename Notes::iterator next = n;
-			++next;
+	for (typename Notes::iterator n = _notes.begin(); n != _notes.end() ;) {
+		typename Notes::iterator next = n;
+		++next;
 
-			if ((*n)->length() == 0) {
-				switch (option) {
-				case Relax:
-					break;
-				case DeleteStuckNotes:
-					cerr << "WARNING: Stuck note lost: " << (*n)->note() << endl;
-					_notes.erase(n);
-					break;
-				case ResolveStuckNotes:
-					if (when <= (*n)->time()) {
-						cerr << "WARNING: Stuck note resolution - end time @ "
-						     << when << " is before note on: " << (**n) << endl;
-						_notes.erase (*n);
-					} else {
-						(*n)->set_length (when - (*n)->time());
-						cerr << "WARNING: resolved note-on with no note-off to generate " << (**n) << endl;
-					}
-					break;
+		if (!(*n)->length()) {
+			switch (option) {
+			case Relax:
+				break;
+			case DeleteStuckNotes:
+				cerr << "WARNING: Stuck note lost: " << (*n)->note() << endl;
+				_notes.erase(n);
+				break;
+			case ResolveStuckNotes:
+				if (when <= (*n)->time()) {
+					cerr << "WARNING: Stuck note resolution - end time @ "
+					     << when << " is before note on: " << (**n) << endl;
+					_notes.erase (*n);
+				} else {
+					(*n)->set_length (when - (*n)->time());
+					cerr << "WARNING: resolved note-on with no note-off to generate " << (**n) << endl;
 				}
+				break;
 			}
-
-			n = next;
 		}
-	#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
+
+		n = next;
 	}
-	#endif
 
 	for (int i = 0; i < 16; ++i) {
 		_write_notes[i].clear();
@@ -732,7 +723,7 @@ Sequence<Time>::remove_note_unlocked(const constNotePtr note)
 
 	typename Sequence<Time>::Notes::iterator i;
 		
-	for (i = note_lower_bound(note->time()); i != _notes.end() && musical_time_equal ((*i)->time(), note->time()); ++i) {
+	for (i = note_lower_bound(note->time()); i != _notes.end() && (*i)->time() == note->time(); ++i) {
 
 		if (*i == note) {
 
@@ -827,7 +818,7 @@ Sequence<Time>::remove_note_unlocked(const constNotePtr note)
 			 * so the search_note has all other properties unset.
 			 */
 			
-			NotePtr search_note (new Note<Time>(0, 0, 0, note->note(), 0));
+			NotePtr search_note (new Note<Time>(0, Time(), Time(), note->note(), 0));
 
 			for (j = p.lower_bound (search_note); j != p.end() && (*j)->note() == note->note(); ++j) {
 				
@@ -856,7 +847,7 @@ Sequence<Time>::remove_patch_change_unlocked (const constPatchChangePtr p)
 {
 	typename Sequence<Time>::PatchChanges::iterator i = patch_change_lower_bound (p->time ());
 
-	while (i != _patch_changes.end() && (musical_time_equal ((*i)->time(), p->time()))) {
+	while (i != _patch_changes.end() && ((*i)->time() == p->time())) {
 
 		typename Sequence<Time>::PatchChanges::iterator tmp = i;
 		++tmp;
@@ -909,15 +900,13 @@ Sequence<Time>::append(const Event<Time>& event, event_id_t evid)
 		return;
 	}
 
-	if (ev.is_note_on()) {
-		NotePtr note(new Note<Time>(ev.channel(), ev.time(), 0, ev.note(), ev.velocity()));
-		append_note_on_unlocked (note, evid);
-	} else if (ev.is_note_off()) {
-		NotePtr note(new Note<Time>(ev.channel(), ev.time(), 0, ev.note(), ev.velocity()));
+	if (ev.is_note_on() && ev.velocity() > 0) {
+		append_note_on_unlocked (ev, evid);
+	} else if (ev.is_note_off() || (ev.is_note_on() && ev.velocity() == 0)) {
 		/* XXX note: event ID is discarded because we merge the on+off events into
 		   a single note object
 		*/
-		append_note_off_unlocked (note);
+		append_note_off_unlocked (ev);
 	} else if (ev.is_sysex()) {
 		append_sysex_unlocked(ev, evid);
 	} else if (ev.is_cc() && (ev.cc_number() == MIDI_CTL_MSB_BANK || ev.cc_number() == MIDI_CTL_LSB_BANK)) {
@@ -931,20 +920,20 @@ Sequence<Time>::append(const Event<Time>& event, event_id_t evid)
 		}
 	} else if (ev.is_cc()) {
 		append_control_unlocked(
-			Evoral::MIDI::ContinuousController(ev.event_type(), ev.channel(), ev.cc_number()),
+			Parameter(ev.event_type(), ev.channel(), ev.cc_number()),
 			ev.time(), ev.cc_value(), evid);
 	} else if (ev.is_pgm_change()) {
 		/* write a patch change with this program change and any previously set-up bank number */
 		append_patch_change_unlocked (PatchChange<Time> (ev.time(), ev.channel(), ev.pgm_number(), _bank[ev.channel()]), evid);
 	} else if (ev.is_pitch_bender()) {
 		append_control_unlocked(
-			Evoral::MIDI::PitchBender(ev.event_type(), ev.channel()),
+			Parameter(ev.event_type(), ev.channel()),
 			ev.time(), double ((0x7F & ev.pitch_bender_msb()) << 7
 			                   | (0x7F & ev.pitch_bender_lsb())),
 			evid);
 	} else if (ev.is_channel_pressure()) {
 		append_control_unlocked(
-			Evoral::MIDI::ChannelPressure(ev.event_type(), ev.channel()),
+			Parameter(ev.event_type(), ev.channel()),
 			ev.time(), ev.channel_pressure(), evid);
 	} else if (!_type_map.type_is_midi(ev.event_type())) {
 		printf("WARNING: Sequence: Unknown event type %X: ", ev.event_type());
@@ -961,75 +950,54 @@ Sequence<Time>::append(const Event<Time>& event, event_id_t evid)
 
 template<typename Time>
 void
-Sequence<Time>::append_note_on_unlocked (NotePtr note, event_id_t evid)
+Sequence<Time>::append_note_on_unlocked (const MIDIEvent<Time>& ev, event_id_t evid)
 {
 	DEBUG_TRACE (DEBUG::Sequence, string_compose ("%1 c=%2 note %3 on @ %4 v=%5\n", this,
-	                                              (int) note->channel(), (int) note->note(),
-	                                              note->time(), (int) note->velocity()));
+	                                              (int)ev.channel(), (int)ev.note(),
+	                                              ev.time(), (int)ev.velocity()));
 	assert(_writing);
 
-	if (note->note() > 127) {
-		error << string_compose (_("illegal note number (%1) used in Note on event - event will be ignored"), (int)  note->note()) << endmsg;
+	if (ev.note() > 127) {
+		error << string_compose (_("invalid note on number (%1) ignored"), (int) ev.note()) << endmsg;
 		return;
-	}
-	if (note->channel() >= 16) {
-		error << string_compose (_("illegal channel number (%1) used in Note on event - event will be ignored"), (int) note->channel()) << endmsg;
+	} else if (ev.channel() >= 16) {
+		error << string_compose (_("invalid note on channel (%1) ignored"), (int) ev.channel()) << endmsg;
+		return;
+	} else if (ev.velocity() == 0) {
+		// Note on with velocity 0 handled as note off by caller
+		error << string_compose (_("invalid note on velocity (%1) ignored"), (int) ev.velocity()) << endmsg;
 		return;
 	}
 
-	if (note->id() < 0) {
-		note->set_id (evid);
-	}
-
-	if (note->velocity() == 0) {
-		append_note_off_unlocked (note);
-		return;
-	}
+	NotePtr note(new Note<Time>(ev.channel(), ev.time(), Time(), ev.note(), ev.velocity()));
+	note->set_id (evid);
 
 	add_note_unlocked (note);
 
-	#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
-	if (!_percussive) {
-	#endif
-
-		DEBUG_TRACE (DEBUG::Sequence, string_compose ("Sustained: Appending active note on %1 channel %2\n",
-		                                              (unsigned)(uint8_t)note->note(), note->channel()));
-		_write_notes[note->channel()].insert (note);
-
-	#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
-	} else {
-		DEBUG_TRACE(DEBUG::Sequence, "Percussive: NOT appending active note on\n");
-	}
-	#endif
+	DEBUG_TRACE (DEBUG::Sequence, string_compose ("Appending active note on %1 channel %2\n",
+	                                              (unsigned)(uint8_t)note->note(), note->channel()));
+	_write_notes[note->channel()].insert (note);
 
 }
 
 template<typename Time>
 void
-Sequence<Time>::append_note_off_unlocked (NotePtr note)
+Sequence<Time>::append_note_off_unlocked (const MIDIEvent<Time>& ev)
 {
 	DEBUG_TRACE (DEBUG::Sequence, string_compose ("%1 c=%2 note %3 OFF @ %4 v=%5\n",
-	                                              this, (int)note->channel(),
-	                                              (int)note->note(), note->time(), (int)note->velocity()));
+	                                              this, (int)ev.channel(),
+	                                              (int)ev.note(), ev.time(), (int)ev.velocity()));
 	assert(_writing);
 
-	if (note->note() > 127) {
-		error << string_compose (_("illegal note number (%1) used in Note off event - event will be ignored"), (int) note->note()) << endmsg;
+	if (ev.note() > 127) {
+		error << string_compose (_("invalid note off number (%1) ignored"), (int) ev.note()) << endmsg;
 		return;
-	}
-	if (note->channel() >= 16) {
-		error << string_compose (_("illegal channel number (%1) used in Note off event - event will be ignored"), (int) note->channel()) << endmsg;
+	} else if (ev.channel() >= 16) {
+		error << string_compose (_("invalid note off channel (%1) ignored"), (int) ev.channel()) << endmsg;
 		return;
 	}
 
 	_edited = true;
-
-#ifdef PERCUSSIVE_IGNORE_NOTE_OFFS
-	if (_percussive) {
-		DEBUG_TRACE(DEBUG::Sequence, "Sequence Ignoring note off (percussive mode)\n");
-		return;
-	}
-#endif
 
 	bool resolved = false;
 
@@ -1041,19 +1009,19 @@ Sequence<Time>::append_note_off_unlocked (NotePtr note)
 
 	/* XXX use _overlap_pitch_resolution to determine FIFO/LIFO ... */
 
-	for (typename WriteNotes::iterator n = _write_notes[note->channel()].begin(); n != _write_notes[note->channel()].end(); ) {
+	for (typename WriteNotes::iterator n = _write_notes[ev.channel()].begin(); n != _write_notes[ev.channel()].end(); ) {
 
 		typename WriteNotes::iterator tmp = n;
 		++tmp;
 
 		NotePtr nn = *n;
-		if (note->note() == nn->note() && nn->channel() == note->channel()) {
-			assert(note->time() >= nn->time());
+		if (ev.note() == nn->note() && nn->channel() == ev.channel()) {
+			assert(ev.time() >= nn->time());
 
-			nn->set_length (note->time() - nn->time());
-			nn->set_off_velocity (note->velocity());
+			nn->set_length (ev.time() - nn->time());
+			nn->set_off_velocity (ev.velocity());
 
-			_write_notes[note->channel()].erase(n);
+			_write_notes[ev.channel()].erase(n);
 			DEBUG_TRACE (DEBUG::Sequence, string_compose ("resolved note @ %2 length: %1\n", nn->length(), nn->time()));
 			resolved = true;
 			break;
@@ -1063,8 +1031,8 @@ Sequence<Time>::append_note_off_unlocked (NotePtr note)
 	}
 
 	if (!resolved) {
-		cerr << this << " spurious note off chan " << (int)note->channel()
-		     << ", note " << (int)note->note() << " @ " << note->time() << endl;
+		cerr << this << " spurious note off chan " << (int)ev.channel()
+		     << ", note " << (int)ev.note() << " @ " << ev.time() << endl;
 	}
 }
 
@@ -1075,7 +1043,7 @@ Sequence<Time>::append_control_unlocked(const Parameter& param, Time time, doubl
 	DEBUG_TRACE (DEBUG::Sequence, string_compose ("%1 %2 @ %3 = %4 # controls: %5\n",
 	                                              this, _type_map.to_symbol(param), time, value, _controls.size()));
 	boost::shared_ptr<Control> c = control(param, true);
-	c->list()->add (time, value);
+	c->list()->add (time.to_double(), value);
 	/* XXX control events should use IDs */
 }
 
@@ -1143,7 +1111,7 @@ bool
 Sequence<Time>::contains_unlocked (const NotePtr& note) const
 {
 	const Pitches& p (pitches (note->channel()));
-	NotePtr search_note(new Note<Time>(0, 0, 0, note->note()));
+	NotePtr search_note(new Note<Time>(0, Time(), Time(), note->note()));
 
 	for (typename Pitches::const_iterator i = p.lower_bound (search_note);
 	     i != p.end() && (*i)->note() == note->note(); ++i) {
@@ -1172,7 +1140,7 @@ Sequence<Time>::overlaps_unlocked (const NotePtr& note, const NotePtr& without) 
 	Time ea  = note->end_time();
 
 	const Pitches& p (pitches (note->channel()));
-	NotePtr search_note(new Note<Time>(0, 0, 0, note->note()));
+	NotePtr search_note(new Note<Time>(0, Time(), Time(), note->note()));
 
 	for (typename Pitches::const_iterator i = p.lower_bound (search_note);
 	     i != p.end() && (*i)->note() == note->note(); ++i) {
@@ -1197,17 +1165,19 @@ Sequence<Time>::overlaps_unlocked (const NotePtr& note, const NotePtr& without) 
 
 template<typename Time>
 void
-Sequence<Time>::set_notes (const Sequence<Time>::Notes& n)
+Sequence<Time>::set_notes (const typename Sequence<Time>::Notes& n)
 {
 	_notes = n;
 }
+
+// CONST iterator implementations (x3)
 
 /** Return the earliest note with time >= t */
 template<typename Time>
 typename Sequence<Time>::Notes::const_iterator
 Sequence<Time>::note_lower_bound (Time t) const
 {
-	NotePtr search_note(new Note<Time>(0, t, 0, 0, 0));
+	NotePtr search_note(new Note<Time>(0, t, Time(), 0, 0));
 	typename Sequence<Time>::Notes::const_iterator i = _notes.lower_bound(search_note);
 	assert(i == _notes.end() || (*i)->time() >= t);
 	return i;
@@ -1220,7 +1190,7 @@ Sequence<Time>::patch_change_lower_bound (Time t) const
 {
 	PatchChangePtr search (new PatchChange<Time> (t, 0, 0, 0));
 	typename Sequence<Time>::PatchChanges::const_iterator i = _patch_changes.lower_bound (search);
-	assert (i == _patch_changes.end() || musical_time_greater_or_equal_to ((*i)->time(), t));
+	assert (i == _patch_changes.end() || (*i)->time() >= t);
 	return i;
 }
 
@@ -1231,6 +1201,41 @@ Sequence<Time>::sysex_lower_bound (Time t) const
 {
 	SysExPtr search (new Event<Time> (0, t));
 	typename Sequence<Time>::SysExes::const_iterator i = _sysexes.lower_bound (search);
+	assert (i == _sysexes.end() || (*i)->time() >= t);
+	return i;
+}
+
+// NON-CONST iterator implementations (x3)
+
+/** Return the earliest note with time >= t */
+template<typename Time>
+typename Sequence<Time>::Notes::iterator
+Sequence<Time>::note_lower_bound (Time t)
+{
+	NotePtr search_note(new Note<Time>(0, t, Time(), 0, 0));
+	typename Sequence<Time>::Notes::iterator i = _notes.lower_bound(search_note);
+	assert(i == _notes.end() || (*i)->time() >= t);
+	return i;
+}
+
+/** Return the earliest patch change with time >= t */
+template<typename Time>
+typename Sequence<Time>::PatchChanges::iterator
+Sequence<Time>::patch_change_lower_bound (Time t)
+{
+	PatchChangePtr search (new PatchChange<Time> (t, 0, 0, 0));
+	typename Sequence<Time>::PatchChanges::iterator i = _patch_changes.lower_bound (search);
+	assert (i == _patch_changes.end() || (*i)->time() >= t);
+	return i;
+}
+
+/** Return the earliest sysex with time >= t */
+template<typename Time>
+typename Sequence<Time>::SysExes::iterator
+Sequence<Time>::sysex_lower_bound (Time t)
+{
+	SysExPtr search (new Event<Time> (0, t));
+	typename Sequence<Time>::SysExes::iterator i = _sysexes.lower_bound (search);
 	assert (i == _sysexes.end() || (*i)->time() >= t);
 	return i;
 }
@@ -1269,7 +1274,7 @@ Sequence<Time>::get_notes_by_pitch (Notes& n, NoteOperator op, uint8_t val, int 
 		}
 
 		const Pitches& p (pitches (c));
-		NotePtr search_note(new Note<Time>(0, 0, 0, val, 0));
+		NotePtr search_note(new Note<Time>(0, Time(), Time(), val, 0));
 		typename Pitches::const_iterator i;
 		switch (op) {
 		case PitchEqual:
@@ -1305,8 +1310,7 @@ Sequence<Time>::get_notes_by_pitch (Notes& n, NoteOperator op, uint8_t val, int 
 
 		default:
 			//fatal << string_compose (_("programming error: %1 %2", X_("get_notes_by_pitch() called with illegal operator"), op)) << endmsg;
-			abort ();
-			/* NOTREACHED*/
+			abort(); /* NOTREACHED*/
 		}
 	}
 }
@@ -1351,8 +1355,7 @@ Sequence<Time>::get_notes_by_velocity (Notes& n, NoteOperator op, uint8_t val, i
 			break;
 		default:
 			// fatal << string_compose (_("programming error: %1 %2", X_("get_notes_by_velocity() called with illegal operator"), op)) << endmsg;
-			abort ();
-			/* NOTREACHED*/
+			abort(); /* NOTREACHED*/
 
 		}
 	}
@@ -1386,7 +1389,6 @@ Sequence<Time>::dump (ostream& str) const
 	str << "--- dump\n";
 }
 
-template class Sequence<Evoral::MusicalTime>;
+template class Sequence<Evoral::Beats>;
 
 } // namespace Evoral
-

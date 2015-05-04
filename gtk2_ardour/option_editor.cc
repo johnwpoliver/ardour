@@ -16,20 +16,24 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 */
+#include <algorithm>
 
 #include <gtkmm/box.h>
 #include <gtkmm/alignment.h>
 #include "gtkmm2ext/utils.h"
 
-#include "ardour/configuration.h"
-#include "ardour/rc_configuration.h"
-#include "ardour/utils.h"
 #include "ardour/dB.h"
+#include "ardour/rc_configuration.h"
 #include "ardour/session.h"
+#include "ardour/types.h"
+#include "ardour/utils.h"
 
+#include "pbd/configuration.h"
+#include "pbd/replace_all.h"
+
+#include "public_editor.h"
 #include "option_editor.h"
 #include "gui_thread.h"
-#include "utils.h"
 #include "i18n.h"
 
 using namespace std;
@@ -139,6 +143,18 @@ BoolOption::toggled ()
 	_set (_button->get_active ());
 }
 
+RouteDisplayBoolOption::RouteDisplayBoolOption (string const & i, string const & n, sigc::slot<bool> g, sigc::slot<bool, bool> s)
+	: BoolOption (i, n, g, s)
+{
+}
+
+void
+RouteDisplayBoolOption::toggled ()
+{
+	DisplaySuspender ds;
+	BoolOption::toggled ();
+}
+
 EntryOption::EntryOption (string const & i, string const & n, sigc::slot<string> g, sigc::slot<bool, string> s)
 	: Option (i, n),
 	  _get (g),
@@ -147,6 +163,8 @@ EntryOption::EntryOption (string const & i, string const & n, sigc::slot<string>
 	_label = manage (left_aligned_label (n + ":"));
 	_entry = manage (new Entry);
 	_entry->signal_activate().connect (sigc::mem_fun (*this, &EntryOption::activated));
+	_entry->signal_focus_out_event().connect (sigc::mem_fun (*this, &EntryOption::focus_out));
+	_entry->signal_insert_text().connect (sigc::mem_fun (*this, &EntryOption::filter_text));
 }
 
 void
@@ -162,9 +180,34 @@ EntryOption::set_state_from_config ()
 }
 
 void
+EntryOption::set_sensitive (bool s)
+{
+	_entry->set_sensitive (s);
+}
+
+void
+EntryOption::filter_text (const Glib::ustring&, int*)
+{
+	std::string text = _entry->get_text ();
+	for (size_t i = 0; i < _invalid.length(); ++i) {
+		text.erase (std::remove(text.begin(), text.end(), _invalid.at(i)), text.end());
+	}
+	if (text != _entry->get_text ()) {
+		_entry->set_text (text);
+	}
+}
+
+void
 EntryOption::activated ()
 {
 	_set (_entry->get_text ());
+}
+
+bool
+EntryOption::focus_out (GdkEventFocus*)
+{
+	_set (_entry->get_text ());
+	return true;
 }
 
 /** Construct a BoolComboOption.
@@ -227,9 +270,10 @@ FaderOption::FaderOption (string const & i, string const & n, sigc::slot<gain_t>
 	, _get (g)
 	, _set (s)
 {
-	_db_slider = manage (new HSliderController (&_db_adjustment, 115, 18, false));
+	_db_slider = manage (new HSliderController (&_db_adjustment, boost::shared_ptr<PBD::Controllable>(), 115, 18));
 
 	_label.set_text (n + ":");
+	_label.set_alignment (0, 0.5);
 	_label.set_name (X_("OptionsLabel"));
 
 	_fader_centering_box.pack_start (*_db_slider, true, false);
@@ -276,7 +320,7 @@ FaderOption::add_to_page (OptionEditorPage* p)
 
 ClockOption::ClockOption (string const & i, string const & n, sigc::slot<std::string> g, sigc::slot<bool, std::string> s)
 	: Option (i, n)
-	, _clock (X_("timecode-offset"), false, X_(""), true, false, true, false)
+	, _clock (X_("timecode-offset"), true, X_(""), true, false, true, false)
 	, _get (g)
 	, _set (s)
 {
@@ -336,7 +380,7 @@ OptionEditorPage::OptionEditorPage (Gtk::Notebook& n, std::string const & t)
  *  @param o Configuration to edit.
  *  @param t Title for the dialog.
  */
-OptionEditor::OptionEditor (Configuration* c, std::string const & t)
+OptionEditor::OptionEditor (PBD::Configuration* c, std::string const & t)
 	: ArdourWindow (t), _config (c)
 {
 	using namespace Notebook_Helpers;
@@ -404,6 +448,21 @@ OptionEditor::add_option (std::string const & pn, OptionEditorComponent* o)
 	o->set_state_from_config ();
 }
 
+/** Add a new page 
+ *  @param pn Page name (will be created if it doesn't already exist)
+ *  @param w widget that fills the page
+ */
+void
+OptionEditor::add_page (std::string const & pn, Gtk::Widget& w)
+{
+	if (_pages.find (pn) == _pages.end()) {
+		_pages[pn] = new OptionEditorPage (_notebook, pn);
+	}
+
+	OptionEditorPage* p = _pages[pn];
+	p->box.pack_start (w, true, true);
+}
+
 void
 OptionEditor::set_current_page (string const & p)
 {
@@ -425,7 +484,7 @@ DirectoryOption::DirectoryOption (string const & i, string const & n, sigc::slot
 	, _set (s)
 {
 	_file_chooser.set_action (Gtk::FILE_CHOOSER_ACTION_SELECT_FOLDER);
-	_file_chooser.signal_file_set().connect (sigc::mem_fun (*this, &DirectoryOption::file_set));
+	_file_chooser.signal_selection_changed().connect (sigc::mem_fun (*this, &DirectoryOption::selection_changed));
 	_file_chooser.signal_current_folder_changed().connect (sigc::mem_fun (*this, &DirectoryOption::current_folder_set));
 }
 
@@ -433,23 +492,26 @@ DirectoryOption::DirectoryOption (string const & i, string const & n, sigc::slot
 void
 DirectoryOption::set_state_from_config ()
 {
-	_file_chooser.set_current_folder (_get ());
+	_file_chooser.set_current_folder (poor_mans_glob(_get ()));
 }
 
 void
 DirectoryOption::add_to_page (OptionEditorPage* p)
 {
-	add_widgets_to_page (p, manage (new Label (_name)), &_file_chooser);
+	Gtk::Label *label = manage (new Label (_name));
+	label->set_alignment (0, 0.5);
+	label->set_name (X_("OptionsLabel"));
+	add_widgets_to_page (p, label, &_file_chooser);
 }
 
 void
-DirectoryOption::file_set ()
+DirectoryOption::selection_changed ()
 {
-	_set (_file_chooser.get_filename ());
+	_set (poor_mans_glob(_file_chooser.get_filename ()));
 }
 
 void
 DirectoryOption::current_folder_set ()
 {
-	_set (_file_chooser.get_current_folder ());
+	_set (poor_mans_glob(_file_chooser.get_current_folder ()));
 }

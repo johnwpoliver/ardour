@@ -50,12 +50,11 @@ private:
 	Gtk::CheckButton _route_active;
 	Gtk::CheckButton _share_color;
 	Gtk::CheckButton _share_monitoring;
-	Gtk::Button* _ok;
 	Gtk::ColorButton _color;
 
 	void gain_toggled ();
 	void update ();
-	bool unique_name () const;
+	bool unique_name (std::string const name) const;
 };
 
 

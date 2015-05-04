@@ -179,16 +179,21 @@ PortExportChannelSelector::ChannelTreeView::ChannelTreeView (uint32_t max_channe
 
 	/* Add column with toggle and text */
 
-	append_column_editable (_("Bus or Track"), route_cols.selected);
+	append_column_editable (_("Export"), route_cols.selected);
 
 	Gtk::CellRendererText* text_renderer = Gtk::manage (new Gtk::CellRendererText);
 	text_renderer->property_editable() = false;
+	text_renderer->set_alignment (0.0, 0.5);
 
-	Gtk::TreeView::Column* column = get_column (0);
+	Gtk::TreeView::Column* column = Gtk::manage (new Gtk::TreeView::Column);
+	column->set_title (_("Bus or Track"));
 	column->pack_start (*text_renderer);
+	column->set_expand (true);
 	column->add_attribute (text_renderer->property_text(), route_cols.name);
+	append_column  (*column);
 
 	Gtk::CellRendererToggle *toggle = dynamic_cast<Gtk::CellRendererToggle *>(get_column_cell_renderer (0));
+	toggle->set_alignment (0.0, 0.5);
 	toggle->signal_toggled().connect (sigc::mem_fun (*this, &PortExportChannelSelector::ChannelTreeView::update_toggle_selection));
 
 	static_columns = get_columns().size();
@@ -315,6 +320,7 @@ PortExportChannelSelector::ChannelTreeView::set_channel_count (uint32_t channels
 
 		Gtk::CellRendererCombo* combo_renderer = Gtk::manage (new Gtk::CellRendererCombo);
 		combo_renderer->property_text_column() = 2;
+		combo_renderer->property_has_entry() = false;
 		column->pack_start (*combo_renderer);
 
 		append_column (*column);
@@ -458,15 +464,15 @@ RegionExportChannelSelector::RegionExportChannelSelector (ARDOUR::Session * _ses
 
 	raw_button.set_label (string_compose (_("Region contents without fades nor region gain (channels: %1)"), region_chans));
 	raw_button.signal_toggled ().connect (sigc::mem_fun (*this, &RegionExportChannelSelector::handle_selection));
-	vbox.pack_start (raw_button);
+	vbox.pack_start (raw_button, false, false);
 
 	fades_button.set_label (string_compose (_("Region contents with fades and region gain (channels: %1)"), region_chans));
 	fades_button.signal_toggled ().connect (sigc::mem_fun (*this, &RegionExportChannelSelector::handle_selection));
-	vbox.pack_start (fades_button);
+	vbox.pack_start (fades_button, false, false);
 
 	processed_button.set_label (string_compose (_("Track output (channels: %1)"), track_chans));
 	processed_button.signal_toggled ().connect (sigc::mem_fun (*this, &RegionExportChannelSelector::handle_selection));
-	vbox.pack_start (processed_button);
+	vbox.pack_start (processed_button, false, false);
 
 	sync_with_manager();
 	vbox.show_all_children ();
@@ -541,7 +547,7 @@ TrackExportChannelSelector::TrackExportChannelSelector (ARDOUR::Session * sessio
 	// Options
 	options_box.pack_start(region_contents_button);
 	options_box.pack_start(track_output_button);
-	main_layout.pack_start(options_box);
+	main_layout.pack_start(options_box, false, false);
 
 	// Track scroller
 	track_scroller.add (track_view);
@@ -551,18 +557,25 @@ TrackExportChannelSelector::TrackExportChannelSelector (ARDOUR::Session * sessio
 
 	// Track list
 	track_list = Gtk::ListStore::create (track_cols);
+	track_list->set_sort_column (track_cols.order_key, Gtk::SORT_ASCENDING);
 	track_view.set_model (track_list);
 	track_view.set_headers_visible (true);
 
-	track_view.append_column_editable (_("Track"), track_cols.selected);
+	track_view.append_column_editable (_("Export"), track_cols.selected);
 	Gtk::CellRendererToggle *toggle = dynamic_cast<Gtk::CellRendererToggle *>(track_view.get_column_cell_renderer (0));
+	toggle->set_alignment (0.0, 0.5);
+
 	toggle->signal_toggled().connect (sigc::hide (sigc::mem_fun (*this, &TrackExportChannelSelector::update_config)));
 
 	Gtk::CellRendererText* text_renderer = Gtk::manage (new Gtk::CellRendererText);
 	text_renderer->property_editable() = false;
+	text_renderer->set_alignment (0.0, 0.5);
 
-	Gtk::TreeView::Column* column = track_view.get_column (0);
-	column->pack_start (*text_renderer);
+	Gtk::TreeView::Column* column = Gtk::manage (new Gtk::TreeView::Column);
+	column->set_title (_("Track name"));
+
+	track_view.append_column  (*column);
+	column->pack_start (*text_renderer, false);
 	column->add_attribute (text_renderer->property_text(), track_cols.label);
 
 	fill_list();
@@ -609,6 +622,7 @@ TrackExportChannelSelector::add_track (boost::shared_ptr<Route> route)
 	row[track_cols.selected] = true;
 	row[track_cols.label] = route->name();
 	row[track_cols.route] = route;
+	row[track_cols.order_key] = route->order_key();
 }
 
 void

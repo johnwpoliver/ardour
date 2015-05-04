@@ -36,7 +36,7 @@ class Session;
 class AudioSource;
 class Playlist;
 
-class SourceFactory {
+class LIBARDOUR_API SourceFactory {
   public:
 	static void init ();
 
@@ -56,6 +56,9 @@ class SourceFactory {
 		 const std::string& path, 
 		 bool destructive, framecnt_t rate, bool announce = true, bool async = false);
 
+
+	static boost::shared_ptr<Source> createForRecovery
+		(DataType type, Session&, const std::string& path, int chn);
 
 	static boost::shared_ptr<Source> createFromPlaylist
 		(DataType type, Session& s, boost::shared_ptr<Playlist> p, const PBD::ID& orig, const std::string& name,

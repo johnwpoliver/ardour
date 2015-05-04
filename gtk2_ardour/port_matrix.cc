@@ -43,6 +43,7 @@
 using namespace std;
 using namespace Gtk;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 
 /** PortMatrix constructor.
  *  @param session Our session.
@@ -151,13 +152,13 @@ PortMatrix::init ()
 	_session->RouteAdded.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::routes_changed, this), gui_context());
 
 	/* and also bundles */
-	_session->BundleAdded.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::setup_global_ports, this), gui_context());
+	_session->BundleAddedOrRemoved.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::setup_global_ports, this), gui_context());
 
 	/* and also ports */
 	_session->engine().PortRegisteredOrUnregistered.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::setup_global_ports, this), gui_context());
 
 	/* watch for route order keys changing, which changes the order of things in our global ports list(s) */
-	Route::SyncOrderKeys.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::setup_global_ports_proxy, this, _1), gui_context());
+	Route::SyncOrderKeys.connect (_session_connections, invalidator (*this), boost::bind (&PortMatrix::setup_global_ports_proxy, this), gui_context());
 
 	/* Part 3: other stuff */
 
@@ -180,6 +181,7 @@ PortMatrix::reconnect_to_routes ()
 	boost::shared_ptr<RouteList> routes = _session->get_routes ();
 	for (RouteList::iterator i = routes->begin(); i != routes->end(); ++i) {
 		(*i)->processors_changed.connect (_route_connections, invalidator (*this), boost::bind (&PortMatrix::route_processors_changed, this, _1), gui_context());
+		(*i)->DropReferences.connect (_route_connections, invalidator (*this), boost::bind (&PortMatrix::routes_changed, this), gui_context());
 	}
 }
 
@@ -198,6 +200,7 @@ PortMatrix::route_processors_changed (RouteProcessorChange c)
 void
 PortMatrix::routes_changed ()
 {
+	if (!_session) return;
 	reconnect_to_routes ();
 	setup_global_ports ();
 }
@@ -206,6 +209,11 @@ PortMatrix::routes_changed ()
 void
 PortMatrix::setup ()
 {
+	if (!_session) {
+		_route_connections.drop_connections ();
+		return; // session went away
+	}
+
 	/* this needs to be done first, as the visible_ports() method uses the
 	   notebook state to decide which ports are being shown */
 
@@ -240,17 +248,26 @@ PortMatrix::setup_scrollbars ()
 {
 	Adjustment* a = _hscroll.get_adjustment ();
 	a->set_lower (0);
-	a->set_upper (_body->full_scroll_width());
 	a->set_page_size (_body->alloc_scroll_width());
 	a->set_step_increment (32);
 	a->set_page_increment (128);
 
+	/* Set the adjustment to zero if the size has changed.*/
+	if (a->get_upper() != _body->full_scroll_width()) {
+		a->set_upper (_body->full_scroll_width());
+		a->set_value (0);
+	}
+
 	a = _vscroll.get_adjustment ();
 	a->set_lower (0);
-	a->set_upper (_body->full_scroll_height());
 	a->set_page_size (_body->alloc_scroll_height());
 	a->set_step_increment (32);
 	a->set_page_increment (128);
+
+	if (a->get_upper() != _body->full_scroll_height()) {
+		a->set_upper (_body->full_scroll_height());
+		a->set_value (0);
+	}
 }
 
 /** Disassociate all of our ports from each other */
@@ -328,6 +345,13 @@ PortMatrix::select_arrangement ()
 		_vbox.pack_end (_vnotebook, false, false);
 		_vbox.pack_end (_vspacer, true, true);
 
+#define REMOVE_FROM_GTK_PARENT(WGT) if ((WGT).get_parent()) { (WGT).get_parent()->remove(WGT);}
+		REMOVE_FROM_GTK_PARENT(*_body)
+		REMOVE_FROM_GTK_PARENT(_vscroll)
+		REMOVE_FROM_GTK_PARENT(_hscroll)
+		REMOVE_FROM_GTK_PARENT(_vbox)
+		REMOVE_FROM_GTK_PARENT(_hbox)
+
 		attach (*_body, 2, 3, 1, 2, FILL | EXPAND, FILL | EXPAND);
 		attach (_vscroll, 3, 4, 1, 2, SHRINK);
 		attach (_hscroll, 2, 3, 3, 4, FILL | EXPAND, SHRINK);
@@ -346,6 +370,12 @@ PortMatrix::select_arrangement ()
 		_vbox.pack_end (_vspacer, true, true);
 		_vbox.pack_end (_vnotebook, false, false);
 		_vbox.pack_end (_vlabel, false, false);
+
+		REMOVE_FROM_GTK_PARENT(*_body)
+		REMOVE_FROM_GTK_PARENT(_vscroll)
+		REMOVE_FROM_GTK_PARENT(_hscroll)
+		REMOVE_FROM_GTK_PARENT(_vbox)
+		REMOVE_FROM_GTK_PARENT(_hbox)
 
 		attach (*_body, 1, 2, 2, 3, FILL | EXPAND, FILL | EXPAND);
 		attach (_vscroll, 3, 4, 2, 3, SHRINK);
@@ -506,7 +536,7 @@ PortMatrix::popup_menu (BundleChannel column, BundleChannel row, uint32_t t)
 	items.push_back (MenuElem (_("Rescan"), sigc::mem_fun (*this, &PortMatrix::setup_all_ports)));
 
 	items.push_back (CheckMenuElem (_("Show individual ports"), sigc::mem_fun (*this, &PortMatrix::toggle_show_only_bundles)));
-	CheckMenuItem* i = dynamic_cast<CheckMenuItem*> (&items.back());
+	Gtk::CheckMenuItem* i = dynamic_cast<Gtk::CheckMenuItem*> (&items.back());
 	_inhibit_toggle_show_only_bundles = true;
 	i->set_active (!_show_only_bundles);
 	_inhibit_toggle_show_only_bundles = false;
@@ -588,6 +618,7 @@ PortMatrix::disassociate_all_on_channel (boost::weak_ptr<Bundle> bundle, uint32_
 void
 PortMatrix::setup_global_ports ()
 {
+	if (!_session || _session->deletion_in_progress()) return;
 	ENSURE_GUI_THREAD (*this, &PortMatrix::setup_global_ports)
 
 	for (int i = 0; i < 2; ++i) {
@@ -598,15 +629,13 @@ PortMatrix::setup_global_ports ()
 }
 
 void
-PortMatrix::setup_global_ports_proxy (RouteSortOrderKey sk)
+PortMatrix::setup_global_ports_proxy ()
 {
-	if (sk == EditorSort) {
-		/* Avoid a deadlock by calling this in an idle handler: see IOSelector::io_changed_proxy
-		   for a discussion.
-		*/
+	/* Avoid a deadlock by calling this in an idle handler: see IOSelector::io_changed_proxy
+	   for a discussion.
+	*/
 		
-		Glib::signal_idle().connect_once (sigc::mem_fun (*this, &PortMatrix::setup_global_ports));
-	}
+	Glib::signal_idle().connect_once (sigc::mem_fun (*this, &PortMatrix::setup_global_ports));
 }
 
 void
@@ -688,7 +717,7 @@ PortMatrix::io_from_bundle (boost::shared_ptr<Bundle> b) const
 bool
 PortMatrix::can_add_channels (boost::shared_ptr<Bundle> b) const
 {
-	return io_from_bundle (b);
+	return io_from_bundle (b) != 0;
 }
 
 void
@@ -711,7 +740,7 @@ PortMatrix::add_channel (boost::shared_ptr<Bundle> b, DataType t)
 bool
 PortMatrix::can_remove_channels (boost::shared_ptr<Bundle> b) const
 {
-	return io_from_bundle (b);
+	return io_from_bundle (b) != 0;
 }
 
 void
@@ -725,7 +754,7 @@ PortMatrix::remove_channel (ARDOUR::BundleChannel b)
 			int const r = io->remove_port (p, this);
 			if (r == -1) {
 				ArdourDialog d (_("Port removal not allowed"));
-				Label l (_("This port cannot be removed, as the first plugin in the track or buss cannot accept the new number of inputs."));
+				Label l (_("This port cannot be removed.\nEither the first plugin in the track or buss cannot accept\nthe new number of inputs or the last plugin has more outputs."));
 				d.get_vbox()->pack_start (l);
 				d.add_button (Stock::OK, RESPONSE_ACCEPT);
 				d.set_modal (true);
@@ -1118,7 +1147,7 @@ PortMatrix::get_association (PortMatrixNode node) const
 
 	}
 
-	/* NOTREACHED */
+	abort(); /* NOTREACHED */
 	return PortMatrixNode::NOT_ASSOCIATED;
 }
 

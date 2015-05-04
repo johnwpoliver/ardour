@@ -19,7 +19,11 @@
 
 #include <cstring>
 #include <stdint.h>
+#ifdef COMPILER_MSVC
+#include <io.h>      // Microsoft's nearest equivalent to <unistd.h>
+#else
 #include <unistd.h>
+#endif
 #include <fcntl.h>
 #include <cerrno>
 #include <cstring>
@@ -33,6 +37,8 @@
 
 #include "i18n.h"
 
+#include "pbd/debug.h"
+
 using namespace std;
 using namespace PBD;
 using namespace Glib;
@@ -42,13 +48,13 @@ BaseUI::RequestType BaseUI::CallSlot = BaseUI::new_request_type();
 BaseUI::RequestType BaseUI::Quit = BaseUI::new_request_type();
 
 BaseUI::BaseUI (const string& str)
-	: request_channel (true)
+	: m_context(MainContext::get_default())
 	, run_loop_thread (0)
 	, _name (str)
+	, request_channel (true)
 {
 	base_ui_instance = this;
-
-	request_channel.ios()->connect (sigc::mem_fun (*this, &BaseUI::request_handler));
+	request_channel.set_receive_handler (sigc::mem_fun (*this, &BaseUI::request_handler));
 
 	/* derived class must set _ok */
 }
@@ -73,7 +79,7 @@ BaseUI::new_request_type ()
 void
 BaseUI::main_thread ()
 {
-	DEBUG_TRACE (DEBUG::EventLoop, string_compose ("%1: event loop running in thread %2\n", name(), pthread_self()));
+	DEBUG_TRACE (DEBUG::EventLoop, string_compose ("%1: event loop running in thread %2\n", name(), pthread_name()));
 	set_event_loop_for_thread (this);
 	thread_init ();
 	_main_loop->get_context()->signal_idle().connect (sigc::mem_fun (*this, &BaseUI::signal_running));
@@ -95,11 +101,9 @@ BaseUI::run ()
 	/* to be called by UI's that need/want their own distinct, self-created event loop thread.
 	*/
 
-	_main_loop = MainLoop::create (MainContext::create());
-	request_channel.ios()->attach (_main_loop->get_context());
-
-	/* glibmm hack - drop the refptr to the IOSource now before it can hurt */
-	request_channel.drop_ios ();
+	m_context = MainContext::create();
+	_main_loop = MainLoop::create (m_context);
+	attach_request_source ();
 
 	Glib::Threads::Mutex::Lock lm (_run_lock);
 	run_loop_thread = Glib::Threads::Thread::create (mem_fun (*this, &BaseUI::main_thread));
@@ -133,9 +137,26 @@ BaseUI::request_handler (Glib::IOCondition ioc)
 
 		/* handle requests */
 
+		DEBUG_TRACE (DEBUG::EventLoop, "BaseUI::request_handler\n");
 		handle_ui_requests ();
 	}
 
 	return true;
 }
-	
+
+void
+BaseUI::signal_new_request ()
+{
+	DEBUG_TRACE (DEBUG::EventLoop, "BaseUI::signal_new_request\n");
+	request_channel.wakeup ();
+}
+
+/**
+ * This method relies on the caller having already set m_context
+ */
+void
+BaseUI::attach_request_source ()
+{
+	DEBUG_TRACE (DEBUG::EventLoop, "BaseUI::attach_request_source\n");
+	request_channel.attach (m_context);
+}

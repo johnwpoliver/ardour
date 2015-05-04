@@ -40,17 +40,25 @@ using namespace std;
 
 PBD::Signal1<void, pframes_t> InternalSend::CycleStart;
 
-InternalSend::InternalSend (Session& s, boost::shared_ptr<Pannable> p, boost::shared_ptr<MuteMaster> mm, boost::shared_ptr<Route> sendto, Delivery::Role role)
-	: Send (s, p, mm, role)
+InternalSend::InternalSend (Session& s,
+		boost::shared_ptr<Pannable> p,
+		boost::shared_ptr<MuteMaster> mm,
+		boost::shared_ptr<Route> sendfrom,
+		boost::shared_ptr<Route> sendto,
+		Delivery::Role role,
+		bool ignore_bitslot)
+	: Send (s, p, mm, role, ignore_bitslot)
+	, _send_from (sendfrom)
 {
-        if (sendto) {
-                if (use_target (sendto)) {
-                        throw failed_constructor();
-                }
-        }
+	if (sendto) {
+		if (use_target (sendto)) {
+			throw failed_constructor();
+		}
+	}
 
 	init_gain ();
 
+	_send_from->DropReferences.connect_same_thread (source_connection, boost::bind (&InternalSend::send_from_going_away, this));
 	CycleStart.connect_same_thread (*this, boost::bind (&InternalSend::cycle_start, this, _1));
 }
 
@@ -66,10 +74,10 @@ InternalSend::init_gain ()
 {
 	if (_role == Listen) {
 		/* send to monitor bus is always at unity */
-		_amp->set_gain (1.0, this);
+		_amp->set_gain (GAIN_COEFF_UNITY, this);
 	} else {
 		/* aux sends start at -inf dB */
-		_amp->set_gain (0, this);
+		_amp->set_gain (GAIN_COEFF_ZERO, this);
 	}
 }
 
@@ -95,9 +103,25 @@ InternalSend::use_target (boost::shared_ptr<Route> sendto)
         target_connections.drop_connections ();
 
         _send_to->DropReferences.connect_same_thread (target_connections, boost::bind (&InternalSend::send_to_going_away, this));
-        _send_to->PropertyChanged.connect_same_thread (target_connections, boost::bind (&InternalSend::send_to_property_changed, this, _1));;
+        _send_to->PropertyChanged.connect_same_thread (target_connections, boost::bind (&InternalSend::send_to_property_changed, this, _1));
+        _send_to->io_changed.connect_same_thread (target_connections, boost::bind (&InternalSend::target_io_changed, this));
 
         return 0;
+}
+
+void
+InternalSend::target_io_changed ()
+{
+	assert (_send_to);
+	mixbufs.ensure_buffers (_send_to->internal_return()->input_streams(), _session.get_block_size());
+	mixbufs.set_count (_send_to->internal_return()->input_streams());
+	reset_panner();
+}
+
+void
+InternalSend::send_from_going_away ()
+{
+	_send_from.reset();
 }
 
 void
@@ -119,7 +143,7 @@ InternalSend::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame
 	// we have to copy the input, because we may alter the buffers with the amp
 	// in-place, which a send must never do.
 
-	if (_panshell && !_panshell->bypassed()) {
+	if (_panshell && !_panshell->bypassed() && role() != Listen) {
 		_panshell->run (bufs, mixbufs, start_frame, end_frame, nframes);
 	} else {
 		if (role() == Listen) {
@@ -128,7 +152,19 @@ InternalSend::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame
 			uint32_t const bufs_audio = bufs.count().get (DataType::AUDIO);
 			uint32_t const mixbufs_audio = mixbufs.count().get (DataType::AUDIO);
 			
-			assert (mixbufs.available().get (DataType::AUDIO) >= bufs_audio);
+			/* monitor-section has same number of channels as master-bus (on creation).
+			 *
+			 * There is no clear answer what should happen when trying to PFL or AFL
+			 * a track that has more channels (bufs_audio from source-track is
+			 * larger than mixbufs).
+			 *
+			 * There are two options:
+			 *  1: discard additional channels    (current)
+			 * OR
+			 *  2: require the monitor-section to have at least as many channels
+			 * as the largest count of any route
+			 */
+			//assert (mixbufs.available().get (DataType::AUDIO) >= bufs_audio);
 
 			/* Copy bufs into mixbufs, going round bufs more than once if necessary
 			   to ensure that every mixbuf gets some data.
@@ -158,19 +194,18 @@ InternalSend::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame
 
 		/* target gain has changed */
 
-		Amp::apply_gain (mixbufs, nframes, _current_gain, tgain);
-		_current_gain = tgain;
+		_current_gain = Amp::apply_gain (mixbufs, _session.nominal_frame_rate(), nframes, _current_gain, tgain);
 
-	} else if (tgain == 0.0) {
+	} else if (tgain == GAIN_COEFF_ZERO) {
 
 		/* we were quiet last time, and we're still supposed to be quiet.
 		*/
 
 		_meter->reset ();
-		Amp::apply_simple_gain (mixbufs, nframes, 0.0);
+		Amp::apply_simple_gain (mixbufs, nframes, GAIN_COEFF_ZERO);
 		goto out;
 
-	} else if (tgain != 1.0) {
+	} else if (tgain != GAIN_COEFF_UNITY) {
 
 		/* target gain has not changed, but is not zero or unity */
 		Amp::apply_simple_gain (mixbufs, nframes, tgain);
@@ -180,10 +215,12 @@ InternalSend::run (BufferSet& bufs, framepos_t start_frame, framepos_t end_frame
 	_amp->setup_gain_automation (start_frame, end_frame, nframes);
 	_amp->run (mixbufs, start_frame, end_frame, nframes, true);
 
+	_delayline->run (mixbufs, start_frame, end_frame, nframes, true);
+
 	/* consider metering */
 
 	if (_metering) {
-		if (_amp->gain_control()->get_value() == 0) {
+		if (_amp->gain_control()->get_value() == GAIN_COEFF_ZERO) {
 			_meter->reset();
 		} else {
 			_meter->run (mixbufs, start_frame, end_frame, nframes, true);
@@ -284,7 +321,7 @@ InternalSend::connect_when_legal ()
 }
 
 bool
-InternalSend::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
+InternalSend::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 {
 	out = in;
 	return true;
@@ -310,7 +347,7 @@ bool
 InternalSend::configure_io (ChanCount in, ChanCount out)
 {
 	bool ret = Send::configure_io (in, out);
-	set_block_size (_session.engine().frames_per_cycle());
+	set_block_size (_session.engine().samples_per_cycle());
 	return ret;
 }
 

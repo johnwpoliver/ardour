@@ -21,7 +21,6 @@
 #include "pbd/error.h"
 #include <glibmm/threads.h>
 
-#include <midi++/manager.h>
 #include <midi++/mmc.h>
 
 #include "ardour/audioengine.h"
@@ -93,8 +92,8 @@ Session::pre_export ()
 	
 	/* disable MMC output early */
 
-	_pre_export_mmc_enabled = MIDI::Manager::instance()->mmc()->send_enabled ();
-	MIDI::Manager::instance()->mmc()->enable_send (false);
+	_pre_export_mmc_enabled = _mmc->send_enabled ();
+	_mmc->enable_send (false);
 
 	return 0;
 }
@@ -193,7 +192,7 @@ Session::process_export_fw (pframes_t nframes)
 {
 	if (!_export_started) {
 		_export_started = true;
-		set_transport_speed (1.0, false);
+		set_transport_speed (1.0, 0, false);
 		butler_transport_work ();
 		g_atomic_int_set (&_butler->should_do_transport_work, 0);
 		post_transport ();
@@ -237,7 +236,7 @@ Session::finalize_audio_export ()
 
 	export_freewheel_connection.disconnect();
 	
-	MIDI::Manager::instance()->mmc()->enable_send (_pre_export_mmc_enabled);
+	_mmc->enable_send (_pre_export_mmc_enabled);
 
 	/* maybe write CUE/TOC */
 

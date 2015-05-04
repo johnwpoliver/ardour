@@ -198,6 +198,8 @@ class Selection : public sigc::trackable, public PBD::ScopedConnectionList
  * The Track selection isn't affected when ranges or objects are added.
  */
 
+	void clear_all() { clear_time(); clear_tracks(); clear_objects(); }
+
 	void clear_time();  //clears any time selection  ( i.e. Range )
 	void clear_tracks ();  //clears the track header selections
 	void clear_objects();  //clears the items listed below
@@ -218,6 +220,10 @@ class Selection : public sigc::trackable, public PBD::ScopedConnectionList
 
 	XMLNode& get_state () const;
 	int set_state (XMLNode const &, int);
+
+	PBD::Signal0<void> ClearMidiNoteSelection;
+
+	std::list<std::pair<PBD::ID const, std::list<boost::shared_ptr<Evoral::Note<Evoral::Beats> > > > > pending_midi_note_selection;
 
   private:
 	PublicEditor const * editor;

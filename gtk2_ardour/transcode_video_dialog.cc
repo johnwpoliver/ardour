@@ -28,7 +28,8 @@
 #include <fcntl.h>
 
 #include <sigc++/bind.h>
-#include <libgen.h>
+
+#include <glib/gstdio.h>
 
 #include "pbd/error.h"
 #include "pbd/convert.h"
@@ -40,7 +41,6 @@
 #include "ardour_ui.h"
 #include "gui_thread.h"
 
-#include "utils.h"
 #include "opts.h"
 #include "transcode_video_dialog.h"
 #include "utils_videotl.h"
@@ -50,6 +50,7 @@ using namespace Gtk;
 using namespace std;
 using namespace PBD;
 using namespace ARDOUR;
+using namespace VideoUtils;
 
 TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 	: ArdourDialog (_("Transcode/Import Video File "))
@@ -66,7 +67,7 @@ TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 	, bitrate_adjustment (2000, 500, 10000, 10, 100, 0)
 	, bitrate_spinner (bitrate_adjustment)
 #if 1 /* tentative debug mode */
-	, debug_checkbox (_("Debug Mode: Print ffmpeg Command and Output to stdout."))
+	, debug_checkbox (_("Debug Mode: Print ffmpeg command and output to stdout."))
 #endif
 {
 	set_session (s);
@@ -88,7 +89,7 @@ TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 
 	int w = 0, h = 0;
 	m_aspect = 4.0/3.0;
-	AudioStreams as; as.clear();
+	TranscodeFfmpeg::FFAudioStreams as; as.clear();
 
 	path_hbox->pack_start (path_label, false, false, 3);
 	path_hbox->pack_start (path_entry, true, true, 3);
@@ -109,7 +110,7 @@ TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 
 	bool ffok = false;
 	if (!transcoder->ffexec_ok()) {
-		l = manage (new Label (_("No ffprobe or ffmpeg executables could be found on this system. Video Import is not possible until you install those tools. See the Log widow for more information."), Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER, false));
+		l = manage (new Label (_("No ffprobe or ffmpeg executables could be found on this system. Video Import is not possible until you install those tools. See the Log window for more information."), Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER, false));
 		l->set_line_wrap();
 		options_box->pack_start (*l, false, true, 4);
 		aspect_checkbox.set_sensitive(false);
@@ -177,15 +178,17 @@ TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 	options_box->pack_start (*l, false, true, 4);
 
 	video_combo.set_name ("PaddedButton");
-	video_combo.append_text(_("Do Not Import Video"));
-	video_combo.append_text(_("Reference From Current Location"));
+	video_combo.append_text(_("Reference From Current Location (Previously Transcoded Files Only)"));
 	if (ffok)  {
 		video_combo.append_text(_("Import/Transcode Video to Session"));
-		video_combo.set_active(2);
-	} else {
 		video_combo.set_active(1);
+	} else {
+		video_combo.set_active(0);
 		video_combo.set_sensitive(false);
 		audio_combo.set_sensitive(false);
+	}
+	if (as.size() > 0) {
+		video_combo.append_text(_("Do Not Import Video (Audio Import Only)"));
 	}
 
 	options_box->pack_start (video_combo, false, false, 4);
@@ -225,9 +228,12 @@ TranscodeVideoDialog::TranscodeVideoDialog (Session* s, std::string infile)
 	t->attach (*l, 0, 1, 2, 3);
 	audio_combo.set_name ("PaddedButton");
 	t->attach (audio_combo, 1, 4, 2, 3);
-	audio_combo.append_text("No audio");
-	if (as.size() > 0) {
-		for (AudioStreams::iterator it = as.begin(); it < as.end(); ++it) {
+	if (as.size() == 0) {
+		audio_combo.append_text(_("No Audio Track Present"));
+		audio_combo.set_sensitive(false);
+	} else {
+		audio_combo.append_text(_("Do Not Extract Audio"));
+		for (TranscodeFfmpeg::FFAudioStreams::iterator it = as.begin(); it < as.end(); ++it) {
 			audio_combo.append_text((*it).name);
 		}
 	}
@@ -301,9 +307,9 @@ void
 TranscodeVideoDialog::finished ()
 {
 	if (aborted) {
-		unlink(path_entry.get_text().c_str());
+		::g_unlink(path_entry.get_text().c_str());
 		if (!audiofile.empty()) {
-			unlink(audiofile.c_str());
+			::g_unlink(audiofile.c_str());
 		}
 		Gtk::Dialog::response(RESPONSE_CANCEL);
 	} else {
@@ -364,7 +370,7 @@ TranscodeVideoDialog::dialog_progress_mode ()
 void
 TranscodeVideoDialog::launch_transcode ()
 {
-	if (video_combo.get_active_row_number() != 2) {
+	if (video_combo.get_active_row_number() != 1) {
 		launch_audioonly();
 		return;
 	}
@@ -388,7 +394,7 @@ TranscodeVideoDialog::launch_transcode ()
 	if (scale_combo.get_active_row_number() == 0 ) {
 		scale_width =0;
 	} else {
-	  scale_width = atoi(scale_combo.get_active_text().c_str());
+	  scale_width = atoi(scale_combo.get_active_text());
 	}
 	if (!aspect_checkbox.get_active()) {
 		scale_height = 0;
@@ -413,8 +419,8 @@ TranscodeVideoDialog::launch_transcode ()
 void
 TranscodeVideoDialog::video_combo_changed ()
 {
-	int i = video_combo.get_active_row_number();
-	if (i != 2) {
+	const int i = video_combo.get_active_row_number();
+	if (i != 1) {
 		scale_combo.set_sensitive(false);
 		aspect_checkbox.set_sensitive(false);
 		height_spinner.set_sensitive(false);
@@ -427,12 +433,19 @@ TranscodeVideoDialog::video_combo_changed ()
 		bitrate_checkbox.set_sensitive(true);
 		bitrate_spinner.set_sensitive(true);
 	}
+	if (i == 2 && audio_combo.get_active_row_number() == 0) {
+		audio_combo.set_active(1);
+	}
 }
 
 void
 TranscodeVideoDialog::audio_combo_changed ()
 {
-	;
+	if (video_combo.get_active_row_number() == 2
+			&& audio_combo.get_active_row_number() == 0)
+	{
+		audio_combo.set_active(1);
+	}
 }
 
 void
@@ -443,7 +456,7 @@ TranscodeVideoDialog::scale_combo_changed ()
 		if (scale_combo.get_active_row_number() == 0 ) {
 			h = transcoder->get_height();
 		} else {
-			h = floor(atof(scale_combo.get_active_text().c_str()) / m_aspect);
+			h = floor(atof(scale_combo.get_active_text()) / m_aspect);
 		}
 		height_spinner.set_value(h);
 	}
@@ -477,7 +490,7 @@ TranscodeVideoDialog::update_bitrate ()
 	if (scale_combo.get_active_row_number() == 0 ) {
 		br *= transcoder->get_width();
 	} else {
-		br *= atof(scale_combo.get_active_text().c_str());
+		br *= atof(scale_combo.get_active_text());
 	}
 	if (br != 0) {
 		bitrate_spinner.set_value(floor(br/10000.0)*10);

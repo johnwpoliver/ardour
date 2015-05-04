@@ -40,7 +40,11 @@
 #include <math.h>
 #include <errno.h>
 #include <ctype.h>
+#ifdef PLATFORM_WINDOWS
+#include <winsock2.h>
+#else
 #include <arpa/inet.h>
+#endif
 #include "smf.h"
 #include "smf_private.h"
 
@@ -79,7 +83,6 @@ next_chunk(smf_t *smf)
 
 	if (smf->next_chunk_offset > smf->file_buffer_length) {
 		g_critical("SMF error: malformed chunk; truncated file?");
-		return (NULL);
 	}
 
 	return (chunk);
@@ -119,7 +122,7 @@ parse_mthd_header(smf_t *smf)
 		return (-1);
 	}
 
-	tmp_mthd = smf->file_buffer;
+	tmp_mthd = (struct chunk_header_struct*)smf->file_buffer;
 
 	if (!chunk_signature_matches(tmp_mthd, "MThd")) {
 		g_critical("SMF error: MThd signature not found, is that a MIDI file?");
@@ -278,7 +281,11 @@ expected_sysex_length(const unsigned char status, const unsigned char *second_by
 	uint32_t sysex_length = 0;
 	uint32_t len = 0;
 
+#ifndef NDEBUG
+	(void) status;
+#else
 	assert(status == 0xF0);
+#endif
 
 	if (buffer_length < 3) {
 		g_critical("SMF error: end of buffer in expected_sysex_length().");
@@ -388,7 +395,10 @@ extract_sysex_event(const unsigned char *buf, const size_t buffer_length, smf_ev
 
 	status = *buf;
 
-	assert(is_sysex_byte(status));
+	if (!(is_sysex_byte(status))) {
+		g_critical("Corrupt sysex status byte in extract_sysex_event().");
+		return (-6);
+	}
 
 	c++;
 
@@ -405,7 +415,7 @@ extract_sysex_event(const unsigned char *buf, const size_t buffer_length, smf_ev
 	}
 
 	event->midi_buffer_length = message_length;
-	event->midi_buffer = malloc(event->midi_buffer_length);
+	event->midi_buffer = (uint8_t*)malloc(event->midi_buffer_length);
 	if (event->midi_buffer == NULL) {
 		g_critical("Cannot allocate memory in extract_sysex_event(): %s", strerror(errno));
 		return (-4);
@@ -431,7 +441,10 @@ extract_escaped_event(const unsigned char *buf, const size_t buffer_length, smf_
 
 	status = *buf;
 
-	assert(is_escape_byte(status));
+	if (!(is_escape_byte(status))) {
+		g_critical("Corrupt escape status byte in extract_escaped_event().");
+		return (-6);
+	}
 
 	c++;
 
@@ -448,7 +461,7 @@ extract_escaped_event(const unsigned char *buf, const size_t buffer_length, smf_
 	}
 
 	event->midi_buffer_length = message_length;
-	event->midi_buffer = malloc(event->midi_buffer_length);
+	event->midi_buffer = (uint8_t*)malloc(event->midi_buffer_length);
 	if (event->midi_buffer == NULL) {
 		g_critical("Cannot allocate memory in extract_escaped_event(): %s", strerror(errno));
 		return (-4);
@@ -518,7 +531,7 @@ extract_midi_event(const unsigned char *buf, const size_t buffer_length, smf_eve
 	}
 
 	event->midi_buffer_length = message_length;
-	event->midi_buffer = malloc(event->midi_buffer_length);
+	event->midi_buffer = (uint8_t*)malloc(event->midi_buffer_length);
 	if (event->midi_buffer == NULL) {
 		g_critical("Cannot allocate memory in extract_midi_event(): %s", strerror(errno));
 		return (-4);
@@ -541,7 +554,7 @@ extract_midi_event(const unsigned char *buf, const size_t buffer_length, smf_eve
 static smf_event_t *
 parse_next_event(smf_track_t *track)
 {
-	uint32_t time = 0;
+	uint32_t etime = 0;
 	uint32_t len;
 	size_t buffer_length;
 	unsigned char *c, *start;
@@ -557,11 +570,17 @@ parse_next_event(smf_track_t *track)
 	assert(track->next_event_offset > 0);
 
 	buffer_length = track->file_buffer_length - track->next_event_offset;
-	assert(buffer_length > 0);
-
-	/* First, extract time offset from previous event. */
-	if (smf_extract_vlq(c, buffer_length, &time, &len))
+	/* if there was no meta-EOT event, buffer_length can be zero. This is
+	   an error in the SMF file, but it shouldn't be treated as fatal.
+	*/
+	if (buffer_length == 0) {
+		g_warning ("SMF warning: expected EOT at end of track, but none found");
 		goto error;
+	}
+	/* First, extract time offset from previous event. */
+	if (smf_extract_vlq(c, buffer_length, &etime, &len)) {
+		goto error;
+	}
 
 	c += len;
 	buffer_length -= len;
@@ -570,15 +589,16 @@ parse_next_event(smf_track_t *track)
 		goto error;
 
 	/* Now, extract the actual event. */
-	if (extract_midi_event(c, buffer_length, event, &len, track->last_status))
+	if (extract_midi_event(c, buffer_length, event, &len, track->last_status)) {
 		goto error;
+	}
 
 	c += len;
 	buffer_length -= len;
 	track->last_status = event->midi_buffer[0];
 	track->next_event_offset += c - start;
 
-	smf_track_add_event_delta_pulses(track, event, time);
+	smf_track_add_event_delta_pulses(track, event, etime);
 
 	return (event);
 
@@ -607,7 +627,7 @@ make_string(const unsigned char *buf, const size_t buffer_length, uint32_t len)
 		len = buffer_length;
 	}
 
-	str = malloc(len + 1);
+	str = (char*)malloc(len + 1);
 	if (str == NULL) {
 		g_critical("Cannot allocate memory in make_string().");
 		return (NULL);
@@ -633,7 +653,7 @@ smf_event_is_textual(const smf_event_t *event)
 	if (event->midi_buffer_length < 4)
 		return (0);
 
-	if (event->midi_buffer[3] < 1 && event->midi_buffer[3] > 9)
+	if (event->midi_buffer[3] < 1 || event->midi_buffer[3] > 9)
 		return (0);
 
 	return (1);
@@ -658,14 +678,14 @@ smf_event_extract_text(const smf_event_t *event)
 		return (NULL);
 	}
 
-	smf_extract_vlq((void *)&(event->midi_buffer[2]), event->midi_buffer_length - 2, &string_length, &length_length);
+	smf_extract_vlq((const unsigned char*)(void *)&(event->midi_buffer[2]), event->midi_buffer_length - 2, &string_length, &length_length);
 
 	if (string_length <= 0) {
 		g_critical("smf_event_extract_text: truncated MIDI message.");
 		return (NULL);
 	}
 
-	return (make_string((void *)(&event->midi_buffer[2] + length_length), event->midi_buffer_length - 2 - length_length, string_length));
+	return (make_string((const unsigned char*)(void *)(&event->midi_buffer[2] + length_length), event->midi_buffer_length - 2 - length_length, string_length));
 }
 
 /**
@@ -772,6 +792,7 @@ static int
 parse_mtrk_chunk(smf_track_t *track)
 {
 	smf_event_t *event;
+	int ret = 0;
 
 	if (parse_mtrk_header(track))
 		return (-1);
@@ -780,10 +801,10 @@ parse_mtrk_chunk(smf_track_t *track)
 		event = parse_next_event(track);
 
 		/* Couldn't parse an event? */
-		if (event == NULL)
-			return (-1);
-
-		assert(smf_event_is_valid(event));
+		if (event == NULL || !smf_event_is_valid(event)) {
+			ret = -1;
+			break;
+		}
 
 		if (event_is_end_of_track(event))
 			break;
@@ -793,7 +814,7 @@ parse_mtrk_chunk(smf_track_t *track)
 	track->file_buffer_length = 0;
 	track->next_event_offset = -1;
 
-	return (0);
+	return (ret);
 }
 
 /**
@@ -855,6 +876,7 @@ smf_t *
 smf_load_from_memory(const void *buffer, const size_t buffer_length)
 {
 	int i;
+	int ret;
 
 	smf_t *smf = smf_new();
 
@@ -872,16 +894,16 @@ smf_load_from_memory(const void *buffer, const size_t buffer_length)
 
 		smf_add_track(smf, track);
 
-		/* Skip unparseable chunks. */
-		if (parse_mtrk_chunk(track)) {
-			g_warning("SMF warning: Cannot load track.");
-			smf_track_delete(track);
-			continue;
-		}
+		ret = parse_mtrk_chunk(track);
 
 		track->file_buffer = NULL;
 		track->file_buffer_length = 0;
 		track->next_event_offset = -1;
+
+		if (ret) {
+			g_warning("SMF warning: Error parsing track, continuing with data loaded so far.");
+			break;
+		}
 	}
 
 	if (smf->expected_number_of_tracks != smf->number_of_tracks) {

@@ -185,12 +185,12 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 		return;
 	}
 
-	if (!clicked_routeview) {
-		return;
+	RouteGroup* group = NULL;
+	if (clicked_routeview) {
+		group = clicked_routeview->route()->route_group();
 	}
 
 	bool had_tracks = !selection->tracks.empty();
-	RouteGroup* group = clicked_routeview->route()->route_group();
 	RouteGroup& arg (_session->all_route_group());
 
 	switch (op) {
@@ -202,8 +202,9 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 				}
 			} else if (group && group->is_active()) {
 				for (TrackViewList::iterator i = track_views.begin(); i != track_views.end (); ++i) {
-					if ((*i)->route_group() == group)
+					if ((*i)->route_group() == group) {
 						selection->remove(*i);
+					}
 				}
 			} else {
 				selection->remove (clicked_axisview);
@@ -215,8 +216,9 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 				}
 			} else if (group && group->is_active()) {
 				for (TrackViewList::iterator i = track_views.begin(); i != track_views.end (); ++i) {
-					if ( (*i)->route_group() == group)
+					if ((*i)->route_group() == group) {
 						selection->add(*i);
+					}
 				}
 			} else {
 				selection->add (clicked_axisview);
@@ -234,8 +236,9 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 			}
 		} else if (group && group->is_active()) {
 			for (TrackViewList::iterator i  = track_views.begin(); i != track_views.end (); ++i) {
-				if ((*i)->route_group() == group)
+				if ((*i)->route_group() == group) {
 					selection->add(*i);
+				}
 			}
 		} else {
 			selection->add (clicked_axisview);
@@ -253,8 +256,9 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 			}
 		} else if (group && group->is_active()) {
 			for (TrackViewList::iterator i  = track_views.begin(); i != track_views.end (); ++i) {
-				if ((*i)->route_group() == group)
+				if ((*i)->route_group() == group) {
 					selection->add(*i);
+				}
 			}
 		} else {
 			selection->set (clicked_axisview);
@@ -270,6 +274,8 @@ Editor::set_selected_track_as_side_effect (Selection::Operation op)
 void
 Editor::set_selected_track (TimeAxisView& view, Selection::Operation op, bool no_remove)
 {
+	begin_reversible_selection_op (X_("Set Selected Track"));
+
 	switch (op) {
 	case Selection::Toggle:
 		if (selection->selected (&view)) {
@@ -295,6 +301,8 @@ Editor::set_selected_track (TimeAxisView& view, Selection::Operation op, bool no
 		extend_selection_to_track (view);
 		break;
 	}
+
+	commit_reversible_selection_op ();
 }
 
 void
@@ -364,7 +372,7 @@ void
 Editor::get_onscreen_tracks (TrackViewList& tvl)
 {
 	for (TrackViewList::iterator i = track_views.begin(); i != track_views.end(); ++i) {
-		if ((*i)->y_position() < _canvas_height) {
+		if ((*i)->y_position() < _visible_canvas_height) {
 			tvl.push_back (*i);
 		}
 	}
@@ -640,8 +648,14 @@ Editor::set_selected_regionview_from_click (bool press, Selection::Operation op)
 				selection->set (all_equivalent_regions);
 				commit = true;
 			} else {
-				/* no commit necessary: clicked on an already selected region */
-				goto out;
+				/* clicked on an already selected region */
+				if (press)
+					goto out;
+				else {
+					get_equivalent_regions(clicked_regionview, all_equivalent_regions, ARDOUR::Properties::select.property_id);
+					selection->set(all_equivalent_regions);
+					commit = true;
+				}
 			}
 			break;
 
@@ -779,7 +793,7 @@ Editor::set_selected_regionview_from_click (bool press, Selection::Operation op)
 
 					RouteTimeAxisView* closest = 0;
 					int distance = INT_MAX;
-					int key = rtv->route()->order_key (EditorSort);
+					int key = rtv->route()->order_key ();
 
 					for (RegionSelection::iterator x = selection->regions.begin(); x != selection->regions.end(); ++x) {
 
@@ -794,7 +808,7 @@ Editor::set_selected_regionview_from_click (bool press, Selection::Operation op)
 							if (result.second) {
 								/* newly added to already_in_selection */
 
-								int d = artv->route()->order_key (EditorSort);
+								int d = artv->route()->order_key ();
 
 								d -= key;
 
@@ -810,7 +824,7 @@ Editor::set_selected_regionview_from_click (bool press, Selection::Operation op)
 
 						/* now add all tracks between that one and this one */
 
-						int okey = closest->route()->order_key (EditorSort);
+						int okey = closest->route()->order_key ();
 
 						if (okey > key) {
 							swap (okey, key);
@@ -820,7 +834,7 @@ Editor::set_selected_regionview_from_click (bool press, Selection::Operation op)
 							RouteTimeAxisView* artv = dynamic_cast<RouteTimeAxisView*>(*x);
 							if (artv && artv != rtv) {
 
-								int k = artv->route()->order_key (EditorSort);
+								int k = artv->route()->order_key ();
 
 								if (k >= okey && k <= key) {
 
@@ -886,7 +900,7 @@ Editor::set_selected_regionview_from_region_list (boost::shared_ptr<Region> regi
 		return;
 	}
 
-	begin_reversible_command (_("set selected regions"));
+	begin_reversible_selection_op (X_("set selected regions"));
 
 	switch (op) {
 	case Selection::Toggle:
@@ -904,7 +918,7 @@ Editor::set_selected_regionview_from_region_list (boost::shared_ptr<Region> regi
 		break;
 	}
 
-	commit_reversible_command () ;
+	commit_reversible_selection_op () ;
 }
 
 bool
@@ -929,11 +943,11 @@ Editor::set_selected_regionview_from_map_event (GdkEventAny* /*ev*/, StreamView*
 		return true;
 	}
 
-	begin_reversible_command (_("set selected regions"));
+	begin_reversible_selection_op (X_("set selected regions"));
 
 	selection->set (rv);
 
-	commit_reversible_command () ;
+	commit_reversible_selection_op () ;
 
 	return true;
 }
@@ -991,6 +1005,15 @@ Editor::time_selection_changed ()
 		return;
 	}
 
+	/* XXX this is superficially inefficient. Hide the selection in all
+	 * tracks, then show it in all selected tracks.
+	 *
+	 * However, if you investigate what this actually does, it isn't
+	 * anywhere nearly as bad as it may appear. Remember: nothing is
+	 * redrawn or even recomputed during these two loops - that only
+	 * happens when we next render ...
+	 */
+
 	for (TrackViewList::iterator i = track_views.begin(); i != track_views.end(); ++i) {
 		(*i)->hide_selection ();
 	}
@@ -1003,10 +1026,6 @@ Editor::time_selection_changed ()
 		ActionManager::set_sensitive (ActionManager::time_selection_sensitive_actions, false);
 	} else {
 		ActionManager::set_sensitive (ActionManager::time_selection_sensitive_actions, true);
-	}
-
-	if (_session && Config->get_always_play_range() && !_session->transport_rolling() && !selection->time.empty()) {
-		_session->request_locate (selection->time.start());
 	}
 }
 
@@ -1170,6 +1189,8 @@ Editor::sensitize_the_right_region_actions ()
 		editor_menu_actions->get_action("RegionMenuMIDI")->set_sensitive (false);
 		_region_actions->get_action("show-region-list-editor")->set_sensitive (false);
 		_region_actions->get_action("quantize-region")->set_sensitive (false);
+		_region_actions->get_action("legatize-region")->set_sensitive (false);
+		_region_actions->get_action("remove-overlap")->set_sensitive (false);
 		_region_actions->get_action("fork-region")->set_sensitive (false);
 		_region_actions->get_action("insert-patch-change-context")->set_sensitive (false);
 		_region_actions->get_action("insert-patch-change")->set_sensitive (false);
@@ -1335,6 +1356,8 @@ Editor::select_all_in_track (Selection::Operation op)
 		return;
 	}
 
+	begin_reversible_selection_op (X_("Select All in Track"));
+
 	clicked_routeview->get_selectables (0, max_framepos, 0, DBL_MAX, touched);
 
 	switch (op) {
@@ -1351,57 +1374,41 @@ Editor::select_all_in_track (Selection::Operation op)
 		selection->add (touched);
 		break;
 	}
+
+	commit_reversible_selection_op ();
 }
 
-void
+bool
 Editor::select_all_internal_edit (Selection::Operation)
 {
+	bool selected = false;
+
 	for (RegionSelection::iterator i = selection->regions.begin(); i != selection->regions.end(); ++i) {
 		MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(*i);
 		if (mrv) {
 			mrv->select_all_notes ();
+			selected = true;
 		}
 	}
+
+	MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(entered_regionview);
+	if (mrv) {
+		mrv->select_all_notes ();
+		selected = true;
+	}
+
+	return selected;
 }
 
 void
-Editor::select_all (Selection::Operation op)
+Editor::select_all_objects (Selection::Operation op)
 {
 	list<Selectable *> touched;
 
-	TrackViewList ts;
+	TrackViewList ts  = track_views;
 
-	if (selection->tracks.empty()) {
-		if (entered_track) {
-			ts.push_back (entered_track);
-		} else {
-			ts = track_views;
-		}
-	} else {
-		ts = selection->tracks;
-	}
-
-	if (_internal_editing) {
-
-		bool midi_selected = false;
-
-		for (TrackViewList::iterator iter = ts.begin(); iter != ts.end(); ++iter) {
-			if ((*iter)->hidden()) {
-				continue;
-			}
-			
-			RouteTimeAxisView* rtav = dynamic_cast<RouteTimeAxisView*> (*iter);
-
-			if (rtav && rtav->is_midi_track()) {
-				midi_selected = true;
-				break;
-			}
-		}
-
-		if (midi_selected) {
-			select_all_internal_edit (op);
-			return;
-		}
+	if (internal_editing() && select_all_internal_edit(op)) {
+		return;  // Selected notes
 	}
 
 	for (TrackViewList::iterator iter = ts.begin(); iter != ts.end(); ++iter) {
@@ -1409,9 +1416,11 @@ Editor::select_all (Selection::Operation op)
 			continue;
 		}
 		(*iter)->get_selectables (0, max_framepos, 0, DBL_MAX, touched);
+		selection->add (*iter);
 	}
 
-	begin_reversible_command (_("select all"));
+
+	begin_reversible_selection_op (X_("select all"));
 	switch (op) {
 	case Selection::Add:
 		selection->add (touched);
@@ -1426,7 +1435,7 @@ Editor::select_all (Selection::Operation op)
 		/* meaningless, because we're selecting everything */
 		break;
 	}
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 }
 
 void
@@ -1438,8 +1447,10 @@ Editor::invert_selection_in_track ()
 		return;
 	}
 
+	begin_reversible_selection_op (X_("Invert Selection in Track"));
 	clicked_routeview->get_inverted_selectables (*selection, touched);
 	selection->set (touched);
+	commit_reversible_selection_op ();
 }
 
 void
@@ -1447,7 +1458,7 @@ Editor::invert_selection ()
 {
 	list<Selectable *> touched;
 
-	if (_internal_editing) {
+	if (internal_editing()) {
 		for (RegionSelection::iterator i = selection->regions.begin(); i != selection->regions.end(); ++i) {
 			MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(*i);
 			if (mrv) {
@@ -1464,7 +1475,9 @@ Editor::invert_selection ()
 		(*iter)->get_inverted_selectables (*selection, touched);
 	}
 
+	begin_reversible_selection_op (X_("Invert Selection"));
 	selection->set (touched);
+	commit_reversible_selection_op ();
 }
 
 /** @param start Start time in session frames.
@@ -1489,6 +1502,8 @@ Editor::select_all_within (framepos_t start, framepos_t end, double top, double 
 	}
 
 	if (found.empty()) {
+		selection->clear_objects();
+		selection->clear_time ();
 		return;
 	}
 
@@ -1503,7 +1518,7 @@ Editor::select_all_within (framepos_t start, framepos_t end, double top, double 
 		}
 	}
 
-	begin_reversible_command (_("select all within"));
+	begin_reversible_selection_op (X_("select all within"));
 	switch (op) {
 	case Selection::Add:
 		selection->add (found);
@@ -1519,7 +1534,7 @@ Editor::select_all_within (framepos_t start, framepos_t end, double top, double 
 		break;
 	}
 
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 }
 
 void
@@ -1529,7 +1544,25 @@ Editor::set_selection_from_region ()
 		return;
 	}
 
+	/* find all the tracks that have selected regions */
+
+	set<TimeAxisView*> tracks;
+	
+	for (RegionSelection::const_iterator r = selection->regions.begin(); r != selection->regions.end(); ++r) {
+		tracks.insert (&(*r)->get_time_axis_view());
+	}
+
+	TrackViewList tvl;
+	tvl.insert (tvl.end(), tracks.begin(), tracks.end());
+
+	/* select range (this will clear the region selection) */
+
 	selection->set (selection->regions.start(), selection->regions.end_frame());
+
+	/* and select the tracks */
+	
+	selection->set (tvl);
+	
 	if (!Profile->get_sae()) {
 		set_mouse_mode (Editing::MouseRange, false);
 	}
@@ -1561,9 +1594,9 @@ Editor::set_selection_from_loop()
 void
 Editor::set_selection_from_range (Location& loc)
 {
-	begin_reversible_command (_("set selection from range"));
+	begin_reversible_selection_op (X_("set selection from range"));
 	selection->set (loc.start(), loc.end());
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 
 	if (!Profile->get_sae()) {
 		set_mouse_mode (Editing::MouseRange, false);
@@ -1601,9 +1634,9 @@ Editor::select_all_selectables_using_time_selection ()
 		(*iter)->get_selectables (start, end - 1, 0, DBL_MAX, touched);
 	}
 
-	begin_reversible_command (_("select all from range"));
+	begin_reversible_selection_op (X_("select all from range"));
 	selection->set (touched);
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 }
 
 
@@ -1632,9 +1665,9 @@ Editor::select_all_selectables_using_punch()
 		}
 		(*iter)->get_selectables (location->start(), location->end() - 1, 0, DBL_MAX, touched);
 	}
-	begin_reversible_command (_("select all from punch"));
+	begin_reversible_selection_op (X_("select all from punch"));
 	selection->set (touched);
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 
 }
 
@@ -1663,9 +1696,9 @@ Editor::select_all_selectables_using_loop()
 		}
 		(*iter)->get_selectables (location->start(), location->end() - 1, 0, DBL_MAX, touched);
 	}
-	begin_reversible_command (_("select all from loop"));
+	begin_reversible_selection_op (X_("select all from loop"));
 	selection->set (touched);
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 
 }
 
@@ -1677,18 +1710,18 @@ Editor::select_all_selectables_using_cursor (EditorCursor *cursor, bool after)
 	list<Selectable *> touched;
 
 	if (after) {
-		start = cursor->current_frame;
+		start = cursor->current_frame();
 		end = _session->current_end_frame();
 	} else {
-		if (cursor->current_frame > 0) {
+		if (cursor->current_frame() > 0) {
 			start = 0;
-			end = cursor->current_frame - 1;
+			end = cursor->current_frame() - 1;
 		} else {
 			return;
 		}
 	}
 
-	if (_internal_editing) {
+	if (internal_editing()) {
 		for (RegionSelection::iterator i = selection->regions.begin(); i != selection->regions.end(); ++i) {
 			MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(*i);
 			if (mrv) {
@@ -1699,9 +1732,9 @@ Editor::select_all_selectables_using_cursor (EditorCursor *cursor, bool after)
 	}
 
 	if (after) {
-		begin_reversible_command (_("select all after cursor"));
+		begin_reversible_selection_op (X_("select all after cursor"));
 	} else {
-		begin_reversible_command (_("select all before cursor"));
+		begin_reversible_selection_op (X_("select all before cursor"));
 	}
 
 	TrackViewList* ts;
@@ -1719,7 +1752,7 @@ Editor::select_all_selectables_using_cursor (EditorCursor *cursor, bool after)
 		(*iter)->get_selectables (start, end, 0, DBL_MAX, touched);
 	}
 	selection->set (touched);
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 }
 
 void
@@ -1730,10 +1763,10 @@ Editor::select_all_selectables_using_edit (bool after)
 	list<Selectable *> touched;
 
 	if (after) {
-		start = get_preferred_edit_position();
+		start = get_preferred_edit_position(EDIT_IGNORE_NONE, true);
 		end = _session->current_end_frame();
 	} else {
-		if ((end = get_preferred_edit_position()) > 1) {
+		if ((end = get_preferred_edit_position(EDIT_IGNORE_NONE, true)) > 1) {
 			start = 0;
 			end -= 1;
 		} else {
@@ -1741,7 +1774,7 @@ Editor::select_all_selectables_using_edit (bool after)
 		}
 	}
 
-	if (_internal_editing) {
+	if (internal_editing()) {
 		for (RegionSelection::iterator i = selection->regions.begin(); i != selection->regions.end(); ++i) {
 			MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(*i);
 			mrv->select_range (start, end);
@@ -1750,9 +1783,9 @@ Editor::select_all_selectables_using_edit (bool after)
 	}
 
 	if (after) {
-		begin_reversible_command (_("select all after edit"));
+		begin_reversible_selection_op (X_("select all after edit"));
 	} else {
-		begin_reversible_command (_("select all before edit"));
+		begin_reversible_selection_op (X_("select all before edit"));
 	}
 
 	TrackViewList* ts;
@@ -1770,11 +1803,11 @@ Editor::select_all_selectables_using_edit (bool after)
 		(*iter)->get_selectables (start, end, 0, DBL_MAX, touched);
 	}
 	selection->set (touched);
-	commit_reversible_command ();
+	commit_reversible_selection_op ();
 }
 
 void
-Editor::select_all_selectables_between (bool /*within*/)
+Editor::select_all_selectables_between (bool within)
 {
 	framepos_t start;
 	framepos_t end;
@@ -1784,7 +1817,7 @@ Editor::select_all_selectables_between (bool /*within*/)
 		return;
 	}
 
-	if (_internal_editing) {
+	if (internal_editing()) {
 		for (RegionSelection::iterator i = selection->regions.begin(); i != selection->regions.end(); ++i) {
 			MidiRegionView* mrv = dynamic_cast<MidiRegionView*>(*i);
 			mrv->select_range (start, end);
@@ -1804,10 +1837,12 @@ Editor::select_all_selectables_between (bool /*within*/)
 		if ((*iter)->hidden()) {
 			continue;
 		}
-		(*iter)->get_selectables (start, end, 0, DBL_MAX, touched);
+		(*iter)->get_selectables (start, end, 0, DBL_MAX, touched, within);
 	}
 
+	begin_reversible_selection_op (X_("Select all Selectables Between"));
 	selection->set (touched);
+	commit_reversible_selection_op ();
 }
 
 void
@@ -1824,117 +1859,128 @@ Editor::select_range_between ()
 		return;
 	}
 
+	begin_reversible_selection_op (X_("Select Range Between"));
 	set_mouse_mode (MouseRange);
 	selection->set (start, end);
+	commit_reversible_selection_op ();
 }
 
 bool
 Editor::get_edit_op_range (framepos_t& start, framepos_t& end) const
 {
-	framepos_t m;
-	bool ignored;
+//	framepos_t m;
+//	bool ignored;
 
 	/* if an explicit range exists, use it */
 
-	if (!selection->time.empty()) {
+	if ( (mouse_mode == MouseRange || get_smart_mode() ) &&  !selection->time.empty()) {
 		/* we know that these are ordered */
 		start = selection->time.start();
 		end = selection->time.end_frame();
 		return true;
-	}
-
-	if (!mouse_frame (m, ignored)) {
-		/* mouse is not in a canvas, try playhead+selected marker.
-		   this is probably most true when using menus.
-		*/
-
-		if (selection->markers.empty()) {
-			return false;
-		}
-
-		start = selection->markers.front()->position();
-		end = _session->audible_frame();
-
 	} else {
-
-		switch (_edit_point) {
-		case EditAtPlayhead:
-			if (selection->markers.empty()) {
-				/* use mouse + playhead */
-				start = m;
-				end = _session->audible_frame();
-			} else {
-				/* use playhead + selected marker */
-				start = _session->audible_frame();
-				end = selection->markers.front()->position();
-			}
-			break;
-
-		case EditAtMouse:
-			/* use mouse + selected marker */
-			if (selection->markers.empty()) {
-				start = m;
-				end = _session->audible_frame();
-			} else {
-				start = selection->markers.front()->position();
-				end = m;
-			}
-			break;
-
-		case EditAtSelectedMarker:
-			/* use mouse + selected marker */
-			if (selection->markers.empty()) {
-
-				MessageDialog win (_("No edit range defined"),
-				                   false,
-				                   MESSAGE_INFO,
-				                   BUTTONS_OK);
-
-				win.set_secondary_text (
-					_("the edit point is Selected Marker\nbut there is no selected marker."));
-
-
-				win.set_default_response (RESPONSE_CLOSE);
-				win.set_position (Gtk::WIN_POS_MOUSE);
-				win.show_all();
-
-				win.run ();
-
-				return false; // NO RANGE
-			}
-			start = selection->markers.front()->position();
-			end = m;
-			break;
-		}
-	}
-
-	if (start == end) {
+		start = 0;
+		end = 0;
 		return false;
 	}
+	
+//	if (!mouse_frame (m, ignored)) {
+//		/* mouse is not in a canvas, try playhead+selected marker.
+//		   this is probably most true when using menus.
+//		*/
+//
+//		if (selection->markers.empty()) {
+//			return false;
+//		}
 
-	if (start > end) {
-		swap (start, end);
-	}
+//		start = selection->markers.front()->position();
+//		end = _session->audible_frame();
+
+//	} else {
+
+//		switch (_edit_point) {
+//		case EditAtPlayhead:
+//			if (selection->markers.empty()) {
+//				/* use mouse + playhead */
+//				start = m;
+//				end = _session->audible_frame();
+//			} else {
+//				/* use playhead + selected marker */
+//				start = _session->audible_frame();
+//				end = selection->markers.front()->position();
+//			}
+//			break;
+
+//		case EditAtMouse:
+//			/* use mouse + selected marker */
+//			if (selection->markers.empty()) {
+//				start = m;
+//				end = _session->audible_frame();
+//			} else {
+//				start = selection->markers.front()->position();
+//				end = m;
+//			}
+//			break;
+
+//		case EditAtSelectedMarker:
+//			/* use mouse + selected marker */
+//			if (selection->markers.empty()) {
+
+//				MessageDialog win (_("No edit range defined"),
+//				                   false,
+//				                   MESSAGE_INFO,
+//				                   BUTTONS_OK);
+
+//				win.set_secondary_text (
+//					_("the edit point is Selected Marker\nbut there is no selected marker."));
+
+
+//				win.set_default_response (RESPONSE_CLOSE);
+//				win.set_position (Gtk::WIN_POS_MOUSE);
+//				win.show_all();
+
+//				win.run ();
+
+//				return false; // NO RANGE
+//			}
+//			start = selection->markers.front()->position();
+//			end = m;
+//			break;
+//		}
+//	}
+
+//	if (start == end) {
+//		return false;
+//	}
+
+//	if (start > end) {
+//		swap (start, end);
+//	}
 
 	/* turn range into one delimited by start...end,
 	   not start...end-1
 	*/
 
-	end++;
+//	end++;
 
-	return true;
+//	return true;
 }
 
 void
 Editor::deselect_all ()
 {
+	begin_reversible_selection_op (X_("Deselect All"));
 	selection->clear ();
+	commit_reversible_selection_op ();
 }
 
 long
 Editor::select_range (framepos_t s, framepos_t e)
 {
+	begin_reversible_selection_op (X_("Select Range"));
 	selection->add (clicked_axisview);
 	selection->time.clear ();
-	return selection->set (s, e);
+	long ret = selection->set (s, e);
+	commit_reversible_selection_op ();
+	return ret;
 }

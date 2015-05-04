@@ -29,14 +29,24 @@
 #include "ardour/template_utils.h"
 #include "ardour/session.h"
 
+#ifdef interface
+#undef interface
+#endif
+
 #include "video_server_dialog.h"
 #include "utils_videotl.h"
+#include "video_tool_paths.h"
 #include "i18n.h"
+
+#ifdef PLATFORM_WINDOWS
+#include <windows.h>
+#endif
 
 using namespace Gtk;
 using namespace std;
 using namespace PBD;
 using namespace ARDOUR;
+using namespace VideoUtils;
 
 VideoServerDialog::VideoServerDialog (Session* s)
 	: ArdourDialog (_("Launch Video Server"))
@@ -78,19 +88,21 @@ VideoServerDialog::VideoServerDialog (Session* s)
 	listenaddr_combo.append_text("0.0.0.0");
 	listenaddr_combo.set_active(0);
 
-	std::string icsd_file_path;
-	if (find_file_in_search_path (PBD::SearchPath(Glib::getenv("PATH")), X_("harvid"), icsd_file_path)) {
-		path_entry.set_text(icsd_file_path);
-	}
-	else if (Glib::file_test(X_("C:\\Program Files\\harvid\\harvid.exe"), Glib::FILE_TEST_EXISTS)) {
-		path_entry.set_text(X_("C:\\Program Files\\harvid\\harvid.exe"));
-	}
-	else {
+	std::string harvid_exe;
+	if (ArdourVideoToolPaths::harvid_exe(harvid_exe)) {
+		path_entry.set_text(harvid_exe);
+	} else {
 		PBD::warning <<
-			_("The external video server 'harvid' can not be found. The tool is included with the Ardour releases from ardour.org, "
-			  "alternatively you can download it from http://x42.github.com/harvid/ or acquire it from your distribution.") << endmsg;
+			string_compose(
+					_("The external video server 'harvid' can not be found.\n"
+						"The tool is included with the %1 releases from ardour.org, "
+						"alternatively you can download it from http://x42.github.com/harvid/ "
+						"or acquire it from your distribution.\n"
+						"\n"
+						"see also http://manual.ardour.org/video-timeline/setup/"
+					 ), PROGRAM_NAME)
+			<< endmsg;
 	}
-
 
 	if (docroot_entry.get_text().empty()) {
 	  std::string docroot =  Glib::path_get_dirname(_session->session_directory().root_path());
@@ -129,7 +141,9 @@ VideoServerDialog::VideoServerDialog (Session* s)
 	t->attach (*l, 0, 1, 2, 3, FILL);
 	t->attach (cachesize_spinner, 1, 2, 2, 3);
 
-	l = manage (new Label (_("Ardour relies on an external Video Server for the videotimeline.\nThe server configured in Edit -> Prefereces -> Video is not reachable.\nDo you want ardour to launch 'harvid' on this machine?"), Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER, false));
+	l = manage (new Label (string_compose(
+					_("%1 relies on an external video server for the videotimeline.\nThe server configured in Edit -> Preferences -> Video is not reachable.\nDo you want %1 to launch 'harvid' on this machine?"), PROGRAM_NAME)
+				, Gtk::ALIGN_LEFT, Gtk::ALIGN_CENTER, false));
 	l->set_max_width_chars(80);
 	l->set_line_wrap();
 	vbox->pack_start (*l, true, true, 4);
@@ -137,7 +151,11 @@ VideoServerDialog::VideoServerDialog (Session* s)
 	if (Config->get_video_advanced_setup()){
 		vbox->pack_start (*docroot_hbox, false, false);
 	} else {
+#ifndef PLATFORM_WINDOWS
 		docroot_entry.set_text(X_("/"));
+#else
+		docroot_entry.set_text(X_("C:\\"));
+#endif
 		listenport_spinner.set_sensitive(false);
 	}
 	vbox->pack_start (*options_box, false, true);

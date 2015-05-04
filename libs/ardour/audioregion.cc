@@ -40,11 +40,13 @@
 #include "ardour/session.h"
 #include "ardour/dB.h"
 #include "ardour/debug.h"
+#include "ardour/event_type_map.h"
 #include "ardour/playlist.h"
 #include "ardour/audiofilesource.h"
 #include "ardour/region_factory.h"
 #include "ardour/runtime_functions.h"
 #include "ardour/transient_detector.h"
+#include "ardour/parameter_descriptor.h"
 #include "ardour/progress.h"
 
 #include "i18n.h"
@@ -69,8 +71,6 @@ namespace ARDOUR {
 		PBD::PropertyDescriptor<boost::shared_ptr<AutomationList> > envelope;
 	}
 }
-
-static const double VERY_SMALL_SIGNAL = 0.0000001;  //-140dB
 
 /* Curve manipulations */
 
@@ -104,14 +104,14 @@ generate_db_fade (boost::shared_ptr<Evoral::ControlList> dst, double len, int nu
 	//generate a fade-out curve by successively applying a gain drop
 	float fade_speed = dB_to_coefficient(dB_drop / (float) num_steps);
 	for (int i = 1; i < (num_steps-1); i++) {
-		float coeff = 1.0;
+		float coeff = GAIN_COEFF_UNITY;
 		for (int j = 0; j < i; j++) {
 			coeff *= fade_speed;
 		}
 		dst->fast_simple_add (len*(double)i/(double)num_steps, coeff);
 	}
 
-	dst->fast_simple_add (len, VERY_SMALL_SIGNAL);
+	dst->fast_simple_add (len, GAIN_COEFF_SMALL);
 }
 
 static void
@@ -409,14 +409,22 @@ AudioRegion::set_envelope_active (bool yn)
 	}
 }
 
+/** @param buf Buffer to put peak data in.
+ *  @param npeaks Number of peaks to read (ie the number of PeakDatas in buf)
+ *  @param offset Start position, as an offset from the start of this region's source.
+ *  @param cnt Number of samples to read.
+ *  @param chan_n Channel.
+ *  @param frames_per_pixel Number of samples to use to generate one peak value.
+ */
+ 
 ARDOUR::framecnt_t
-AudioRegion::read_peaks (PeakData *buf, framecnt_t npeaks, framecnt_t offset, framecnt_t cnt, uint32_t chan_n, double samples_per_unit) const
+AudioRegion::read_peaks (PeakData *buf, framecnt_t npeaks, framecnt_t offset, framecnt_t cnt, uint32_t chan_n, double frames_per_pixel) const
 {
 	if (chan_n >= _sources.size()) {
 		return 0;
 	}
 
-	if (audio_source(chan_n)->read_peaks (buf, npeaks, offset, cnt, samples_per_unit)) {
+	if (audio_source(chan_n)->read_peaks (buf, npeaks, offset, cnt, frames_per_pixel)) {
 		return 0;
 	} else {
 		if (_scale_amplitude != 1.0f) {
@@ -532,21 +540,21 @@ AudioRegion::read_at (Sample *buf, Sample *mixdown_buffer, float *gain_buffer,
 		/* see if some part of this read is within the fade out */
 
 		/* .................        >|            REGION
-		                             _length
-
-                                 {           }            FADE
-				             fade_out_length
-                                 ^
-                                 _length - fade_out_length
-                        |--------------|
-                        ^internal_offset
-                                       ^internal_offset + to_read
-
-				       we need the intersection of [internal_offset,internal_offset+to_read] with
-				       [_length - fade_out_length, _length]
-
-		*/
-
+		 *                           _length
+		 *
+		 *               {           }            FADE
+		 *                           fade_out_length
+		 *               ^
+		 *               _length - fade_out_length
+		 *
+		 *      |--------------|
+		 *      ^internal_offset
+		 *                     ^internal_offset + to_read
+		 *
+		 *                     we need the intersection of [internal_offset,internal_offset+to_read] with
+		 *                     [_length - fade_out_length, _length]
+		 *
+		 */
 
 		fade_interval_start = max (internal_offset, _length - framecnt_t (_fade_out->back()->when));
 		framecnt_t fade_interval_end = min(internal_offset + to_read, _length.val());
@@ -736,7 +744,7 @@ AudioRegion::read_from_sources (SourceList const & srcs, framecnt_t limit, Sampl
 
 			/* copy an existing channel's data in for this non-existant one */
 
-			uint32_t channel = n_channels() % chan_n;
+			uint32_t channel = chan_n % n_channels();
 			boost::shared_ptr<AudioSource> src = boost::dynamic_pointer_cast<AudioSource> (srcs[channel]);
 
 			if (src->read (buf, _start + internal_offset, to_read) != to_read) {
@@ -758,7 +766,7 @@ AudioRegion::get_basic_state ()
 {
 	XMLNode& node (Region::state ());
 	char buf[64];
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	snprintf (buf, sizeof (buf), "%u", (uint32_t) _sources.size());
 	node.add_property ("channels", buf);
@@ -771,7 +779,7 @@ AudioRegion::state ()
 {
 	XMLNode& node (get_basic_state());
 	XMLNode *child;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	child = node.add_child ("Envelope");
 
@@ -781,8 +789,8 @@ AudioRegion::state ()
 	// so, if they are both at 1.0f, that means the default region.
 
 	if (_envelope->size() == 2 &&
-	    _envelope->front()->value == 1.0f &&
-	    _envelope->back()->value==1.0f) {
+	    _envelope->front()->value == GAIN_COEFF_UNITY &&
+	    _envelope->back()->value==GAIN_COEFF_UNITY) {
 		if (_envelope->front()->when == 0 && _envelope->back()->when == _length) {
 			default_env = true;
 		}
@@ -828,7 +836,7 @@ AudioRegion::_set_state (const XMLNode& node, int version, PropertyChange& what_
 {
 	const XMLNodeList& nlist = node.children();
 	const XMLProperty *prop;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 	boost::shared_ptr<Playlist> the_playlist (_playlist.lock());
 
 	suspend_property_changes ();
@@ -915,12 +923,12 @@ AudioRegion::_set_state (const XMLNode& node, int version, PropertyChange& what_
 				}
 			}
 	
-		} else if (child->name() == "InverseFadeIn") {
+		} else if ( (child->name() == "InverseFadeIn") || (child->name() == "InvFadeIn")  ) {
 			XMLNode* grandchild = child->child ("AutomationList");
 			if (grandchild) {
 				_inverse_fade_in->set_state (*grandchild, version);
 			}
-		} else if (child->name() == "InverseFadeOut") {
+		} else if ( (child->name() == "InverseFadeOut") || (child->name() == "InvFadeOut") ) {
 			XMLNode* grandchild = child->child ("AutomationList");
 			if (grandchild) {
 				_inverse_fade_out->set_state (*grandchild, version);
@@ -950,6 +958,34 @@ AudioRegion::set_state (const XMLNode& node, int version)
 }
 
 void
+AudioRegion::fade_range (framepos_t start, framepos_t end)
+{
+	framepos_t s, e;
+
+	switch (coverage (start, end)) {
+	case Evoral::OverlapStart:
+		s = _position;
+		e = end;
+		set_fade_in (FadeConstantPower, e - s);
+		break;
+	case Evoral::OverlapEnd:
+		s = start;
+		e = _position + _length;
+		set_fade_out (FadeConstantPower, e - s);
+		break;
+	case Evoral::OverlapInternal:
+		/* needs addressing, perhaps. Difficult to do if we can't
+		 * control one edge of the fade relative to the relevant edge
+		 * of the region, which we cannot - fades are currently assumed
+		 * to start/end at the start/end of the region
+		 */
+		break;
+	default:
+		return;
+	}
+}
+
+void
 AudioRegion::set_fade_in_shape (FadeShape shape)
 {
 	set_fade_in (shape, (framecnt_t) _fade_in->back()->when);
@@ -975,31 +1011,34 @@ AudioRegion::set_fade_in (boost::shared_ptr<AutomationList> f)
 void
 AudioRegion::set_fade_in (FadeShape shape, framecnt_t len)
 {
-	boost::shared_ptr<Evoral::ControlList> c1 (new Evoral::ControlList (FadeInAutomation));
-	boost::shared_ptr<Evoral::ControlList> c2 (new Evoral::ControlList (FadeInAutomation));
-	boost::shared_ptr<Evoral::ControlList> c3 (new Evoral::ControlList (FadeInAutomation));
+	const ARDOUR::ParameterDescriptor desc(FadeInAutomation);
+	boost::shared_ptr<Evoral::ControlList> c1 (new Evoral::ControlList (FadeInAutomation, desc));
+	boost::shared_ptr<Evoral::ControlList> c2 (new Evoral::ControlList (FadeInAutomation, desc));
+	boost::shared_ptr<Evoral::ControlList> c3 (new Evoral::ControlList (FadeInAutomation, desc));
 
 	_fade_in->freeze ();
 	_fade_in->clear ();
 	_inverse_fade_in->clear ();
 
+	const int num_steps = 32;
+
 	switch (shape) {
 	case FadeLinear:
-		_fade_in->fast_simple_add (0.0, 0.0);
-		_fade_in->fast_simple_add (len, 1.0);
+		_fade_in->fast_simple_add (0.0, GAIN_COEFF_SMALL);
+		_fade_in->fast_simple_add (len, GAIN_COEFF_UNITY);
 		reverse_curve (_inverse_fade_in.val(), _fade_in.val());
 		break;
 
 	case FadeFast:
-		generate_db_fade (_fade_in.val(), len, 10, -60);
+		generate_db_fade (_fade_in.val(), len, num_steps, -60);
 		reverse_curve (c1, _fade_in.val());
 		_fade_in->copy_events (*c1);
 		generate_inverse_power_curve (_inverse_fade_in.val(), _fade_in.val());
 		break;
 
 	case FadeSlow:
-		generate_db_fade (c1, len, 10, -1);  // start off with a slow fade
-		generate_db_fade (c2, len, 10, -80); // end with a fast fade
+		generate_db_fade (c1, len, num_steps, -1);  // start off with a slow fade
+		generate_db_fade (c2, len, num_steps, -80); // end with a fast fade
 		merge_curves (_fade_in.val(), c1, c2);
 		reverse_curve (c3, _fade_in.val());
 		_fade_in->copy_events (*c3);
@@ -1007,34 +1046,34 @@ AudioRegion::set_fade_in (FadeShape shape, framecnt_t len)
 		break;
 
 	case FadeConstantPower:
-		for (int i = 0; i < 9; ++i) {
-			float dist = (float) i / 10.0f;
-			_fade_in->fast_simple_add (len*dist, sin (dist*M_PI/2));
+		_fade_in->fast_simple_add (0.0, GAIN_COEFF_SMALL);
+		for (int i = 1; i < num_steps; ++i) {
+			const float dist = i / (num_steps + 1.f);
+			_fade_in->fast_simple_add (len * dist, sin (dist * M_PI / 2.0));
 		}
-		_fade_in->fast_simple_add (len, 1.0);
+		_fade_in->fast_simple_add (len, GAIN_COEFF_UNITY);
 		reverse_curve (_inverse_fade_in.val(), _fade_in.val());
 		break;
 		
 	case FadeSymmetric:
 		//start with a nearly linear cuve
 		_fade_in->fast_simple_add (0, 1);
-		_fade_in->fast_simple_add (0.5*len, 0.6);
+		_fade_in->fast_simple_add (0.5 * len, 0.6);
 		//now generate a fade-out curve by successively applying a gain drop
-		const float breakpoint = 0.7;  //linear for first 70%
-		const int num_steps = 9;
-		for (int i = 2; i < num_steps; i++) {
-			float coeff = (1.0-breakpoint);
-			for (int j = 0; j < i; j++) {
-				coeff *= 0.5;  //6dB drop per step
-			}
-			_fade_in->fast_simple_add (len* (breakpoint+((1.0-breakpoint)*(double)i/(double)num_steps)), coeff);
+		const double breakpoint = 0.7;  //linear for first 70%
+		for (int i = 2; i < 9; ++i) {
+			const float coeff = (1.f - breakpoint) * powf (0.5, i);
+			_fade_in->fast_simple_add (len * (breakpoint + ((GAIN_COEFF_UNITY - breakpoint) * (double)i / 9.0)), coeff);
 		}
-		_fade_in->fast_simple_add (len, VERY_SMALL_SIGNAL);
+		_fade_in->fast_simple_add (len, GAIN_COEFF_SMALL);
 		reverse_curve (c3, _fade_in.val());
 		_fade_in->copy_events (*c3);
 		reverse_curve (_inverse_fade_in.val(), _fade_in.val());
 		break;
 	}
+
+	_fade_in->set_interpolation(Evoral::ControlList::Curved);
+	_inverse_fade_in->set_interpolation(Evoral::ControlList::Curved);
 
 	_default_fade_in = false;
 	_fade_in->thaw ();
@@ -1055,28 +1094,31 @@ AudioRegion::set_fade_out (boost::shared_ptr<AutomationList> f)
 void
 AudioRegion::set_fade_out (FadeShape shape, framecnt_t len)
 {
-	boost::shared_ptr<Evoral::ControlList> c1 (new Evoral::ControlList (FadeOutAutomation));
-	boost::shared_ptr<Evoral::ControlList> c2 (new Evoral::ControlList (FadeOutAutomation));
+	const ARDOUR::ParameterDescriptor desc(FadeOutAutomation);
+	boost::shared_ptr<Evoral::ControlList> c1 (new Evoral::ControlList (FadeOutAutomation, desc));
+	boost::shared_ptr<Evoral::ControlList> c2 (new Evoral::ControlList (FadeOutAutomation, desc));
 
 	_fade_out->freeze ();
 	_fade_out->clear ();
 	_inverse_fade_out->clear ();
 
+	const int num_steps = 32;
+
 	switch (shape) {
 	case FadeLinear:
-		_fade_out->fast_simple_add (0.0, 1.0);
-		_fade_out->fast_simple_add (len, VERY_SMALL_SIGNAL);
+		_fade_out->fast_simple_add (0.0, GAIN_COEFF_UNITY);
+		_fade_out->fast_simple_add (len, GAIN_COEFF_SMALL);
 		reverse_curve (_inverse_fade_out.val(), _fade_out.val());
 		break;
 		
 	case FadeFast: 
-		generate_db_fade (_fade_out.val(), len, 10, -60);
+		generate_db_fade (_fade_out.val(), len, num_steps, -60);
 		generate_inverse_power_curve (_inverse_fade_out.val(), _fade_out.val());
 		break;
 		
 	case FadeSlow: 
-		generate_db_fade (c1, len, 10, -1);  //start off with a slow fade
-		generate_db_fade (c2, len, 10, -80);  //end with a fast fade
+		generate_db_fade (c1, len, num_steps, -1);  //start off with a slow fade
+		generate_db_fade (c2, len, num_steps, -80);  //end with a fast fade
 		merge_curves (_fade_out.val(), c1, c2);
 		generate_inverse_power_curve (_inverse_fade_out.val(), _fade_out.val());
 		break;
@@ -1084,34 +1126,32 @@ AudioRegion::set_fade_out (FadeShape shape, framecnt_t len)
 	case FadeConstantPower:
 		//constant-power fades use a sin/cos relationship
 		//the cutoff is abrupt but it has the benefit of being symmetrical
-		_fade_out->fast_simple_add (0.0, 1.0);
-		for (int i = 1; i < 9; i++ ) {
-			float dist = (float)i/10.0;
-			_fade_out->fast_simple_add ((len * dist), cos(dist*M_PI/2));
+		_fade_out->fast_simple_add (0.0, GAIN_COEFF_UNITY);
+		for (int i = 1; i < num_steps; ++i) {
+			const float dist = i / (num_steps + 1.f);
+			_fade_out->fast_simple_add (len * dist, cos (dist * M_PI / 2.0));
 		}
-		_fade_out->fast_simple_add (len, VERY_SMALL_SIGNAL);
+		_fade_out->fast_simple_add (len, GAIN_COEFF_SMALL);
 		reverse_curve (_inverse_fade_out.val(), _fade_out.val());
 		break;
 		
 	case FadeSymmetric:
 		//start with a nearly linear cuve
 		_fade_out->fast_simple_add (0, 1);
-		_fade_out->fast_simple_add (0.5*len, 0.6);
-
+		_fade_out->fast_simple_add (0.5 * len, 0.6);
 		//now generate a fade-out curve by successively applying a gain drop
-		const float breakpoint = 0.7;  //linear for first 70%
-		const int num_steps = 9;
-		for (int i = 2; i < num_steps; i++) {
-			float coeff = (1.0-breakpoint);
-			for (int j = 0; j < i; j++) {
-				coeff *= 0.5;  //6dB drop per step
-			}
-			_fade_out->fast_simple_add (len* (breakpoint+((1.0-breakpoint)*(double)i/(double)num_steps)), coeff);
+		const double breakpoint = 0.7;  //linear for first 70%
+		for (int i = 2; i < 9; ++i) {
+			const float coeff = (1.f - breakpoint) * powf (0.5, i);
+			_fade_out->fast_simple_add (len * (breakpoint + ((GAIN_COEFF_UNITY - breakpoint) * (double)i / 9.0)), coeff);
 		}
-		_fade_out->fast_simple_add (len, VERY_SMALL_SIGNAL);
+		_fade_out->fast_simple_add (len, GAIN_COEFF_SMALL);
 		reverse_curve (_inverse_fade_out.val(), _fade_out.val());
 		break;
 	}
+
+	_fade_out->set_interpolation(Evoral::ControlList::Curved);
+	_inverse_fade_out->set_interpolation(Evoral::ControlList::Curved);
 
 	_default_fade_out = false;
 	_fade_out->thaw ();
@@ -1202,14 +1242,14 @@ void
 AudioRegion::set_default_fade_in ()
 {
 	_fade_in_suspended = 0;
-	set_fade_in (FadeLinear, 64);
+	set_fade_in (Config->get_default_fade_shape(), 64);
 }
 
 void
 AudioRegion::set_default_fade_out ()
 {
 	_fade_out_suspended = 0;
-	set_fade_out (FadeLinear, 64);
+	set_fade_out (Config->get_default_fade_shape(), 64);
 }
 
 void
@@ -1224,8 +1264,8 @@ AudioRegion::set_default_envelope ()
 {
 	_envelope->freeze ();
 	_envelope->clear ();
-	_envelope->fast_simple_add (0, 1.0f);
-	_envelope->fast_simple_add (_length, 1.0f);
+	_envelope->fast_simple_add (0, GAIN_COEFF_UNITY);
+	_envelope->fast_simple_add (_length, GAIN_COEFF_UNITY);
 	_envelope->thaw ();
 }
 
@@ -1405,14 +1445,14 @@ AudioRegion::normalize (float max_amplitude, float target_dB)
 {
 	gain_t target = dB_to_coefficient (target_dB);
 
-	if (target == 1.0f) {
+	if (target == GAIN_COEFF_UNITY) {
 		/* do not normalize to precisely 1.0 (0 dBFS), to avoid making it appear
 		   that we may have clipped.
 		*/
 		target -= FLT_EPSILON;
 	}
 
-	if (max_amplitude == 0.0f) {
+	if (max_amplitude < GAIN_COEFF_SMALL) {
 		/* don't even try */
 		return;
 	}
@@ -1640,45 +1680,52 @@ AudioRegion::get_transients (AnalysisFeatureList& results, bool force_new)
 
 	if (!Config->get_auto_analyse_audio()) {
 		if (!analyse_dialog_shown) {
-			pl->session().Dialog (_("\
+			pl->session().Dialog (string_compose (_("\
 You have requested an operation that requires audio analysis.\n\n\
 You currently have \"auto-analyse-audio\" disabled, which means \
 that transient data must be generated every time it is required.\n\n\
 If you are doing work that will require transient data on a \
 regular basis, you should probably enable \"auto-analyse-audio\" \
-then quit ardour and restart.\n\n\
+then quit %1 and restart.\n\n\
 This dialog will not display again.  But you may notice a slight delay \
 in this and future transient-detection operations.\n\
-"));
+"), PROGRAM_NAME));
 			analyse_dialog_shown = true;
 		}
 	}
 
-	TransientDetector t (pl->session().frame_rate());
 	bool existing_results = !results.empty();
 
-	_transients.clear ();
-	_valid_transients = false;
+	try {
 
-	for (uint32_t i = 0; i < n_channels(); ++i) {
+		TransientDetector t (pl->session().frame_rate());
 
-		AnalysisFeatureList these_results;
+		_transients.clear ();
+		_valid_transients = false;
 
-		t.reset ();
+		for (uint32_t i = 0; i < n_channels(); ++i) {
 
-		if (t.run ("", this, i, these_results)) {
-			return -1;
+			AnalysisFeatureList these_results;
+
+			t.reset ();
+
+			if (t.run ("", this, i, these_results)) {
+				return -1;
+			}
+
+			/* translate all transients to give absolute position */
+
+			for (AnalysisFeatureList::iterator i = these_results.begin(); i != these_results.end(); ++i) {
+				(*i) += _position;
+			}
+
+			/* merge */
+
+			_transients.insert (_transients.end(), these_results.begin(), these_results.end());
 		}
-
-		/* translate all transients to give absolute position */
-
-		for (AnalysisFeatureList::iterator i = these_results.begin(); i != these_results.end(); ++i) {
-			(*i) += _position;
-		}
-
-		/* merge */
-
-		_transients.insert (_transients.end(), these_results.begin(), these_results.end());
+	} catch (...) {
+		error << string_compose(_("Transient Analysis failed for %1."), _("Audio Region")) << endmsg;
+		return -1;
 	}
 
 	if (!results.empty()) {
@@ -1852,22 +1899,3 @@ AudioRegion::verify_xfade_bounds (framecnt_t len, bool start)
 		
 }
 
-extern "C" {
-
-	int region_read_peaks_from_c (void *arg, uint32_t npeaks, uint32_t start, uint32_t cnt, intptr_t data, uint32_t n_chan, double samples_per_unit)
-{
-	return ((AudioRegion *) arg)->read_peaks ((PeakData *) data, (framecnt_t) npeaks, (framepos_t) start, (framecnt_t) cnt, n_chan,samples_per_unit);
-}
-
-uint32_t region_length_from_c (void *arg)
-{
-
-	return ((AudioRegion *) arg)->length();
-}
-
-uint32_t sourcefile_length_from_c (void *arg, double zoom_factor)
-{
-	return ( (AudioRegion *) arg)->audio_source()->available_peaks (zoom_factor) ;
-}
-
-} /* extern "C" */

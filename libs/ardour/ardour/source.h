@@ -36,7 +36,7 @@ namespace ARDOUR {
 
 class Session;
 
-class Source : public SessionObject
+class LIBARDOUR_API Source : public SessionObject
 {
   public:
 	enum Flag {
@@ -47,8 +47,11 @@ class Source : public SessionObject
 		RemovableIfEmpty = 0x10,
 		RemoveAtDestroy = 0x20,
 		NoPeakFile = 0x40,
-		Destructive = 0x80
+		Destructive = 0x80,
+		Empty = 0x100, /* used for MIDI only */
 	};
+
+	typedef Glib::Threads::Mutex::Lock Lock;
 
 	Source (Session&, DataType type, const std::string& name, Flag flags=Flag(0));
 	Source (Session&, const XMLNode&);
@@ -68,8 +71,8 @@ class Source : public SessionObject
 
 	void mark_for_remove();
 
-	virtual void mark_streaming_write_started () {}
-	virtual void mark_streaming_write_completed () = 0;
+	virtual void mark_streaming_write_started (const Lock& lock) {}
+	virtual void mark_streaming_write_completed (const Lock& lock) = 0;
 
 	virtual void session_saved() {}
 
@@ -108,6 +111,9 @@ class Source : public SessionObject
 	bool used() const { return use_count() > 0; }
 	uint32_t level() const { return _level; }
 
+	std::string ancestor_name() { return _ancestor_name.empty() ? name() : _ancestor_name; }
+	void set_ancestor_name(const std::string& name) { _ancestor_name = name; }
+
   protected:
 	DataType            _type;
 	Flag                _flags;
@@ -118,6 +124,7 @@ class Source : public SessionObject
         mutable Glib::Threads::Mutex _analysis_lock;
 	gint                _use_count; /* atomic */
 	uint32_t            _level; /* how deeply nested is this source w.r.t a disk file */
+	std::string         _ancestor_name;
 
   private:
 	void fix_writable_flags ();

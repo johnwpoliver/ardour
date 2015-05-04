@@ -25,6 +25,10 @@
 #include <set>
 
 #include <glibmm/threads.h>
+#include <glibmm/fileutils.h>
+#include <glibmm/miscutils.h>
+
+#include "evoral/types.hpp"
 
 #include "pbd/xml++.h"
 #include "pbd/basename.h"
@@ -36,6 +40,7 @@
 #include "ardour/midi_source.h"
 #include "ardour/region_factory.h"
 #include "ardour/session.h"
+#include "ardour/source_factory.h"
 #include "ardour/tempo.h"
 #include "ardour/types.h"
 
@@ -48,17 +53,14 @@ using namespace PBD;
 
 namespace ARDOUR {
 	namespace Properties {
-		PBD::PropertyDescriptor<void*>                midi_data;
-		PBD::PropertyDescriptor<Evoral::MusicalTime>  start_beats;
-		PBD::PropertyDescriptor<Evoral::MusicalTime>  length_beats;
+		PBD::PropertyDescriptor<Evoral::Beats> start_beats;
+		PBD::PropertyDescriptor<Evoral::Beats> length_beats;
 	}
 }
 
 void
 MidiRegion::make_property_quarks ()
 {
-	Properties::midi_data.property_id = g_quark_from_static_string (X_("midi-data"));
-	DEBUG_TRACE (DEBUG::Properties, string_compose ("quark for midi-data = %1\n", Properties::midi_data.property_id));
 	Properties::start_beats.property_id = g_quark_from_static_string (X_("start-beats"));
 	DEBUG_TRACE (DEBUG::Properties, string_compose ("quark for start-beats = %1\n", Properties::start_beats.property_id));
 	Properties::length_beats.property_id = g_quark_from_static_string (X_("length-beats"));
@@ -75,7 +77,7 @@ MidiRegion::register_properties ()
 /* Basic MidiRegion constructor (many channels) */
 MidiRegion::MidiRegion (const SourceList& srcs)
 	: Region (srcs)
-	, _start_beats (Properties::start_beats, 0)
+	, _start_beats (Properties::start_beats, Evoral::Beats())
 	, _length_beats (Properties::length_beats, midi_source(0)->length_beats())
 {
 	register_properties ();
@@ -89,7 +91,7 @@ MidiRegion::MidiRegion (const SourceList& srcs)
 MidiRegion::MidiRegion (boost::shared_ptr<const MidiRegion> other)
 	: Region (other)
 	, _start_beats (Properties::start_beats, other->_start_beats)
-	, _length_beats (Properties::length_beats, (Evoral::MusicalTime) 0)
+	, _length_beats (Properties::length_beats, Evoral::Beats())
 {
 	update_length_beats ();
 	register_properties ();
@@ -102,14 +104,14 @@ MidiRegion::MidiRegion (boost::shared_ptr<const MidiRegion> other)
 /** Create a new MidiRegion that is part of an existing one */
 MidiRegion::MidiRegion (boost::shared_ptr<const MidiRegion> other, frameoffset_t offset)
 	: Region (other, offset)
-	, _start_beats (Properties::start_beats, (Evoral::MusicalTime) 0)
-	, _length_beats (Properties::length_beats, (Evoral::MusicalTime) 0)
+	, _start_beats (Properties::start_beats, Evoral::Beats())
+	, _length_beats (Properties::length_beats, Evoral::Beats())
 {
 	BeatsFramesConverter bfc (_session.tempo_map(), _position);
-	Evoral::MusicalTime const offset_beats = bfc.from (offset);
+	Evoral::Beats const offset_beats = bfc.from (offset);
 
-	_start_beats = other->_start_beats + offset_beats;
-	_length_beats = other->_length_beats - offset_beats;
+	_start_beats  = other->_start_beats.val() + offset_beats;
+	_length_beats = other->_length_beats.val() - offset_beats;
 
 	register_properties ();
 
@@ -127,15 +129,36 @@ MidiRegion::~MidiRegion ()
 boost::shared_ptr<MidiRegion>
 MidiRegion::clone (string path) const
 {
-	BeatsFramesConverter bfc (_session.tempo_map(), _position);
-	Evoral::MusicalTime const bbegin = bfc.from (_start);
-	Evoral::MusicalTime const bend = bfc.from (_start + _length);
+	boost::shared_ptr<MidiSource> newsrc;
 
-	boost::shared_ptr<MidiSource> ms = midi_source(0)->clone (path, bbegin, bend);
+	/* caller must check for pre-existing file */
+	assert (!path.empty());
+	assert (!Glib::file_test (path, Glib::FILE_TEST_EXISTS));
+	newsrc = boost::dynamic_pointer_cast<MidiSource>(
+		SourceFactory::createWritable(DataType::MIDI, _session,
+					      path, false, _session.frame_rate()));
+	return clone (newsrc);
+}
+
+boost::shared_ptr<MidiRegion>
+MidiRegion::clone (boost::shared_ptr<MidiSource> newsrc) const
+{
+	BeatsFramesConverter bfc (_session.tempo_map(), _position);
+	Evoral::Beats const bbegin = bfc.from (_start);
+	Evoral::Beats const bend = bfc.from (_start + _length);
+
+	{
+		/* Lock our source since we'll be reading from it.  write_to() will
+		   take a lock on newsrc. */
+		Source::Lock lm (midi_source(0)->mutex());
+		if (midi_source(0)->write_to (lm, newsrc, bbegin, bend)) {
+			return boost::shared_ptr<MidiRegion> ();
+		}
+	}
 
 	PropertyList plist;
 
-	plist.add (Properties::name, PBD::basename_nosuffix (ms->name()));
+	plist.add (Properties::name, PBD::basename_nosuffix (newsrc->name()));
 	plist.add (Properties::whole_file, true);
 	plist.add (Properties::start, _start);
 	plist.add (Properties::start_beats, _start_beats);
@@ -143,7 +166,7 @@ MidiRegion::clone (string path) const
 	plist.add (Properties::length_beats, _length_beats);
 	plist.add (Properties::layer, 0);
 
-	return boost::dynamic_pointer_cast<MidiRegion> (RegionFactory::create (ms, plist, true));
+	return boost::dynamic_pointer_cast<MidiRegion> (RegionFactory::create (newsrc, plist, true));
 }
 
 void
@@ -197,7 +220,7 @@ MidiRegion::set_position_internal (framepos_t pos, bool allow_bbt_recompute)
 	/* zero length regions don't exist - so if _length_beats is zero, this object
 	   is under construction.
 	*/
-	if (_length_beats) {
+	if (_length_beats.val() == Evoral::Beats()) {
 		/* leave _length_beats alone, and change _length to reflect the state of things
 		   at the new position (tempo map may dictate a different number of frames
 		*/
@@ -207,9 +230,15 @@ MidiRegion::set_position_internal (framepos_t pos, bool allow_bbt_recompute)
 }
 
 framecnt_t
-MidiRegion::read_at (Evoral::EventSink<framepos_t>& out, framepos_t position, framecnt_t dur, uint32_t chan_n, NoteMode mode, MidiStateTracker* tracker) const
+MidiRegion::read_at (Evoral::EventSink<framepos_t>& out,
+                     framepos_t                     position,
+                     framecnt_t                     dur,
+                     uint32_t                       chan_n,
+                     NoteMode                       mode,
+                     MidiStateTracker*              tracker,
+                     MidiChannelFilter*             filter) const
 {
-	return _read_at (_sources, out, position, dur, chan_n, mode, tracker);
+	return _read_at (_sources, out, position, dur, chan_n, mode, tracker, filter);
 }
 
 framecnt_t
@@ -219,11 +248,17 @@ MidiRegion::master_read_at (MidiRingBuffer<framepos_t>& out, framepos_t position
 }
 
 framecnt_t
-MidiRegion::_read_at (const SourceList& /*srcs*/, Evoral::EventSink<framepos_t>& dst, framepos_t position, framecnt_t dur, uint32_t chan_n,
-		      NoteMode mode, MidiStateTracker* tracker) const
+MidiRegion::_read_at (const SourceList&              /*srcs*/,
+                      Evoral::EventSink<framepos_t>& dst,
+                      framepos_t                     position,
+                      framecnt_t                     dur,
+                      uint32_t                       chan_n,
+                      NoteMode                       mode,
+                      MidiStateTracker*              tracker,
+                      MidiChannelFilter*             filter) const
 {
 	frameoffset_t internal_offset = 0;
-	framecnt_t to_read         = 0;
+	framecnt_t    to_read         = 0;
 
 	/* precondition: caller has verified that we cover the desired section */
 
@@ -251,7 +286,10 @@ MidiRegion::_read_at (const SourceList& /*srcs*/, Evoral::EventSink<framepos_t>&
 	}
 
 	boost::shared_ptr<MidiSource> src = midi_source(chan_n);
-	src->set_note_mode(mode);
+
+	Glib::Threads::Mutex::Lock lm(src->mutex());
+
+	src->set_note_mode(lm, mode);
 
 	/*
 	  cerr << "MR " << name () << " read @ " << position << " * " << to_read
@@ -264,11 +302,13 @@ MidiRegion::_read_at (const SourceList& /*srcs*/, Evoral::EventSink<framepos_t>&
 	/* This call reads events from a source and writes them to `dst' timed in session frames */
 
 	if (src->midi_read (
+		    lm, // source lock
 			dst, // destination buffer
 			_position - _start, // start position of the source in session frames
 			_start + internal_offset, // where to start reading in the source
 			to_read, // read duration in frames
 			tracker,
+			filter,
 			_filtered_parameters
 		    ) != to_read) {
 		return 0; /* "read nothing" */
@@ -378,15 +418,6 @@ MidiRegion::model_changed ()
 	midi_source()->AutomationStateChanged.connect_same_thread (
 		_model_connection, boost::bind (&MidiRegion::model_automation_state_changed, this, _1)
 		);
-
-	model()->ContentsChanged.connect_same_thread (
-	        _model_contents_connection, boost::bind (&MidiRegion::model_contents_changed, this));
-}
-
-void
-MidiRegion::model_contents_changed ()
-{
-	send_change (PropertyChange (Properties::midi_data));
 }
 
 void
@@ -395,9 +426,9 @@ MidiRegion::model_automation_state_changed (Evoral::Parameter const & p)
 	/* Update our filtered parameters list after a change to a parameter's AutoState */
 
 	boost::shared_ptr<AutomationControl> ac = model()->automation_control (p);
-	assert (ac);
-
-	if (ac->alist()->automation_state() == Play) {
+	if (!ac || ac->alist()->automation_state() == Play) {
+		/* It should be "impossible" for ac to be NULL, but if it is, don't
+		   filter the parameter so events aren't lost. */
 		_filtered_parameters.erase (p);
 	} else {
 		_filtered_parameters.insert (p);
@@ -407,8 +438,11 @@ MidiRegion::model_automation_state_changed (Evoral::Parameter const & p)
 	   for a given set of filtered_parameters, so now that we've changed that list we must invalidate
 	   the iterator.
 	*/
-	Glib::Threads::Mutex::Lock lm (midi_source(0)->mutex());
-	midi_source(0)->invalidate ();
+	Glib::Threads::Mutex::Lock lm (midi_source(0)->mutex(), Glib::Threads::TRY_LOCK);
+	if (lm.locked()) {
+		/* TODO: This is too aggressive, we need more fine-grained invalidation. */
+		midi_source(0)->invalidate (lm);
+	}
 }
 
 /** This is called when a trim drag has resulted in a -ve _start time for this region.
@@ -421,7 +455,7 @@ MidiRegion::fix_negative_start ()
 
 	model()->insert_silence_at_start (c.from (-_start));
 	_start = 0;
-	_start_beats = 0;
+	_start_beats = Evoral::Beats();
 }
 
 /** Transpose the notes in this region by a given number of semitones */

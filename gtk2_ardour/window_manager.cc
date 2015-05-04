@@ -28,11 +28,13 @@
 #include "ardour_dialog.h"
 #include "ardour_window.h"
 #include "window_manager.h"
+#include "processor_box.h"
 
 #include "i18n.h"
 
 using std::string;
 using namespace WM;
+using namespace PBD;
 
 Manager* Manager::_instance = 0;
 
@@ -47,6 +49,10 @@ Manager::instance ()
 
 Manager::Manager ()
 	: current_transient_parent (0)
+{
+}
+
+Manager::~Manager ()
 {
 }
 
@@ -106,30 +112,40 @@ Manager::add_state (XMLNode& root) const
 		if (dynamic_cast<ProxyTemporary*> (*i)) {
 			continue;
 		}
-		root.add_child_nocopy ((*i)->get_state());
+		if (dynamic_cast<ProcessorWindowProxy*> (*i)) {
+			ProcessorWindowProxy *pi = dynamic_cast<ProcessorWindowProxy*> (*i);
+			root.add_child_nocopy (pi->get_state());
+		} else {
+			root.add_child_nocopy ((*i)->get_state());
+		}
 	}
 }
 
 void
 Manager::set_session (ARDOUR::Session* s)
 {
+	SessionHandlePtr::set_session (s);
 	for (Windows::const_iterator i = _windows.begin(); i != _windows.end(); ++i) {
-		ARDOUR::SessionHandlePtr* sp = (*i)->session_handle ();
-		if (sp) {
-			sp->set_session (s);
-		}
+		(*i)->set_session(s);
 	}
 }
 
 void
 Manager::set_transient_for (Gtk::Window* parent)
 {
+	/* OS X has a richer concept of window layering than X does (or
+	 * certainly, than any accepted conventions on X), and so the use of
+	 * Manager::set_transient_for() is not necessary on that platform.
+	 * 
+	 * On OS X this is mostly taken care of by using the window type rather
+	 * than explicit 1:1 transient-for relationships.
+	 */
+
 #ifndef __APPLE__
 	if (parent) {
 		for (Windows::const_iterator i = _windows.begin(); i != _windows.end(); ++i) {
 			Gtk::Window* win = (*i)->get();
 			if (win) {
-				std::cerr << "marked " << win->get_title() << " as transient of " << parent->get_title() << std::endl;
 				win->set_transient_for (*parent);
 			}
 		}
@@ -178,6 +194,7 @@ ProxyBase::ProxyBase (const string& name, const std::string& menu_name, const XM
 ProxyBase::~ProxyBase ()
 {
 	delete vistracker;
+	delete _window;
 }
 
 void
@@ -205,16 +222,16 @@ ProxyBase::set_state (const XMLNode& node)
 		}
 
 		if ((prop = (*i)->property (X_("x-off"))) != 0) {
-			_x_off = atoi (prop->value().c_str());
+			_x_off = atoi (prop->value());
 		}
 		if ((prop = (*i)->property (X_("y-off"))) != 0) {
-			_y_off = atoi (prop->value().c_str());
+			_y_off = atoi (prop->value());
 		}
 		if ((prop = (*i)->property (X_("x-size"))) != 0) {
-			_width = atoi (prop->value().c_str());
+			_width = atoi (prop->value());
 		}
 		if ((prop = (*i)->property (X_("y-size"))) != 0) {
-			_height = atoi (prop->value().c_str());
+			_height = atoi (prop->value());
 		}
 	}
 
@@ -249,8 +266,27 @@ ProxyBase::toggle()
 		_window->show_all();
 		/* we'd like to just call this and nothing else */
 		_window->present ();
+
+		if (_width != -1 && _height != -1) {
+			_window->set_default_size (_width, _height);
+		}
+		if (_x_off != -1 && _y_off != -1) {
+			_window->move (_x_off, _y_off);
+		}
+
 	} else {
+		if (_window->is_mapped()) {
+			save_pos_and_size();
+		}
 		vistracker->cycle_visibility ();
+		if (_window->is_mapped()) {
+			if (_width != -1 && _height != -1) {
+				_window->set_default_size (_width, _height);
+			}
+			if (_x_off != -1 && _y_off != -1) {
+				_window->move (_x_off, _y_off);
+			}
+		}
 	}
 }
 
@@ -267,8 +303,10 @@ ProxyBase::get_state () const
 		/* we have a window, so use current state */
 
 		_visible = vistracker->partially_visible ();
-		_window->get_position (_x_off, _y_off);
-		_window->get_size (_width, _height);
+		if (_visible) {
+			_window->get_position (_x_off, _y_off);
+			_window->get_size (_width, _height);
+		}
 	}
 
 	node->add_property (X_("visible"), _visible? X_("yes") : X_("no"));
@@ -311,6 +349,7 @@ ProxyBase::setup ()
 	assert (_window);
 
 	vistracker = new Gtkmm2ext::VisibilityTracker (*_window);
+	_window->signal_delete_event().connect (sigc::mem_fun (*this, &ProxyBase::delete_event_handler));
 
 	if (_width != -1 || _height != -1 || _x_off != -1 || _y_off != -1) {
 		/* cancel any mouse-based positioning */
@@ -324,13 +363,15 @@ ProxyBase::setup ()
 	if (_x_off != -1 && _y_off != -1) {
 		_window->move (_x_off, _y_off);
 	}
+	set_session(_session);
 }
 	
 void
 ProxyBase::show ()
 {
-	Gtk::Window* win = get (true);
-	win->show ();
+	get (true);
+	assert (_window);
+	_window->show ();
 }
 
 void
@@ -344,17 +385,19 @@ ProxyBase::maybe_show ()
 void
 ProxyBase::show_all ()
 {
-	Gtk::Window* win = get (true);
-	win->show_all ();
+	get (true);
+	assert (_window);
+	_window->show_all ();
 }
-
 
 void
 ProxyBase::present ()
 {
-	Gtk::Window* win = get (true);
-	win->show_all ();
-	win->present ();
+	get (true);
+	assert (_window);
+
+	_window->show_all ();
+	_window->present ();
 
 	/* turn off any mouse-based positioning */
 	_window->set_position (Gtk::WIN_POS_NONE);
@@ -363,12 +406,27 @@ ProxyBase::present ()
 void
 ProxyBase::hide ()
 {
-	Gtk::Window* win = get (false);
-	if (win) {
-		win->hide ();
+	if (_window) {
+		save_pos_and_size();
+		_window->hide ();
 	}
 }
 
+bool
+ProxyBase::delete_event_handler (GdkEventAny* /*ev*/)
+{
+	hide();
+	return true;
+}
+
+void
+ProxyBase::save_pos_and_size ()
+{
+	if (_window) {
+		_window->get_position (_x_off, _y_off);
+		_window->get_size (_width, _height);
+	}
+}
 /*-----------------------*/
 
 ProxyTemporary::ProxyTemporary (const string& name, Gtk::Window* win)
@@ -380,6 +438,7 @@ ProxyTemporary::ProxyTemporary (const string& name, Gtk::Window* win)
 ProxyTemporary::~ProxyTemporary ()
 {
 }
+
 
 ARDOUR::SessionHandlePtr*
 ProxyTemporary::session_handle()

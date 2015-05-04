@@ -50,7 +50,7 @@ ExportTimespanSelector::ExportTimespanSelector (ARDOUR::Session * session, Profi
 	option_hbox.pack_start (time_format_label, false, false, 0);
 	option_hbox.pack_start (time_format_combo, false, false, 6);
 
-	Gtk::Button* b = manage (new Gtk::Button (_("Select All")));
+	Gtk::Button* b = Gtk::manage (new Gtk::Button (_("Select All")));
 	b->signal_clicked().connect (
 		sigc::bind (
 			sigc::mem_fun (*this, &ExportTimespanSelector::set_selection_state_of_all_timespans), true
@@ -58,7 +58,7 @@ ExportTimespanSelector::ExportTimespanSelector (ARDOUR::Session * session, Profi
 		);
 	option_hbox.pack_start (*b, false, false, 6);
 	
-	b = manage (new Gtk::Button (_("Deselect All")));
+	b = Gtk::manage (new Gtk::Button (_("Deselect All")));
 	b->signal_clicked().connect (
 		sigc::bind (
 			sigc::mem_fun (*this, &ExportTimespanSelector::set_selection_state_of_all_timespans), false
@@ -105,6 +105,9 @@ ExportTimespanSelector::ExportTimespanSelector (ARDOUR::Session * session, Profi
 	/* Range view */
 
 	range_list = Gtk::ListStore::create (range_cols);
+	// order by location start times
+	range_list->set_sort_column(range_cols.location, Gtk::SORT_ASCENDING);
+	range_list->set_sort_func(range_cols.location, sigc::mem_fun(*this, &ExportTimespanSelector::location_sorter));
 	range_view.set_model (range_list);
 	range_view.set_headers_visible (true);
 }
@@ -114,15 +117,29 @@ ExportTimespanSelector::~ExportTimespanSelector ()
 
 }
 
+int
+ExportTimespanSelector::location_sorter(Gtk::TreeModel::iterator a, Gtk::TreeModel::iterator b)
+{
+	Location *l1 = (*a)[range_cols.location];
+	Location *l2 = (*b)[range_cols.location];
+	const Location *ls = _session->locations()->session_range_location();
+
+	// always sort session range first
+	if (l1 == ls)
+		return -1;
+	if (l2 == ls)
+		return +1;
+
+	return l1->start() - l2->start();
+}
+
 void
 ExportTimespanSelector::add_range_to_selection (ARDOUR::Location const * loc)
 {
 	ExportTimespanPtr span = _session->get_export_handler()->add_timespan();
 
 	std::string id;
-	if (loc == state->session_range.get()) {
-		id = "session";
-	} else if (loc == state->selection_range.get()) {
+	if (loc == state->selection_range.get()) {
 		id = "selection";
 	} else {
 		id = loc->id().to_s();
@@ -307,7 +324,7 @@ ExportTimespanSelector::ms_str (framecnt_t frames) const
 	mins = (int) floor (left / (_session->frame_rate() * 60.0f));
 	left -= (framecnt_t) floor (mins * _session->frame_rate() * 60.0f);
 	secs = (int) floor (left / (float) _session->frame_rate());
-	left -= (framecnt_t) floor (secs * _session->frame_rate());
+	left -= (framecnt_t) floor ((double)(secs * _session->frame_rate()));
 	sec_promilles = (int) (left * 1000 / (float) _session->frame_rate() + 0.5);
 
 	oss << std::setfill('0') << std::right <<
@@ -367,9 +384,7 @@ ExportTimespanSelectorSingle::fill_range_list ()
 	if (!state) { return; }
 
 	std::string id;
-	if (!range_id.compare (X_("session"))) {
-		id = state->session_range->id().to_s();
-	} else if (!range_id.compare (X_("selection"))) {
+	if (!range_id.compare (X_("selection"))) {
 		id = state->selection_range->id().to_s();
 	} else {
 		id = range_id;
@@ -459,9 +474,8 @@ ExportTimespanSelectorMultiple::set_selection_from_state ()
 		for (tree_it = range_list->children().begin(); tree_it != range_list->children().end(); ++tree_it) {
 			Location * loc = tree_it->get_value (range_cols.location);
 
-			if ((!id.compare ("session") && loc == state->session_range.get()) ||
-			    (!id.compare ("selection") && loc == state->selection_range.get()) ||
-			    (!id.compare (loc->id().to_s()))) {
+			if ((id == "selection" && loc == state->selection_range.get()) ||
+			    (id == loc->id().to_s())) {
 				tree_it->set_value (range_cols.selected, true);
 			}
 		}

@@ -30,9 +30,22 @@
 #include "pbd/signals.h"
 #include "pbd/stateful.h"
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 #include "ardour/automation_control.h"
 #include "ardour/automatable.h"
+
+
+/* This section is for actual panners to use. They will include this file,
+ * declare ARDOURPANNER_DLL_EXPORTS during compilation, and ... voila.
+ */
+
+#ifdef ARDOURPANNER_DLL_EXPORTS // defined if we are building a panner implementation
+    #define ARDOURPANNER_API LIBARDOUR_DLL_EXPORT
+  #else
+    #define ARDOURPANNER_API LIBARDOUR_DLL_IMPORT
+  #endif 
+#define ARDOURPANNER_LOCAL LIBARDOUR_DLL_LOCAL
 
 namespace ARDOUR {
 
@@ -42,7 +55,7 @@ class BufferSet;
 class AudioBuffer;
 class Speakers;
 
-class Panner : public PBD::Stateful, public PBD::ScopedConnectionList
+class LIBARDOUR_API Panner : public PBD::Stateful, public PBD::ScopedConnectionList
 {
 public:
 	Panner (boost::shared_ptr<Pannable>);
@@ -86,6 +99,9 @@ public:
 	virtual PBD::AngularVector signal_position (uint32_t) const { return PBD::AngularVector(); }
 
 	virtual void reset () = 0;
+
+	/* azimut, width or elevation updated -> recalc signal_position ->  emit Changed */
+	PBD::Signal0<void> SignalPositionChanged;
 
 	void      set_automation_state (AutoState);
 	AutoState automation_state() const;
@@ -172,10 +188,13 @@ protected:
 } // namespace
 
 extern "C" {
-struct PanPluginDescriptor {
+struct LIBARDOUR_API PanPluginDescriptor {
 	std::string name;
+	std::string panner_uri;
+	std::string gui_uri;
 	int32_t in;
 	int32_t out;
+	uint32_t priority;
 	ARDOUR::Panner* (*factory)(boost::shared_ptr<ARDOUR::Pannable>, boost::shared_ptr<ARDOUR::Speakers>);
 };
 }

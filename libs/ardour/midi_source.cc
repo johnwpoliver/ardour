@@ -20,7 +20,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <float.h>
 #include <cerrno>
 #include <ctime>
@@ -35,10 +34,15 @@
 #include "pbd/pthread_utils.h"
 #include "pbd/basename.h"
 
+#include "evoral/Control.hpp"
+#include "evoral/EventSink.hpp"
+
 #include "ardour/debug.h"
+#include "ardour/file_source.h"
+#include "ardour/midi_channel_filter.h"
 #include "ardour/midi_model.h"
-#include "ardour/midi_state_tracker.h"
 #include "ardour/midi_source.h"
+#include "ardour/midi_state_tracker.h"
 #include "ardour/session.h"
 #include "ardour/session_directory.h"
 #include "ardour/source_factory.h"
@@ -78,7 +82,6 @@ MidiSource::MidiSource (Session& s, const XMLNode& node)
 	}
 }
 
-
 MidiSource::~MidiSource ()
 {
 }
@@ -111,7 +114,6 @@ int
 MidiSource::set_state (const XMLNode& node, int /*version*/)
 {
 	const XMLProperty* prop;
-
 	if ((prop = node.property ("captured-for")) != 0) {
 		_captured_for = prop->value();
 	}
@@ -119,39 +121,31 @@ MidiSource::set_state (const XMLNode& node, int /*version*/)
 	XMLNodeList children = node.children ();
 	for (XMLNodeConstIterator i = children.begin(); i != children.end(); ++i) {
 		if ((*i)->name() == X_("InterpolationStyle")) {
-			XMLProperty* prop;
-
 			if ((prop = (*i)->property (X_("parameter"))) == 0) {
 				error << _("Missing parameter property on InterpolationStyle") << endmsg;
 				return -1;
 			}
-
-			Evoral::Parameter p = EventTypeMap::instance().new_parameter (prop->value());
+			Evoral::Parameter p = EventTypeMap::instance().from_symbol (prop->value());
 
 			if ((prop = (*i)->property (X_("style"))) == 0) {
 				error << _("Missing style property on InterpolationStyle") << endmsg;
 				return -1;
 			}
-
-			Evoral::ControlList::InterpolationStyle s = static_cast<Evoral::ControlList::InterpolationStyle> (string_2_enum (prop->value(), s));
+			Evoral::ControlList::InterpolationStyle s = static_cast<Evoral::ControlList::InterpolationStyle>(
+				string_2_enum (prop->value(), s));
 			set_interpolation_of (p, s);
 
 		} else if ((*i)->name() == X_("AutomationState")) {
-
-			XMLProperty* prop;
-
 			if ((prop = (*i)->property (X_("parameter"))) == 0) {
 				error << _("Missing parameter property on AutomationState") << endmsg;
 				return -1;
 			}
-
-			Evoral::Parameter p = EventTypeMap::instance().new_parameter (prop->value());
+			Evoral::Parameter p = EventTypeMap::instance().from_symbol (prop->value());
 
 			if ((prop = (*i)->property (X_("state"))) == 0) {
 				error << _("Missing state property on AutomationState") << endmsg;
 				return -1;
 			}
-
 			AutoState s = static_cast<AutoState> (string_2_enum (prop->value(), s));
 			set_automation_state_of (p, s);
 		}
@@ -163,13 +157,13 @@ MidiSource::set_state (const XMLNode& node, int /*version*/)
 bool
 MidiSource::empty () const
 {
-	return _length_beats == 0;
+	return !_length_beats;
 }
 
 framecnt_t
 MidiSource::length (framepos_t pos) const
 {
-	if (_length_beats == 0) {
+	if (!_length_beats) {
 		return 0;
 	}
 
@@ -184,89 +178,89 @@ MidiSource::update_length (framecnt_t)
 }
 
 void
-MidiSource::invalidate ()
+MidiSource::invalidate (const Lock& lock, std::set<Evoral::Sequence<Evoral::Beats>::WeakNotePtr>* notes)
 {
 	_model_iter_valid = false;
-	_model_iter.invalidate();
+	_model_iter.invalidate(notes);
 }
 
-/** @param filtered A set of parameters whose MIDI messages will not be returned */
 framecnt_t
-MidiSource::midi_read (Evoral::EventSink<framepos_t>& dst, framepos_t source_start,
-                       framepos_t start, framecnt_t cnt,
-                       MidiStateTracker* tracker,
-                       std::set<Evoral::Parameter> const & filtered) const
+MidiSource::midi_read (const Lock&                        lm,
+                       Evoral::EventSink<framepos_t>&     dst,
+                       framepos_t                         source_start,
+                       framepos_t                         start,
+                       framecnt_t                         cnt,
+                       MidiStateTracker*                  tracker,
+                       MidiChannelFilter*                 filter,
+                       const std::set<Evoral::Parameter>& filtered) const
 {
-	Glib::Threads::Mutex::Lock lm (_lock);
-
 	BeatsFramesConverter converter(_session.tempo_map(), source_start);
 
-	DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("MidiSource::midi-read() %5 sstart %1 start %2 cnt %3 tracker %4\n",
-							  source_start, start, cnt, tracker, name()));
+	DEBUG_TRACE (DEBUG::MidiSourceIO,
+	             string_compose ("MidiSource::midi_read() %5 sstart %1 start %2 cnt %3 tracker %4\n",
+	                             source_start, start, cnt, tracker, name()));
 
 	if (_model) {
-		Evoral::Sequence<double>::const_iterator& i = _model_iter;
-
-		// If the cached iterator is invalid, search for the first event past start
-		if (_last_read_end == 0 || start != _last_read_end || !_model_iter_valid) {
-			DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("*** %1 search for relevant iterator for %1 / %2\n", _name, source_start, start));
-			for (i = _model->begin(0, false, filtered); i != _model->end(); ++i) {
-				if (converter.to(i->time()) >= start) {
-					DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("***\tstop iterator search @ %1\n", i->time()));
-					break;
-				}
-			}
+		// Find appropriate model iterator
+		Evoral::Sequence<Evoral::Beats>::const_iterator& i = _model_iter;
+		const bool linear_read = _last_read_end != 0 && start == _last_read_end;
+		if (!linear_read || !_model_iter_valid) {
+			// Cached iterator is invalid, search for the first event past start
+			i = _model->begin(converter.from(start), false, filtered,
+			                  linear_read ? &_model->active_notes() : NULL);
 			_model_iter_valid = true;
-		} else {
-			DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("*** %1 use cachediterator for %1 / %2\n", _name, source_start, start));
+			if (!linear_read) {
+				_model->active_notes().clear();
+			}
 		}
 
 		_last_read_end = start + cnt;
 
-		// Read events up to end
+		// Copy events in [start, start + cnt) into dst
 		for (; i != _model->end(); ++i) {
 			const framecnt_t time_frames = converter.to(i->time());
 			if (time_frames < start + cnt) {
-				/* convert event times to session frames by adding on the source start position in session frames */
+				if (filter && filter->filter(i->buffer(), i->size())) {
+					DEBUG_TRACE (DEBUG::MidiSourceIO,
+					             string_compose ("%1: filter event @ %2 type %3 size %4\n",
+					                             _name, time_frames + source_start, i->event_type(), i->size()));
+					continue;
+				}
+
+				// Offset by source start to convert event time to session time
 				dst.write (time_frames + source_start, i->event_type(), i->size(), i->buffer());
 
-                                DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("%1: add event @ %2 type %3 size = %4\n",
-                                                                                  _name, time_frames + source_start, i->event_type(), i->size()));
+				DEBUG_TRACE (DEBUG::MidiSourceIO,
+				             string_compose ("%1: add event @ %2 type %3 size %4\n",
+				                             _name, time_frames + source_start, i->event_type(), i->size()));
 
 				if (tracker) {
-					Evoral::MIDIEvent<Evoral::MusicalTime>& ev (*(reinterpret_cast<Evoral::MIDIEvent<Evoral::MusicalTime>*> 
-										      (const_cast<Evoral::Event<Evoral::MusicalTime>*> (&(*i)))));
-					if (ev.is_note_on()) {
-						DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("\t%1 track note on %2 @ %3 velocity %4\n", _name, (int) ev.note(), time_frames, (int) ev.velocity()));
-						tracker->add (ev.note(), ev.channel());
-					} else if (ev.is_note_off()) {
-						DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("\t%1 track note off %2 @ %3\n", _name, (int) ev.note(), time_frames));
-						tracker->remove (ev.note(), ev.channel());
-					}
+					tracker->track (*i);
 				}
 			} else {
-                                DEBUG_TRACE (DEBUG::MidiSourceIO, string_compose ("%1: reached end with event @ %2 vs. %3\n",
-                                                                                  _name, time_frames, start+cnt));
+				DEBUG_TRACE (DEBUG::MidiSourceIO,
+				             string_compose ("%1: reached end with event @ %2 vs. %3\n",
+				                             _name, time_frames, start+cnt));
 				break;
 			}
 		}
 		return cnt;
 	} else {
-		return read_unlocked (dst, source_start, start, cnt, tracker);
+		return read_unlocked (lm, dst, source_start, start, cnt, tracker, filter);
 	}
 }
 
 framecnt_t
-MidiSource::midi_write (MidiRingBuffer<framepos_t>& source,
+MidiSource::midi_write (const Lock&                 lm,
+                        MidiRingBuffer<framepos_t>& source,
                         framepos_t                  source_start,
                         framecnt_t                  cnt)
 {
-	Glib::Threads::Mutex::Lock lm (_lock);
-
-	const framecnt_t ret = write_unlocked (source, source_start, cnt);
+	const framecnt_t ret = write_unlocked (lm, source, source_start, cnt);
 
 	if (cnt == max_framecnt) {
 		_last_read_end = 0;
+		invalidate(lm);
 	} else {
 		_capture_length += cnt;
 	}
@@ -275,7 +269,7 @@ MidiSource::midi_write (MidiRingBuffer<framepos_t>& source,
 }
 
 void
-MidiSource::mark_streaming_midi_write_started (NoteMode mode)
+MidiSource::mark_streaming_midi_write_started (const Lock& lock, NoteMode mode)
 {
 	if (_model) {
 		_model->set_note_mode (mode);
@@ -310,117 +304,107 @@ MidiSource::mark_write_starting_now (framecnt_t position,
 }
 
 void
-MidiSource::mark_streaming_write_started ()
+MidiSource::mark_streaming_write_started (const Lock& lock)
 {
 	NoteMode note_mode = _model ? _model->note_mode() : Sustained;
-	mark_streaming_midi_write_started (note_mode);
+	mark_streaming_midi_write_started (lock, note_mode);
 }
 
 void
-MidiSource::mark_midi_streaming_write_completed (Evoral::Sequence<Evoral::MusicalTime>::StuckNoteOption option, Evoral::MusicalTime end)
+MidiSource::mark_midi_streaming_write_completed (const Lock&                                      lock,
+                                                 Evoral::Sequence<Evoral::Beats>::StuckNoteOption option,
+                                                 Evoral::Beats                                    end)
 {
 	if (_model) {
 		_model->end_write (option, end);
+
+		/* Make captured controls discrete to play back user input exactly. */
+		for (MidiModel::Controls::iterator i = _model->controls().begin(); i != _model->controls().end(); ++i) {
+			if (i->second->list()) {
+				i->second->list()->set_interpolation(Evoral::ControlList::Discrete);
+				_interpolation_style.insert(std::make_pair(i->second->parameter(), Evoral::ControlList::Discrete));
+			}
+		}
 	}
 
+	invalidate(lock);
 	_writing = false;
 }
 
 void
-MidiSource::mark_streaming_write_completed ()
+MidiSource::mark_streaming_write_completed (const Lock& lock)
 {
-	mark_midi_streaming_write_completed (Evoral::Sequence<Evoral::MusicalTime>::DeleteStuckNotes);
+	mark_midi_streaming_write_completed (lock, Evoral::Sequence<Evoral::Beats>::DeleteStuckNotes);
 }
 
-boost::shared_ptr<MidiSource>
-MidiSource::clone (const string& path, Evoral::MusicalTime begin, Evoral::MusicalTime end)
+int
+MidiSource::write_to (const Lock& lock, boost::shared_ptr<MidiSource> newsrc, Evoral::Beats begin, Evoral::Beats end)
 {
-	string newname = PBD::basename_nosuffix(_name.val());
-	string newpath;
+	Lock newsrc_lock (newsrc->mutex ());
 
-	if (path.empty()) {
-
-		/* get a new name for the MIDI file we're going to write to
-		 */
-		
-		do {
-			newname = bump_name_once (newname, '-');
-			newpath = Glib::build_filename (_session.session_directory().midi_path(), newname + ".mid");
-			
-		} while (Glib::file_test (newpath, Glib::FILE_TEST_EXISTS));
-	} else {
-		/* caller must check for pre-existing file */
-		newpath = path;
-	}
-
-	boost::shared_ptr<MidiSource> newsrc = boost::dynamic_pointer_cast<MidiSource>(
-		SourceFactory::createWritable(DataType::MIDI, _session,
-		                              newpath, false, _session.frame_rate()));
-
-	newsrc->set_timeline_position(_timeline_position);
+	newsrc->set_timeline_position (_timeline_position);
 	newsrc->copy_interpolation_from (this);
 	newsrc->copy_automation_state_from (this);
 
 	if (_model) {
-		if (begin == Evoral::MinMusicalTime && end == Evoral::MaxMusicalTime) {
-			_model->write_to (newsrc);
+		if (begin == Evoral::MinBeats && end == Evoral::MaxBeats) {
+			_model->write_to (newsrc, newsrc_lock);
 		} else {
-			_model->write_section_to (newsrc, begin, end);
+			_model->write_section_to (newsrc, newsrc_lock, begin, end);
 		}
 	} else {
 		error << string_compose (_("programming error: %1"), X_("no model for MidiSource during ::clone()"));
-		return boost::shared_ptr<MidiSource>();
+		return -1;
 	}
 
-	newsrc->flush_midi();
+	newsrc->flush_midi(newsrc_lock);
 
 	/* force a reload of the model if the range is partial */
 
-	if (begin != Evoral::MinMusicalTime || end != Evoral::MaxMusicalTime) {
-		newsrc->load_model (true, true);
+	if (begin != Evoral::MinBeats || end != Evoral::MaxBeats) {
+		newsrc->load_model (newsrc_lock, true);
 	} else {
-		newsrc->set_model (_model);
+		newsrc->set_model (newsrc_lock, _model);
 	}
 
-	return newsrc;
+	/* this file is not removable (but since it is MIDI, it is mutable) */
+
+	boost::dynamic_pointer_cast<FileSource> (newsrc)->prevent_deletion ();
+
+	return 0;
 }
 
 void
 MidiSource::session_saved()
 {
+	Lock lm (_lock);
+
 	/* this writes a copy of the data to disk.
 	   XXX do we need to do this every time?
 	*/
 
 	if (_model && _model->edited()) {
-		
-		// if the model is edited, write its contents into
-		// the current source file (overwiting previous contents.
+		/* The model is edited, write its contents into the current source
+		   file (overwiting previous contents). */
 
-		/* temporarily drop our reference to the model so that
-		   as the model pushes its current state to us, we don't
-		   try to update it.
-		*/
-
+		/* Temporarily drop our reference to the model so that as the model
+		   pushes its current state to us, we don't try to update it. */
 		boost::shared_ptr<MidiModel> mm = _model;
 		_model.reset ();
 
-		/* flush model contents to disk
-		 */
+		/* Flush model contents to disk. */
+		mm->sync_to_source (lm);
 
-		mm->sync_to_source ();
-
-		/* reacquire model */
-
+		/* Reacquire model. */
 		_model = mm;
 
 	} else {
-		flush_midi();
+		flush_midi(lm);
 	}
 }
 
 void
-MidiSource::set_note_mode(NoteMode mode)
+MidiSource::set_note_mode(const Lock& lock, NoteMode mode)
 {
 	if (_model) {
 		_model->set_note_mode(mode);
@@ -428,20 +412,21 @@ MidiSource::set_note_mode(NoteMode mode)
 }
 
 void
-MidiSource::drop_model ()
+MidiSource::drop_model (const Lock& lock)
 {
 	_model.reset();
+	invalidate(lock);
 	ModelChanged (); /* EMIT SIGNAL */
 }
 
 void
-MidiSource::set_model (boost::shared_ptr<MidiModel> m)
+MidiSource::set_model (const Lock& lock, boost::shared_ptr<MidiModel> m)
 {
 	_model = m;
+	invalidate(lock);
 	ModelChanged (); /* EMIT SIGNAL */
 }
 
-/** @return Interpolation style that should be used for control parameter \a p */
 Evoral::ControlList::InterpolationStyle
 MidiSource::interpolation_of (Evoral::Parameter p) const
 {

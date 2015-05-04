@@ -51,7 +51,6 @@
 #include "actions.h"
 #include "mixer_ui.h"
 #include "startup.h"
-#include "utils.h"
 #include "window_manager.h"
 #include "global_port_matrix.h"
 #include "location_ui.h"
@@ -137,16 +136,20 @@ ARDOUR_UI::install_actions ()
 	ActionManager::session_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (main_actions, X_("CloseVideo"), _("Remove Video"),
 					      sigc::mem_fun (*this, &ARDOUR_UI::remove_video));
-	ActionManager::session_sensitive_actions.push_back (act);
+	act->set_sensitive (false);
 	act = ActionManager::register_action (main_actions, X_("ExportVideo"), _("Export To Video File"),
-					      sigc::mem_fun (*editor, &PublicEditor::export_video));
+			hide_return (sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::export_video), false)));
 	ActionManager::session_sensitive_actions.push_back (act);
 
-	act = ActionManager::register_action (main_actions, X_("Snapshot"), _("Snapshot..."), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::snapshot_session), false));
+	act = ActionManager::register_action (main_actions, X_("SnapshotStay"), _("Snapshot (& keep working on current version) ..."), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::snapshot_session), false));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::write_sensitive_actions.push_back (act);
 
-	act = ActionManager::register_action (main_actions, X_("SaveAs"), _("Save As..."), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::snapshot_session), true));
+	act = ActionManager::register_action (main_actions, X_("SnapshotSwitch"), _("Snapshot (& switch to new version) ..."), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::snapshot_session), true));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::write_sensitive_actions.push_back (act);
+
+	act = ActionManager::register_action (main_actions, X_("SaveAs"), _("Save As..."), sigc::mem_fun(*this, &ARDOUR_UI::save_session_as));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::write_sensitive_actions.push_back (act);
 
@@ -183,39 +186,6 @@ ARDOUR_UI::install_actions ()
 	ActionManager::write_sensitive_actions.push_back (act);
 	ActionManager::session_sensitive_actions.push_back (act);
 
-	/* JACK actions for controlling ... JACK */
-
-	Glib::RefPtr<ActionGroup> jack_actions = ActionGroup::create (X_("JACK"));
-	ActionManager::register_action (jack_actions, X_("JACK"), _("JACK"));
-	ActionManager::register_action (jack_actions, X_("Latency"), _("Latency"));
-
-	act = ActionManager::register_action (jack_actions, X_("JACKReconnect"), _("Reconnect"), sigc::mem_fun (*(ARDOUR_UI::instance()), &ARDOUR_UI::reconnect_to_jack));
-	ActionManager::jack_opposite_sensitive_actions.push_back (act);
-
-	act = ActionManager::register_action (jack_actions, X_("JACKDisconnect"), _("Disconnect"), sigc::mem_fun (*(ARDOUR_UI::instance()), &ARDOUR_UI::disconnect_from_jack));
-	ActionManager::jack_sensitive_actions.push_back (act);
-
-	RadioAction::Group jack_latency_group;
-
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency32"), X_("32"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 32));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency64"), X_("64"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 64));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency128"), X_("128"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 128));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency256"), X_("256"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 256));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency512"), X_("512"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 512));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency1024"), X_("1024"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 1024));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency2048"), X_("2048"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 2048));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency4096"), X_("4096"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 4096));
-	ActionManager::jack_sensitive_actions.push_back (act);
-	act = ActionManager::register_radio_action (jack_actions, jack_latency_group, X_("JACKLatency8192"), X_("8192"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::set_jack_buffer_size), (pframes_t) 8192));
-	ActionManager::jack_sensitive_actions.push_back (act);
-
 	/* these actions are intended to be shared across all windows */
 
 	common_actions = ActionGroup::create (X_("Common"));
@@ -224,11 +194,18 @@ ARDOUR_UI::install_actions ()
 	/* windows visibility actions */
 
 	ActionManager::register_toggle_action (common_actions, X_("ToggleMaximalEditor"), _("Maximise Editor Space"), sigc::mem_fun (*this, &ARDOUR_UI::toggle_editing_space));
+	ActionManager::register_toggle_action (common_actions, X_("ToggleMaximalMixer"), _("Maximise Mixer Space"), sigc::mem_fun (*this, &ARDOUR_UI::toggle_mixer_space));
 	act = ActionManager::register_toggle_action (common_actions, X_("KeepTearoffs"), _("Show Toolbars"), mem_fun (*this, &ARDOUR_UI::toggle_keep_tearoffs));
 	ActionManager::session_sensitive_actions.push_back (act);
 
+if (Profile->get_mixbus())
+	ActionManager::register_action (common_actions, X_("show-ui-prefs"), _("Show more UI preferences"), sigc::mem_fun (*this, &ARDOUR_UI::show_ui_prefs));
+
 	ActionManager::register_toggle_action (common_actions, X_("toggle-mixer"), S_("Window|Mixer"),  sigc::mem_fun(*this, &ARDOUR_UI::toggle_mixer_window));
 	ActionManager::register_action (common_actions, X_("toggle-editor-mixer"), _("Toggle Editor+Mixer"),  sigc::mem_fun(*this, &ARDOUR_UI::toggle_editor_mixer));
+	ActionManager::register_toggle_action (common_actions, X_("toggle-meterbridge"), S_("Window|Meterbridge"),  sigc::mem_fun(*this, &ARDOUR_UI::toggle_meterbridge));
+
+	ActionManager::register_action (common_actions, X_("reattach-all-tearoffs"), _("Reattach All Tearoffs"), sigc::mem_fun (*this, &ARDOUR_UI::reattach_all_tearoffs));
 
 	act = ActionManager::register_action (common_actions, X_("NewMIDITracer"), _("MIDI Tracer"), sigc::mem_fun(*this, &ARDOUR_UI::new_midi_tracer_window));
 	ActionManager::session_sensitive_actions.push_back (act);
@@ -236,6 +213,12 @@ ARDOUR_UI::install_actions ()
 	/** TRANSLATORS: This is `Manual' in the sense of an instruction book that tells a user how to use Ardour */
 	ActionManager::register_action (common_actions, X_("Manual"), S_("Help|Manual"),  mem_fun(*this, &ARDOUR_UI::launch_manual));
 	ActionManager::register_action (common_actions, X_("Reference"), _("Reference"),  mem_fun(*this, &ARDOUR_UI::launch_reference));
+	ActionManager::register_action (common_actions, X_("Tracker"), _("Report A Bug"), mem_fun(*this, &ARDOUR_UI::launch_tracker));
+	ActionManager::register_action (common_actions, X_("Cheat_Sheet"), _("Cheat Sheet"), mem_fun(*this, &ARDOUR_UI::launch_cheat_sheet));
+	ActionManager::register_action (common_actions, X_("Website"), _("Ardour Website"), mem_fun(*this, &ARDOUR_UI::launch_website));
+	ActionManager::register_action (common_actions, X_("Website_Dev"), _("Ardour Development"), mem_fun(*this, &ARDOUR_UI::launch_website_dev));
+	ActionManager::register_action (common_actions, X_("Forums"), _("User Forums"), mem_fun(*this, &ARDOUR_UI::launch_forums));
+	ActionManager::register_action (common_actions, X_("Howto_Report"), _("How to report a bug"), mem_fun(*this, &ARDOUR_UI::launch_howto_report));
 
 	act = ActionManager::register_action (common_actions, X_("Save"), _("Save"),  sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::save_state), string(""), false));
 	ActionManager::session_sensitive_actions.push_back (act);
@@ -259,6 +242,9 @@ ARDOUR_UI::install_actions ()
 	ActionManager::transport_sensitive_actions.push_back (act);
 
 	act = ActionManager::register_action (transport_actions, X_("ToggleRoll"), _("Start/Stop"), sigc::bind (sigc::mem_fun (*this, &ARDOUR_UI::toggle_roll), false, false));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("alternate-ToggleRoll"), _("Start/Stop"), sigc::bind (sigc::mem_fun (*this, &ARDOUR_UI::toggle_roll), false, false));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (transport_actions, X_("ToggleRollMaybe"), _("Start/Continue/Stop"), sigc::bind (sigc::mem_fun (*this, &ARDOUR_UI::toggle_roll), false, true));
@@ -285,7 +271,7 @@ ARDOUR_UI::install_actions ()
 	act = ActionManager::register_action (transport_actions, X_("Loop"), _("Play Loop Range"), sigc::mem_fun(*this, &ARDOUR_UI::toggle_session_auto_loop));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
-	act = ActionManager::register_action (transport_actions, X_("PlaySelection"), _("Play Selected Range"), sigc::mem_fun(*this, &ARDOUR_UI::transport_play_selection));
+	act = ActionManager::register_action (transport_actions, X_("PlaySelection"), _("Play Selection"), sigc::mem_fun(*this, &ARDOUR_UI::transport_play_selection));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (transport_actions, X_("PlayPreroll"), _("Play Selection w/Preroll"), sigc::mem_fun(*this, &ARDOUR_UI::transport_play_preroll));
@@ -296,6 +282,10 @@ ARDOUR_UI::install_actions ()
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::write_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (transport_actions, X_("record-roll"), _("Start Recording"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::transport_record), true));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::write_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("alternate-record-roll"), _("Start Recording"), sigc::bind (sigc::mem_fun(*this, &ARDOUR_UI::transport_record), true));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::write_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
@@ -323,10 +313,51 @@ ARDOUR_UI::install_actions ()
 	act = ActionManager::register_action (transport_actions, X_("GotoStart"), _("Goto Start"), sigc::mem_fun(*this, &ARDOUR_UI::transport_goto_start));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("alternate-GotoStart"), _("Goto Start"), sigc::mem_fun(*this, &ARDOUR_UI::transport_goto_start));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (transport_actions, X_("GotoEnd"), _("Goto End"), sigc::mem_fun(*this, &ARDOUR_UI::transport_goto_end));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
 	act = ActionManager::register_action (transport_actions, X_("GotoWallClock"), _("Goto Wall Clock"), sigc::mem_fun(*this, &ARDOUR_UI::transport_goto_wallclock));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+
+	//these actions handle the numpad events, ProTools style
+	act = ActionManager::register_action (transport_actions, X_("numpad-decimal"), _("Numpad Decimal"), mem_fun(*this, &ARDOUR_UI::transport_numpad_decimal));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("alternate-numpad-decimal"), _("Numpad Decimal"), mem_fun(*this, &ARDOUR_UI::transport_numpad_decimal));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-0"), _("Numpad 0"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 0));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-1"), _("Numpad 1"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 1));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-2"), _("Numpad 2"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 2));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-3"), _("Numpad 3"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 3));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-4"), _("Numpad 4"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 4));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-5"), _("Numpad 5"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 5));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-6"), _("Numpad 6"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 6));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-7"), _("Numpad 7"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 7));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-8"), _("Numpad 8"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 8));
+	ActionManager::session_sensitive_actions.push_back (act);
+	ActionManager::transport_sensitive_actions.push_back (act);
+	act = ActionManager::register_action (transport_actions, X_("numpad-9"), _("Numpad 9"), bind (mem_fun(*this, &ARDOUR_UI::transport_numpad_event), 9));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
 
@@ -376,7 +407,7 @@ ARDOUR_UI::install_actions ()
 	act = ActionManager::register_toggle_action (transport_actions, X_("ToggleAutoReturn"), _("Auto Return"), sigc::mem_fun(*this, &ARDOUR_UI::toggle_auto_return));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
-	act = ActionManager::register_toggle_action (transport_actions, X_("ToggleFollowEdits"), _("Follow Edits"), sigc::mem_fun(*this, &ARDOUR_UI::toggle_always_play_range));
+	act = ActionManager::register_toggle_action (transport_actions, X_("ToggleFollowEdits"), _("Follow Edits"), sigc::mem_fun(*this, &ARDOUR_UI::toggle_follow_edits));
 	ActionManager::session_sensitive_actions.push_back (act);
 	ActionManager::transport_sensitive_actions.push_back (act);
 
@@ -420,66 +451,11 @@ ARDOUR_UI::install_actions ()
 
 	ActionManager::add_action_group (shuttle_actions);
 	ActionManager::add_action_group (option_actions);
-	ActionManager::add_action_group (jack_actions);
 	ActionManager::add_action_group (transport_actions);
 	ActionManager::add_action_group (main_actions);
 	ActionManager::add_action_group (main_menu_actions);
 	ActionManager::add_action_group (common_actions);
 	ActionManager::add_action_group (midi_actions);
-}
-
-void
-ARDOUR_UI::set_jack_buffer_size (pframes_t nframes)
-{
-	Glib::RefPtr<Action> action;
-	const char* action_name = 0;
-
-	switch (nframes) {
-	case 32:
-		action_name = X_("JACKLatency32");
-		break;
-	case 64:
-		action_name = X_("JACKLatency64");
-		break;
-	case 128:
-		action_name = X_("JACKLatency128");
-		break;
-	case 256:
-		action_name = X_("JACKLatency256");
-		break;
-	case 512:
-		action_name = X_("JACKLatency512");
-		break;
-	case 1024:
-		action_name = X_("JACKLatency1024");
-		break;
-	case 2048:
-		action_name = X_("JACKLatency2048");
-		break;
-	case 4096:
-		action_name = X_("JACKLatency4096");
-		break;
-	case 8192:
-		action_name = X_("JACKLatency8192");
-		break;
-	default:
-		/* XXX can we do anything useful ? */
-		break;
-	}
-
-	if (action_name) {
-
-		action = ActionManager::get_action (X_("JACK"), action_name);
-
-		if (action) {
-			Glib::RefPtr<RadioAction> ract = Glib::RefPtr<RadioAction>::cast_dynamic (action);
-
-			if (ract && ract->get_active()) {
-				engine->request_buffer_size (nframes);
-				update_sample_rate (0);
-			}
-		}
-	}
 }
 
 void
@@ -519,6 +495,8 @@ ARDOUR_UI::build_menu_bar ()
 	timecode_format_label.set_use_markup ();
 	cpu_load_label.set_name ("CPULoad");
 	cpu_load_label.set_use_markup ();
+	xrun_label.set_name ("XrunLabel");
+	xrun_label.set_use_markup ();
 	buffer_load_label.set_name ("BufferLoad");
 	buffer_load_label.set_use_markup ();
 	sample_rate_label.set_name ("SampleRate");
@@ -542,29 +520,36 @@ ARDOUR_UI::build_menu_bar ()
 #endif
 		disk_space = true;
 	}
-	
+
+	hbox->pack_end (error_alert_button, false, false, 2);
+
 	hbox->pack_end (wall_clock_label, false, false, 2);
 	hbox->pack_end (disk_space_label, false, false, 4);
+	hbox->pack_end (xrun_label, false, false, 4);
 	hbox->pack_end (cpu_load_label, false, false, 4);
 	hbox->pack_end (buffer_load_label, false, false, 4);
 	hbox->pack_end (sample_rate_label, false, false, 4);
 	hbox->pack_end (timecode_format_label, false, false, 4);
 	hbox->pack_end (format_label, false, false, 4);
 
-	menu_hbox.pack_end (*ev, false, false, 6);
+	menu_hbox.pack_end (*ev, false, false, 2);
 
 	menu_bar_base.set_name ("MainMenuBar");
 	menu_bar_base.add (menu_hbox);
 
+#ifndef GTKOSX
 	_status_bar_visibility.add (&wall_clock_label,      X_("WallClock"), _("Wall Clock"), wall_clock);
+#endif
 	_status_bar_visibility.add (&disk_space_label,      X_("Disk"),      _("Disk Space"), disk_space);
 	_status_bar_visibility.add (&cpu_load_label,        X_("DSP"),       _("DSP"), true);
+	_status_bar_visibility.add (&xrun_label,            X_("XRun"),      _("X-run"), false);
 	_status_bar_visibility.add (&buffer_load_label,     X_("Buffers"),   _("Buffers"), true);
-	_status_bar_visibility.add (&sample_rate_label,     X_("JACK"),      _("JACK Sampling Rate and Latency"), true);
+	_status_bar_visibility.add (&sample_rate_label,     X_("Audio"),     _("Audio"), true);
 	_status_bar_visibility.add (&timecode_format_label, X_("TCFormat"),  _("Timecode Format"), true);
 	_status_bar_visibility.add (&format_label,          X_("Format"),    _("File Format"), true);
 
 	ev->signal_button_press_event().connect (sigc::mem_fun (_status_bar_visibility, &VisibilityGroup::button_press_event));
+	ev->signal_button_release_event().connect (sigc::mem_fun (*this, &ARDOUR_UI::xrun_button_release));
 }
 
 void
@@ -602,7 +587,7 @@ ARDOUR_UI::use_menubar_as_top_menubar ()
 void
 ARDOUR_UI::save_ardour_state ()
 {
-	if (!keyboard || !mixer || !editor) {
+	if (!keyboard || !mixer || !editor || !meterbridge) {
 		return;
 	}
 
@@ -631,13 +616,13 @@ ARDOUR_UI::save_ardour_state ()
 		tearoff_node->add_child_nocopy (*t);
 	}
 
-	if (mixer && mixer->monitor_section()) {
+	if (mixer->monitor_section()) {
 		XMLNode* t = new XMLNode (X_("monitor-section"));
 		mixer->monitor_section()->tearoff().add_state (*t);
 		tearoff_node->add_child_nocopy (*t);
 	}
 
-	if (editor && editor->mouse_mode_tearoff()) {
+	if (editor->mouse_mode_tearoff()) {
 		XMLNode* t = new XMLNode (X_("mouse-mode"));
 		editor->mouse_mode_tearoff ()->add_state (*t);
 		tearoff_node->add_child_nocopy (*t);
@@ -646,21 +631,20 @@ ARDOUR_UI::save_ardour_state ()
 	window_node->add_child_nocopy (*tearoff_node);
 
 	Config->add_extra_xml (*window_node);
+	Config->add_extra_xml (audio_midi_setup->get_state());
 
-	if (_startup && _startup->engine_control() && _startup->engine_control()->was_used()) {
-		Config->add_extra_xml (_startup->engine_control()->get_state());
-	}
 	Config->save_state();
-	if (ui_config->dirty()) {
-		ui_config->save_state ();
-	}
+
+	ui_config->save_state ();
 
 	XMLNode& enode (static_cast<Stateful*>(editor)->get_state());
 	XMLNode& mnode (mixer->get_state());
+	XMLNode& bnode (meterbridge->get_state());
 
 	if (_session) {
 		_session->add_instant_xml (enode);
 		_session->add_instant_xml (mnode);
+		_session->add_instant_xml (bnode);
 		if (location_ui) {
 			_session->add_instant_xml (location_ui->ui().get_state ());
 		}
@@ -671,6 +655,7 @@ ARDOUR_UI::save_ardour_state ()
 			Config->add_instant_xml (location_ui->ui().get_state ());
 		}
 	}
+	delete &enode;
 
 	Keyboard::save_keybindings ();
 }
@@ -680,6 +665,7 @@ ARDOUR_UI::resize_text_widgets ()
 {
 	set_size_request_to_display_given_text (cpu_load_label, "DSP: 100.0%", 2, 2);
 	set_size_request_to_display_given_text (buffer_load_label, "Buffers: p:100% c:100%", 2, 2);
+	set_size_request_to_display_given_text (xrun_label, "X: 9999", 2, 2);
 }
 
 void
@@ -689,4 +675,18 @@ ARDOUR_UI::focus_on_clock ()
 		editor->present ();
 		primary_clock->focus ();
 	}
+}
+
+bool
+ARDOUR_UI::xrun_button_release (GdkEventButton* ev)
+{
+	if (ev->button != 1 || !Keyboard::modifier_state_equals (ev->state, Keyboard::TertiaryModifier)) {
+		return false;
+	}
+
+	if (_session) {
+		_session->reset_xrun_count ();
+		update_xrun_count ();
+	}
+	return true;
 }

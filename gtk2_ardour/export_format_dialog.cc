@@ -51,6 +51,8 @@ ExportFormatDialog::ExportFormatDialog (FormatPtr format, bool new_dialog) :
   silence_end_checkbox (_("Add silence at end:")),
   silence_end_clock ("silence_end", true, "", true, false, true),
 
+  command_label(_("Command to run post-export\n(%f=full path & filename, %d=directory, %b=basename):"), Gtk::ALIGN_LEFT),
+
   format_table (3, 4),
   compatibility_label (_("Compatibility"), Gtk::ALIGN_LEFT),
   quality_label (_("Quality"), Gtk::ALIGN_LEFT),
@@ -67,6 +69,7 @@ ExportFormatDialog::ExportFormatDialog (FormatPtr format, bool new_dialog) :
 
   with_cue (_("Create CUE file for disk-at-once CD/DVD creation")),
   with_toc (_("Create TOC file for disk-at-once CD/DVD creation")),
+  with_mp4chaps (_("Create chapter mark file for MP4 chapter marks")),
 
   tag_checkbox (_("Tag file with session's metadata"))
 {
@@ -113,6 +116,11 @@ ExportFormatDialog::ExportFormatDialog (FormatPtr format, bool new_dialog) :
 	silence_table.attach (silence_end_checkbox, 1, 2, 2, 3);
 	silence_table.attach (silence_end_clock, 2, 3, 2, 3);
 
+	/* Post-export hook script */
+
+	get_vbox()->pack_start (command_label, false, false);
+	get_vbox()->pack_start (command_entry, false, false);
+
 	/* Format table */
 
 	init_format_table();
@@ -142,9 +150,12 @@ ExportFormatDialog::ExportFormatDialog (FormatPtr format, bool new_dialog) :
 
 	with_cue.signal_toggled().connect (sigc::mem_fun (*this, &ExportFormatDialog::update_with_cue));
 	with_toc.signal_toggled().connect (sigc::mem_fun (*this, &ExportFormatDialog::update_with_toc));
+	with_mp4chaps.signal_toggled().connect (sigc::mem_fun (*this, &ExportFormatDialog::update_with_mp4chaps));
+	command_entry.signal_changed().connect (sigc::mem_fun (*this, &ExportFormatDialog::update_command));
 
 	cue_toc_vbox.pack_start (with_cue, false, false);
 	cue_toc_vbox.pack_start (with_toc, false, false);
+	cue_toc_vbox.pack_start (with_mp4chaps, false, false);
 
 	/* Load state before hooking up the rest of the signals */
 
@@ -253,6 +264,7 @@ ExportFormatDialog::load_state (FormatPtr spec)
 
 	with_cue.set_active (spec->with_cue());
 	with_toc.set_active (spec->with_toc());
+	with_mp4chaps.set_active (spec->with_mp4chaps());
 
 	for (Gtk::ListStore::Children::iterator it = src_quality_list->children().begin(); it != src_quality_list->children().end(); ++it) {
 		if (it->get_value (src_quality_cols.id) == spec->src_quality()) {
@@ -296,6 +308,7 @@ ExportFormatDialog::load_state (FormatPtr spec)
 	}
 
 	tag_checkbox.set_active (spec->tag());
+	command_entry.set_text (spec->command());
 }
 
 void
@@ -718,6 +731,18 @@ ExportFormatDialog::update_with_toc ()
 }
 
 void
+ExportFormatDialog::update_with_mp4chaps ()
+{
+	manager.select_with_mp4chaps (with_mp4chaps.get_active());
+}
+
+void
+ExportFormatDialog::update_command ()
+{
+	manager.set_command (command_entry.get_text());
+}
+
+void
 ExportFormatDialog::update_description()
 {
 	std::string text = ": " + format->description(false);
@@ -896,8 +921,6 @@ ExportFormatDialog::show_ogg_enconding_options (boost::shared_ptr<ARDOUR::Export
 
 	encoding_options_table.resize (1, 1);
 	encoding_options_table.attach (tag_checkbox, 0, 1, 0, 1);
-
-	update_tagging_selection ();
 
 	show_all_children ();
 }

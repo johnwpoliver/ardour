@@ -29,13 +29,12 @@
 #include <boost/shared_ptr.hpp>
 
 #include <glib.h>
-#include <cassert>
-
-#include <pthread.h>
 
 #include "pbd/semutils.h"
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
+#include "ardour/audio_backend.h"
 #include "ardour/session_handle.h"
 
 namespace ARDOUR
@@ -53,12 +52,10 @@ typedef boost::shared_ptr<GraphNode> node_ptr_t;
 typedef std::list< node_ptr_t > node_list_t;
 typedef std::set< node_ptr_t > node_set_t;
 
-class Graph : public SessionHandleRef
+class LIBARDOUR_API Graph : public SessionHandleRef
 {
 public:
 	Graph (Session & session);
-
-	uint32_t threads_in_use () const { return _thread_list.size(); }
 
 	void prep();
 	void trigger (GraphNode * n);
@@ -92,8 +89,7 @@ protected:
 	virtual void session_going_away ();
 
 private:
-	std::list<pthread_t> _thread_list;
-	volatile bool        _quit_threads;
+	volatile bool        _threads_active;
 
 	void reset_thread_list ();
 	void drop_threads ();
@@ -140,6 +136,10 @@ private:
 	bool _process_noroll;
 	int  _process_retval;
 	bool _process_need_butler;
+
+	// enginer / thread connection
+	PBD::ScopedConnectionList engine_connections;
+	void engine_stopped ();
 };
 
 } // namespace

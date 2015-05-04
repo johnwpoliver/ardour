@@ -23,7 +23,10 @@
 #include <fstream>
 #include <iostream>
 
+#include <cerrno>
 #include <ctype.h>
+
+#include <glib/gstdio.h>
 
 #include <gtkmm/widget.h>
 #include <gtkmm/window.h>
@@ -31,10 +34,12 @@
 #include <gdk/gdkkeysyms.h>
 
 #include "pbd/error.h"
+#include "pbd/convert.h"
 #include "pbd/file_utils.h"
 #include "pbd/search_path.h"
 #include "pbd/xml++.h"
 #include "pbd/debug.h"
+#include "pbd/unwind.h"
 
 #include "gtkmm2ext/keyboard.h"
 #include "gtkmm2ext/actions.h"
@@ -93,6 +98,11 @@ const char* Keyboard::rangeselect_modifier_name() { return S_("Key|Shift"); }
 
 guint Keyboard::GainFineScaleModifier = Keyboard::PrimaryModifier;
 guint Keyboard::GainExtraFineScaleModifier = Keyboard::SecondaryModifier;
+
+guint Keyboard::ScrollZoomVerticalModifier = Keyboard::SecondaryModifier;
+guint Keyboard::ScrollZoomHorizontalModifier = Keyboard::PrimaryModifier;
+guint Keyboard::ScrollHorizontalModifier = Keyboard::TertiaryModifier;
+
 
 Keyboard*    Keyboard::_the_keyboard = 0;
 Gtk::Window* Keyboard::current_window = 0;
@@ -228,8 +238,9 @@ Keyboard::snooper (GtkWidget *widget, GdkEventKey *event)
 	DEBUG_TRACE (
 		DEBUG::Keyboard,
 		string_compose (
-			"Snoop widget %1 key %2 type %3 state %4 magic %5\n",
-			widget, event->keyval, event->type, event->state, _some_magic_widget_has_focus
+			"Snoop widget %1 name: [%6] key %2 type %3 state %4 magic %5\n",
+			widget, event->keyval, event->type, event->state, _some_magic_widget_has_focus,
+			gtk_widget_get_name (widget)
 			)
 		);
 
@@ -243,12 +254,15 @@ Keyboard::snooper (GtkWidget *widget, GdkEventKey *event)
 		keyval = event->keyval;
 	}
 
-	if (keyval == GDK_Shift_L) {
+	if (event->state & ScrollZoomVerticalModifier) {
 		/* There is a special and rather hacky situation in Editor which makes
-		   it useful to know when a shift key has been released, so emit a signal
-		   here (see Editor::_stepping_axis_view)
+		   it useful to know when the modifier key for vertical zoom has been
+		   released, so emit a signal here (see Editor::_stepping_axis_view).
+		   Note that the state bit for the modifier key is set for the key-up
+		   event when the modifier is released, but not the key-down when it
+		   is pressed, so we get here on key-up, which is what we want.
 		*/
-		ShiftReleased (); /* EMIT SIGNAL */
+		ZoomVerticalModifierReleased (); /* EMIT SIGNAL */
 	}
 
 	if (event->type == GDK_KEY_PRESS) {
@@ -316,6 +330,8 @@ Keyboard::snooper (GtkWidget *widget, GdkEventKey *event)
 		}
 	}
 
+	DEBUG_TRACE (DEBUG::Keyboard, string_compose ("snooper returns %1\n", ret));
+
 	return ret;
 }
 
@@ -338,6 +354,7 @@ bool
 Keyboard::enter_window (GdkEventCrossing *, Gtk::Window* win)
 {
 	current_window = win;
+	DEBUG_TRACE (DEBUG::Keyboard, string_compose ("Entering window, title = %1\n", win->get_title()));
 	return false;
 }
 
@@ -363,6 +380,29 @@ Keyboard::leave_window (GdkEventCrossing *ev, Gtk::Window* /*win*/)
 	} else {
 		current_window = 0;
 	}
+
+	return false;
+}
+
+bool
+Keyboard::focus_in_window (GdkEventFocus *, Gtk::Window* win)
+{
+	current_window = win;
+	DEBUG_TRACE (DEBUG::Keyboard, string_compose ("Focusing in window, title = %1\n", win->get_title()));
+	return false;
+}
+
+bool
+Keyboard::focus_out_window (GdkEventFocus * ev, Gtk::Window* win)
+{
+	if (ev) {
+		state.clear ();
+		current_window = 0;
+	}  else {
+		current_window = 0;
+	}
+
+	DEBUG_TRACE (DEBUG::Keyboard, string_compose ("Foucusing out window, title = %1\n", win->get_title()));
 
 	return false;
 }
@@ -573,3 +613,24 @@ Keyboard::load_keybindings (string path)
 	return true;
 }
 
+int
+Keyboard::reset_bindings ()
+{
+	if (Glib::file_test (user_keybindings_path,  Glib::FILE_TEST_EXISTS)) {
+
+		string new_path = user_keybindings_path;
+		new_path += ".old";
+		
+		if (::g_rename (user_keybindings_path.c_str(), new_path.c_str())) {
+			error << string_compose (_("Cannot rename your own keybinding file (%1)"), strerror (errno)) << endmsg;
+			return -1;
+		} 
+	}
+
+	{
+		PBD::Unwinder<bool> uw (can_save_keybindings, false);
+		setup_keybindings ();
+	}
+
+	return 0;
+}

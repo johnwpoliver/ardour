@@ -25,7 +25,6 @@
 
 #include "pbd/floating.h"
 #include "pbd/locale_guard.h"
-#include "pbd/pathscanner.h"
 
 #include "ardour/vst_plugin.h"
 #include "ardour/vestige/aeffectx.h"
@@ -46,12 +45,12 @@ VSTPlugin::VSTPlugin (AudioEngine& engine, Session& session, VSTHandle* handle)
 	, _state (0)
 	, _plugin (0)
 {
-	
+
 }
 
 VSTPlugin::~VSTPlugin ()
 {
-	
+
 }
 
 void
@@ -78,7 +77,7 @@ VSTPlugin::activate ()
 	_plugin->dispatcher (_plugin, effMainsChanged, 0, 1, NULL, 0.0f);
 }
 
-int 
+int
 VSTPlugin::set_block_size (pframes_t nframes)
 {
 	deactivate ();
@@ -93,13 +92,13 @@ VSTPlugin::default_value (uint32_t)
 	return 0;
 }
 
-float 
+float
 VSTPlugin::get_parameter (uint32_t which) const
 {
 	return _plugin->getParameter (_plugin, which);
 }
 
-void 
+void
 VSTPlugin::set_parameter (uint32_t which, float newval)
 {
 	float oldval = get_parameter (which);
@@ -109,7 +108,7 @@ VSTPlugin::set_parameter (uint32_t which, float newval)
 	}
 
 	_plugin->setParameter (_plugin, which, newval);
-	
+
 	float curval = get_parameter (which);
 
 	if (!PBD::floateq (curval, oldval, 1)) {
@@ -159,7 +158,7 @@ VSTPlugin::set_chunk (gchar const * data, bool single)
 void
 VSTPlugin::add_state (XMLNode* root) const
 {
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	if (_plugin->flags & 32 /* effFlagsProgramsChunks */) {
 
@@ -196,15 +195,16 @@ VSTPlugin::add_state (XMLNode* root) const
 int
 VSTPlugin::set_state (const XMLNode& node, int version)
 {
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
+	int ret = -1;
 
 	if (node.name() != state_node_name()) {
 		error << _("Bad node sent to VSTPlugin::set_state") << endmsg;
 		return 0;
 	}
 
+#ifndef NO_PLUGIN_STATE
 	XMLNode* child;
-	int ret = -1;
 
 	if ((child = find_named_node (node, X_("chunk"))) != 0) {
 
@@ -214,8 +214,8 @@ VSTPlugin::set_state (const XMLNode& node, int version)
 		for (n = child->children ().begin (); n != child->children ().end (); ++n) {
 			if ((*n)->is_content ()) {
 				/* XXX: this may be dubious for the same reasons that we delay
-				   execution of load_preset.
-				*/
+					 execution of load_preset.
+					 */
 				ret = set_chunk ((*n)->content().c_str(), false);
 			}
 		}
@@ -237,6 +237,7 @@ VSTPlugin::set_state (const XMLNode& node, int version)
 		ret = 0;
 
 	}
+#endif
 
 	Plugin::set_state (node, version);
 	return ret;
@@ -248,6 +249,7 @@ VSTPlugin::get_parameter_descriptor (uint32_t which, ParameterDescriptor& desc) 
 {
 	VstParameterProperties prop;
 
+	memset (&prop, 0, sizeof (VstParameterProperties));
 	desc.min_unbound = false;
 	desc.max_unbound = false;
 	prop.flags = 0;
@@ -255,6 +257,7 @@ VSTPlugin::get_parameter_descriptor (uint32_t which, ParameterDescriptor& desc) 
 	if (_plugin->dispatcher (_plugin, effGetParameterProperties, which, 0, &prop, 0)) {
 
 		/* i have yet to find or hear of a VST plugin that uses this */
+		/* RG: faust2vsti does use this :) */
 
 		if (prop.flags & kVstParameterUsesIntegerMinMax) {
 			desc.lower = prop.minInteger;
@@ -285,6 +288,10 @@ VSTPlugin::get_parameter_descriptor (uint32_t which, ParameterDescriptor& desc) 
 			desc.largestep = desc.step * 10.0f;
 		}
 
+		if (strlen(prop.label) == 0) {
+			_plugin->dispatcher (_plugin, effGetParamName, which, 0, prop.label, 0);
+		}
+
 		desc.toggled = prop.flags & kVstParameterIsSwitch;
 		desc.logarithmic = false;
 		desc.sr_dependent = false;
@@ -296,10 +303,10 @@ VSTPlugin::get_parameter_descriptor (uint32_t which, ParameterDescriptor& desc) 
 
 		char label[64];
 		/* some VST plugins expect this buffer to be zero-filled */
-		memset (label, sizeof (label), 0);
+		memset (label, 0, sizeof (label));
 
 		_plugin->dispatcher (_plugin, effGetParamName, which, 0, label, 0);
-		
+
 		desc.label = label;
 		desc.integer_step = false;
 		desc.lower = 0.0f;
@@ -333,7 +340,7 @@ VSTPlugin::load_preset (PresetRecord r)
 	return s;
 }
 
-bool 
+bool
 VSTPlugin::load_plugin_preset (PresetRecord r)
 {
 	/* This is a plugin-provided preset.
@@ -346,15 +353,14 @@ VSTPlugin::load_plugin_preset (PresetRecord r)
 #ifndef NDEBUG
 	int const p = sscanf (r.uri.c_str(), "VST:%d:%d", &id, &index);
 	assert (p == 2);
-#else 
+#else
 	sscanf (r.uri.c_str(), "VST:%d:%d", &id, &index);
 #endif
-	
 	_state->want_program = index;
 	return true;
 }
 
-bool 
+bool
 VSTPlugin::load_user_preset (PresetRecord r)
 {
 	/* This is a user preset; we load it, and this code also knows about the
@@ -400,7 +406,7 @@ VSTPlugin::load_user_preset (PresetRecord r)
 			return false;
 
 		} else {
-			
+
 			for (XMLNodeList::const_iterator j = (*i)->children().begin(); j != (*i)->children().end(); ++j) {
 				if ((*j)->name() == X_("Parameter")) {
 						XMLProperty* index = (*j)->property (X_("index"));
@@ -418,7 +424,7 @@ VSTPlugin::load_user_preset (PresetRecord r)
 	return false;
 }
 
-string 
+string
 VSTPlugin::do_save_preset (string name)
 {
 	boost::shared_ptr<XMLTree> t (presets_tree ());
@@ -464,7 +470,7 @@ VSTPlugin::do_save_preset (string name)
 	return uri;
 }
 
-void 
+void
 VSTPlugin::do_remove_preset (string name)
 {
 	boost::shared_ptr<XMLTree> t (presets_tree ());
@@ -480,11 +486,11 @@ VSTPlugin::do_remove_preset (string name)
 	t->write (f);
 }
 
-string 
+string
 VSTPlugin::describe_parameter (Evoral::Parameter param)
 {
 	char name[64];
-	memset (name, sizeof (name), 0);
+	memset (name, 0, sizeof (name));
 
 	/* some VST plugins expect this buffer to be zero-filled */
 
@@ -497,7 +503,7 @@ VSTPlugin::describe_parameter (Evoral::Parameter param)
 	return name;
 }
 
-framecnt_t 
+framecnt_t
 VSTPlugin::signal_latency () const
 {
 	if (_user_latency) {
@@ -507,7 +513,7 @@ VSTPlugin::signal_latency () const
 	return *((int32_t *) (((char *) &_plugin->flags) + 12)); /* initialDelay */
 }
 
-set<Evoral::Parameter> 
+set<Evoral::Parameter>
 VSTPlugin::automatable () const
 {
 	set<Evoral::Parameter> ret;
@@ -521,82 +527,121 @@ VSTPlugin::automatable () const
 
 int
 VSTPlugin::connect_and_run (BufferSet& bufs,
-			    ChanMapping in_map, ChanMapping out_map,
-			    pframes_t nframes, framecnt_t offset)
+		ChanMapping in_map, ChanMapping out_map,
+		pframes_t nframes, framecnt_t offset)
 {
 	Plugin::connect_and_run (bufs, in_map, out_map, nframes, offset);
 
-	float *ins[_plugin->numInputs];
-	float *outs[_plugin->numOutputs];
+	ChanCount bufs_count;
+	bufs_count.set(DataType::AUDIO, 1);
+	bufs_count.set(DataType::MIDI, 1);
+	_midi_out_buf = 0;
+
+	BufferSet& silent_bufs  = _session.get_silent_buffers(bufs_count);
+	BufferSet& scratch_bufs = _session.get_scratch_buffers(bufs_count);
+
+	/* VC++ doesn't support the C99 extension that allows
+
+	   typeName foo[variableDefiningSize];
+
+	   Use alloca instead of dynamic array (rather than std::vector which
+	   allocs on the heap) because this is realtime code.
+	*/
+
+	float** ins = (float**)alloca(_plugin->numInputs*sizeof(float*));
+	float** outs = (float**)alloca(_plugin->numOutputs*sizeof(float*));
+
 	int32_t i;
 
-	const uint32_t nbufs = bufs.count().n_audio();
-
-	int in_index = 0;
+	uint32_t in_index = 0;
 	for (i = 0; i < (int32_t) _plugin->numInputs; ++i) {
-		ins[i] = bufs.get_audio(min((uint32_t) in_index, nbufs - 1)).data() + offset;
-		in_index++;
+		uint32_t  index;
+		bool      valid = false;
+		index = in_map.get(DataType::AUDIO, in_index++, &valid);
+		ins[i] = (valid)
+					? bufs.get_audio(index).data(offset)
+					: silent_bufs.get_audio(0).data(offset);
 	}
 
-	int out_index = 0;
+	uint32_t out_index = 0;
 	for (i = 0; i < (int32_t) _plugin->numOutputs; ++i) {
-		outs[i] = bufs.get_audio(min((uint32_t) out_index, nbufs - 1)).data() + offset;
-		out_index++;
+		uint32_t  index;
+		bool      valid = false;
+		index = out_map.get(DataType::AUDIO, out_index++, &valid);
+		outs[i] = (valid)
+					? bufs.get_audio(index).data(offset)
+					: scratch_bufs.get_audio(0).data(offset);
 	}
 
 	if (bufs.count().n_midi() > 0) {
-		VstEvents* v = bufs.get_vst_midi (0);
-		_plugin->dispatcher (_plugin, effProcessEvents, 0, 0, v, 0);
+		VstEvents* v = 0;
+		bool valid = false;
+		const uint32_t buf_index_in = in_map.get(DataType::MIDI, 0, &valid);
+		if (valid) {
+			v = bufs.get_vst_midi (buf_index_in);
+		}
+		valid = false;
+		const uint32_t buf_index_out = out_map.get(DataType::MIDI, 0, &valid);
+		if (valid) {
+			_midi_out_buf = &bufs.get_midi(buf_index_out);
+			_midi_out_buf->silence(0, 0);
+		} else {
+			_midi_out_buf = 0;
+		}
+		if (v) {
+			_plugin->dispatcher (_plugin, effProcessEvents, 0, 0, v, 0);
+		}
 	}
 
 	/* we already know it can support processReplacing */
-	_plugin->processReplacing (_plugin, ins, outs, nframes);
+	_plugin->processReplacing (_plugin, &ins[0], &outs[0], nframes);
+	_midi_out_buf = 0;
 
 	return 0;
 }
 
-string 
+string
 VSTPlugin::unique_id () const
 {
 	char buf[32];
 
 	snprintf (buf, sizeof (buf), "%d", _plugin->uniqueID);
-	
+
 	return string (buf);
 }
 
 
-const char * 
+const char *
 VSTPlugin::name () const
 {
 	return _handle->name;
 }
 
-const char * 
+const char *
 VSTPlugin::maker () const
 {
 	return _info->creator.c_str();
 }
 
-const char * 
+const char *
 VSTPlugin::label () const
 {
 	return _handle->name;
 }
 
-uint32_t 
+uint32_t
 VSTPlugin::parameter_count () const
 {
 	return _plugin->numParams;
 }
 
-bool 
+bool
 VSTPlugin::has_editor () const
 {
 	return _plugin->flags & effFlagsHasEditor;
 }
 
-void 
+void
 VSTPlugin::print_parameter (uint32_t param, char *buf, uint32_t /*len*/) const
 {
 	char *first_nonws;

@@ -36,7 +36,7 @@
 
 #include "gtkmm2ext/actions.h"
 
-#include "utils.h"
+#include "ardour_ui.h"
 #include "actions.h"
 #include "i18n.h"
 
@@ -58,8 +58,8 @@ vector<RefPtr<Gtk::Action> > ActionManager::playlist_selection_sensitive_actions
 vector<RefPtr<Gtk::Action> > ActionManager::mouse_edit_point_requires_canvas_actions;
 
 vector<RefPtr<Gtk::Action> > ActionManager::range_sensitive_actions;
-vector<RefPtr<Gtk::Action> > ActionManager::jack_sensitive_actions;
-vector<RefPtr<Gtk::Action> > ActionManager::jack_opposite_sensitive_actions;
+vector<RefPtr<Gtk::Action> > ActionManager::engine_sensitive_actions;
+vector<RefPtr<Gtk::Action> > ActionManager::engine_opposite_sensitive_actions;
 vector<RefPtr<Gtk::Action> > ActionManager::transport_sensitive_actions;
 vector<RefPtr<Gtk::Action> > ActionManager::edit_point_in_region_sensitive_actions;
 
@@ -72,11 +72,11 @@ ActionManager::init ()
 }
 
 void
-ActionManager::load_menus ()
+ActionManager::load_menus (const string& menus_file)
 {
 	std::string ui_file;
 
-	find_file_in_search_path (ardour_config_search_path(), "ardour.menus", ui_file);
+	find_file (ardour_config_search_path(), menus_file, ui_file);
 
 	bool loaded = false;
 
@@ -85,15 +85,15 @@ ActionManager::load_menus ()
 		info << string_compose (_("Loading menus from %1"), ui_file) << endmsg;
 		loaded = true;
 	} catch (Glib::MarkupError& err) {
-		error << string_compose (_("badly formatted UI definition file: %1"), err.what()) << endmsg;
-		cerr << string_compose (_("badly formatted UI definition file: %1"), err.what()) << endl;
+		error << string_compose (_("badly formatted menu definition file: %1"), err.what()) << endmsg;
+		cerr << string_compose (_("badly formatted menu definition file: %1"), err.what()) << endl;
 	} catch (...) {
 		error << string_compose (_("%1 menu definition file not found"), PROGRAM_NAME) << endmsg;
 	}
 
 	if (!loaded) {
-		cerr << string_compose (_("%1 will not work without a valid ardour.menus file"), PROGRAM_NAME) << endl;
-		error << string_compose (_("%1 will not work without a valid ardour.menus file"), PROGRAM_NAME) << endmsg;
+		cerr << string_compose (_("%1 will not work without a valid menu definition file"), PROGRAM_NAME) << endl;
+		error << string_compose (_("%1 will not work without a valid menu definition file"), PROGRAM_NAME) << endmsg;
 		exit(1);
 	}
 }
@@ -118,6 +118,31 @@ ActionManager::toggle_config_state (const char* group, const char* action, bool 
 
 			if (x != tact->get_active()) {
 				(Config->*set) (!x);
+			}
+		}
+	}
+}
+
+/** Examine the state of a Configuration setting and a toggle action, and toggle the Configuration
+ * setting if its state doesn't match the toggle action.
+ * @param group Action group.
+ * @param action Action name.
+ * @param Method to set the state of the Configuration setting.
+ * @param Method to get the state of the Configuration setting.
+ */
+void
+ActionManager::toggle_config_state (const char* group, const char* action, bool (UIConfiguration::*set)(bool), bool (UIConfiguration::*get)(void) const)
+{
+	Glib::RefPtr<Action> act = ActionManager::get_action (group, action);
+
+	if (act) {
+		Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic(act);
+
+		if (tact) {
+			bool x = (ARDOUR_UI::config()->*get)();
+
+			if (x != tact->get_active()) {
+				(ARDOUR_UI::config()->*set) (!x);
 			}
 		}
 	}
@@ -157,6 +182,29 @@ ActionManager::map_some_state (const char* group, const char* action, bool (RCCo
 		if (tact) {
 
 			bool x = (Config->*get)();
+
+			if (tact->get_active() != x) {
+				tact->set_active (x);
+			}
+		}
+	}
+}
+
+/** Set the state of a ToggleAction using a particular Configuration get() method
+ * @param group Action group.
+ * @param action Action name.
+ * @param get Method to obtain the state that the ToggleAction should have.
+ */
+void
+ActionManager::map_some_state (const char* group, const char* action, bool (UIConfiguration::*get)() const)
+{
+	Glib::RefPtr<Action> act = ActionManager::get_action (group, action);
+	if (act) {
+		Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic(act);
+
+		if (tact) {
+
+			bool x = (ARDOUR_UI::config()->*get)();
 
 			if (tact->get_active() != x) {
 				tact->set_active (x);

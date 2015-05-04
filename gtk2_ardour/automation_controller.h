@@ -42,40 +42,67 @@ namespace ARDOUR {
 	class Automatable;
 }
 
+class AutomationBarController : public Gtkmm2ext::BarController {
+public:
+	AutomationBarController(boost::shared_ptr<ARDOUR::Automatable>       printer,
+	                        boost::shared_ptr<ARDOUR::AutomationControl> ac,
+	                        Gtk::Adjustment*                             adj);
+	~AutomationBarController();
+private:
+	std::string get_label (double&);
+	boost::shared_ptr<ARDOUR::Automatable>       _printer;
+	boost::shared_ptr<ARDOUR::AutomationControl> _controllable;
+};
+
 /** A BarController which displays the value and allows control of an AutomationControl */
-class AutomationController : public Gtkmm2ext::BarController {
+class AutomationController : public Gtk::Alignment {
 public:
 	static boost::shared_ptr<AutomationController> create(
-			boost::shared_ptr<ARDOUR::Automatable> parent,
-			const Evoral::Parameter& param,
-			boost::shared_ptr<ARDOUR::AutomationControl> ac);
+		boost::shared_ptr<ARDOUR::Automatable>       parent,
+		const Evoral::Parameter&                     param,
+		const ARDOUR::ParameterDescriptor&           desc,
+		boost::shared_ptr<ARDOUR::AutomationControl> ac);
 
 	~AutomationController();
 
 	boost::shared_ptr<ARDOUR::AutomationControl> controllable() { return _controllable; }
 
+	void disable_vertical_scroll();
+
 	Gtk::Adjustment* adjustment() { return _adjustment; }
+	Gtk::Widget*     widget()     { return _widget; }
 
 	void display_effective_value();
 	void value_adjusted();
 
 	void stop_updating ();
 
+	sigc::signal<void> StartGesture;
+	sigc::signal<void> StopGesture;
+
 private:
-	AutomationController (boost::shared_ptr<ARDOUR::Automatable> printer, boost::shared_ptr<ARDOUR::AutomationControl> ac, Gtk::Adjustment* adj);
-	std::string get_label (double&);
+	AutomationController (boost::shared_ptr<ARDOUR::Automatable>       printer,
+	                      boost::shared_ptr<ARDOUR::AutomationControl> ac,
+	                      Gtk::Adjustment*                             adj);
 
 	void start_touch();
 	void end_touch();
+	void toggled();
+
+	void run_note_select_dialog();
+	void set_ratio(double ratio);
+	void set_freq_beats(double beats);
+	bool on_button_release(GdkEventButton* ev);
 
 	void value_changed();
 
-	bool                                         _ignore_change;
-        boost::shared_ptr<ARDOUR::Automatable>       _printer;
+	Gtk::Widget*                                 _widget;
+	boost::shared_ptr<ARDOUR::Automatable>       _printer;
 	boost::shared_ptr<ARDOUR::AutomationControl> _controllable;
 	Gtk::Adjustment*                             _adjustment;
 	sigc::connection                             _screen_update_connection;
 	PBD::ScopedConnection                        _changed_connection;
+	bool                                         _ignore_change;
 };
 
 

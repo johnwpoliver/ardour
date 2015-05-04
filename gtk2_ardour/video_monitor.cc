@@ -18,23 +18,28 @@
 
 */
 #include "pbd/file_utils.h"
+#include "pbd/convert.h"
 #include "gui_thread.h"
-#include "ardour_ui.h"
+#include "timers.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include "public_editor.h"
+#include "editor.h"
 #include "video_monitor.h"
 
 #include "i18n.h"
 
 using namespace std;
+using namespace PBD;
+using namespace ARDOUR_UI_UTILS;
 
 VideoMonitor::VideoMonitor (PublicEditor *ed, std::string xjadeo_bin_path)
 	: editor (ed)
 {
 	manually_seeked_frame = 0;
 	fps =0.0; // = _session->timecode_frames_per_second();
-	sync_by_manual_seek = false;
+	sync_by_manual_seek = true;
 	_restore_settings_mask = 0;
 	clock_connection = sigc::connection();
 	state_connection = sigc::connection();
@@ -43,9 +48,10 @@ VideoMonitor::VideoMonitor (PublicEditor *ed, std::string xjadeo_bin_path)
 	starting = 0;
 	osdmode = 10; // 1: frameno, 2: timecode, 8: box
 
-	process = new SystemExec(xjadeo_bin_path, X_("-R"));
+	process = new ARDOUR::SystemExec(xjadeo_bin_path, X_("-R -J"));
 	process->ReadStdout.connect_same_thread (*this, boost::bind (&VideoMonitor::parse_output, this, _1 ,_2));
 	process->Terminated.connect (*this, invalidator (*this), boost::bind (&VideoMonitor::terminated, this), gui_context());
+	XJKeyEvent.connect (*this, invalidator (*this), boost::bind (&VideoMonitor::forward_keyevent, this, _1), gui_context());
 }
 
 VideoMonitor::~VideoMonitor ()
@@ -89,7 +95,7 @@ VideoMonitor::query_full_state (bool wait)
 	process->write_to_stdin("get osdcfg\n");
 	int timeout = 40;
 	if (wait && knownstate !=127 && --timeout) {
-		usleep(50000);
+		Glib::usleep(50000);
 		sched_yield();
 	}
 }
@@ -100,6 +106,7 @@ VideoMonitor::quit ()
 	if (!is_started()) return;
 	if (state_connection.connected()) { state_connection.disconnect(); }
 	if (clock_connection.connected()) { clock_connection.disconnect(); }
+	query_full_state(true);
 	process->write_to_stdin("quit\n");
 	/* the 'quit' command should result in process termination
 	 * but in case it fails (communication failure, SIGSTOP, ??)
@@ -107,7 +114,7 @@ VideoMonitor::quit ()
 	 */
 	int timeout = 40;
 	while (is_started() && --timeout) {
-		usleep(50000);
+		Glib::usleep(50000);
 		sched_yield();
 	}
 	if (timeout <= 0) {
@@ -121,14 +128,26 @@ VideoMonitor::open (std::string filename)
 	if (!is_started()) return;
 	manually_seeked_frame = 0;
 	osdmode = 10; // 1: frameno, 2: timecode, 8: box
-	sync_by_manual_seek = false;
 	starting = 15;
 	process->write_to_stdin("load " + filename + "\n");
 	process->write_to_stdin("set fps -1\n");
 	process->write_to_stdin("window resize 100%\n");
 	process->write_to_stdin("window ontop on\n");
 	process->write_to_stdin("set seekmode 1\n");
-	process->write_to_stdin("set override 47\n");
+	/* override bitwise flags -- see xjadeo.h
+	 * 0x0001 : ignore 'q', ESC  / quit
+	 * 0x0002 : ignore "window closed by WM" / quit
+	 * 0x0004 : (osx only) menu-exit / quit
+	 * 0x0008 : ignore mouse-button 1 -- resize
+	 * 0x0010 : no A/V offset control with keyboard
+	 * 0x0020 : don't use jack-session
+	 * 0x0040 : disable jack transport control
+	 * 0x0080 : disallow sync source change (OSX menu)
+	 * 0x0100 : disallow file open (OSX menu, X11 DnD)
+	 */
+	process->write_to_stdin("set override 504\n");
+	process->write_to_stdin("notify keyboard\n");
+	process->write_to_stdin("notify settings\n");
 	process->write_to_stdin("window letterbox on\n");
 	process->write_to_stdin("osd mode 10\n");
 	for(XJSettings::const_iterator it = xjadeo_settings.begin(); it != xjadeo_settings.end(); ++it) {
@@ -140,8 +159,10 @@ VideoMonitor::open (std::string filename)
 		querystate();
 		state_clk_divide = 0;
 		/* TODO once every two second or so -- state_clk_divide hack below */
-		state_connection = ARDOUR_UI::RapidScreenUpdate.connect (sigc::mem_fun (*this, &VideoMonitor::querystate));
+		state_connection = Timers::rapid_connect (sigc::mem_fun (*this, &VideoMonitor::querystate));
 	}
+	sync_by_manual_seek = true;
+	clock_connection = Timers::fps_connect (sigc::mem_fun (*this, &VideoMonitor::srsupdate));
 	xjadeo_sync_setup();
 }
 
@@ -183,6 +204,7 @@ void
 VideoMonitor::send_cmd (int what, int param)
 {
 	bool osd_update = false;
+	int prev_osdmode = osdmode;
 	if (!is_started()) return;
 	switch (what) {
 		case 1:
@@ -192,17 +214,17 @@ VideoMonitor::send_cmd (int what, int param)
 		case 2:
 			if (param) osdmode |= 2;
 			else osdmode &= ~2;
-			osd_update = true;
+			osd_update = (prev_osdmode != osdmode);
 			break;
 		case 3:
 			if (param) osdmode |= 1;
 			else osdmode &= ~1;
-			osd_update = true;
+			osd_update = (prev_osdmode != osdmode);
 			break;
 		case 4:
 			if (param) osdmode |= 8;
 			else osdmode &= ~8;
-			osd_update = true;
+			osd_update = (prev_osdmode != osdmode);
 			break;
 		case 5:
 			if (param) process->write_to_stdin("window zoom on\n");
@@ -218,7 +240,7 @@ VideoMonitor::send_cmd (int what, int param)
 		default:
 			break;
 	}
-	if (osd_update >= 0) {
+	if (osd_update) {
 		std::ostringstream osstream; osstream << "osd mode " << osdmode << "\n";
 		process->write_to_stdin(osstream.str());
 	}
@@ -228,6 +250,14 @@ bool
 VideoMonitor::is_started ()
 {
 	return process->is_running();
+}
+
+void
+VideoMonitor::forward_keyevent (unsigned int keyval)
+{
+	Editor* ed = dynamic_cast<Editor*>(&PublicEditor::instance());
+	if (!ed) return;
+	emulate_key_event(ed, keyval);
 }
 
 void
@@ -248,7 +278,7 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 			printf("xjadeo: '%s'\n", line.c_str());
 		}
 #endif
-		int status = atoi(line.substr(1,3).c_str());
+		int status = atoi(line.substr(1,3));
 		switch(status / 100) {
 			case 4: /* errors */
 				if (status == 403) {
@@ -258,8 +288,41 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 					 */
 					process->write_to_stdin("quit\n");
 				}
-			case 1: /* requested async notifications */
-			case 3: /* warnings ; command succeeded, but status is negative. */
+#ifdef DEBUG_XJCOM
+			else
+				printf("xjadeo: error '%s'\n", line.c_str());
+#endif
+			break;
+			case 3: /* async notifications */
+			{
+				std::string::size_type equalsign = line.find('=');
+				std::string::size_type comment = line.find('#');
+				if (comment != std::string::npos) { line = line.substr(0,comment); }
+				if (equalsign != std::string::npos) {
+					std::string key = line.substr(5, equalsign - 5);
+					std::string value = line.substr(equalsign + 1);
+
+					if (status == 310 && key=="keypress") {
+						/* keyboard event */
+						XJKeyEvent((unsigned int)atoi(value));
+					}
+#ifdef DEBUG_XJCOM
+					else {
+						std::string msg = line.substr(5);
+						printf("xjadeo: async '%s' -> '%s'\n", key, value);
+					}
+#endif
+				}
+#ifdef DEBUG_XJCOM
+				else {
+					std::string msg = line.substr(5);
+					printf("xjadeo: async '%s'\n", msg.c_str());
+				}
+#endif
+			} break;
+			case 1: /* text messages - command reply */
+				break;
+			case 8: /* comments / info for humans */
 				break;
 			case 2:
 /* replies:
@@ -295,7 +358,7 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 						knownstate |= 2;
 						if (starting || xjadeo_settings["window ontop"] != value) {
 							if (!starting && _session) _session->set_dirty ();
-							if (atoi(value.c_str())) { UiState("xjadeo-window-ontop-on"); }
+							if (atoi(value)) { UiState("xjadeo-window-ontop-on"); }
 							else { UiState("xjadeo-window-ontop-off"); }
 							starting &= ~2;
 						}
@@ -304,7 +367,7 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 						knownstate |= 4;
 						if (starting || xjadeo_settings["window zoom"] != value) {
 							if (!starting && _session) _session->set_dirty ();
-							if (atoi(value.c_str())) { UiState("xjadeo-window-fullscreen-on"); }
+							if (atoi(value)) { UiState("xjadeo-window-fullscreen-on"); }
 							else { UiState("xjadeo-window-fullscreen-off"); }
 							starting &= ~4;
 						}
@@ -313,15 +376,15 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 						knownstate |= 8;
 						if (starting || xjadeo_settings["window letterbox"] != value) {
 							if (!starting && _session) _session->set_dirty ();
-							if (atoi(value.c_str())) { UiState("xjadeo-window-letterbox-on"); }
+							if (atoi(value)) { UiState("xjadeo-window-letterbox-on"); }
 							else { UiState("xjadeo-window-letterbox-off"); }
 							starting &= ~8;
 						}
 						xjadeo_settings["window letterbox"] = value;
 					} else if(key ==  "osdmode") {
 						knownstate |= 1;
-						osdmode = atoi(value.c_str());
-						if (starting || atoi(xjadeo_settings["osd mode"].c_str()) != osdmode) {
+						osdmode = atoi(value);
+						if (starting || atoi(xjadeo_settings["osd mode"]) != osdmode) {
 							if (!starting && _session) _session->set_dirty ();
 							if ((osdmode & 1) == 1) { UiState("xjadeo-window-osd-frame-on"); }
 							if ((osdmode & 1) == 0) { UiState("xjadeo-window-osd-frame-off"); }
@@ -338,6 +401,10 @@ VideoMonitor::parse_output (std::string d, size_t /*s*/)
 							if (!starting && _session) _session->set_dirty ();
 						}
 						xjadeo_settings["set offset"] = value;
+#ifdef DEBUG_XJCOM
+					} else {
+						printf("xjadeo: '%s' -> '%s'\n", key.c_str(), value.c_str());
+#endif
 					}
 				}
 			}
@@ -359,8 +426,9 @@ void
 VideoMonitor::save_session ()
 {
 	if (!_session) { return; }
-	XMLNode* node = _session->extra_xml (X_("XJSettings"));
+	XMLNode* node = _session->extra_xml (X_("XJSettings"), true);
 	if (!node) return;
+	node->remove_nodes_and_delete("XJSetting");
 
 	for(XJSettings::const_iterator it = xjadeo_settings.begin(); it != xjadeo_settings.end(); ++it) {
 	  XMLNode* child = node->add_child (X_("XJSetting"));
@@ -387,16 +455,6 @@ VideoMonitor::set_session (ARDOUR::Session *s)
   }
 }
 
-void
-VideoMonitor::clear_session_state ()
-{
-	xjadeo_settings.clear();
-	if (!_session) { return; }
-	XMLNode* node = new XMLNode(X_("XJSettings"));
-	_session->add_extra_xml (*node);
-	_session->set_dirty ();
-}
-
 bool
 VideoMonitor::set_custom_setting (const std::string k, const std::string v)
 {
@@ -410,7 +468,7 @@ VideoMonitor::get_custom_setting (const std::string k)
 	return (xjadeo_settings[k]);
 }
 
-#define NO_OFFSET (1<<31) //< skip setting or modifying offset --  TODO check ARDOUR::frameoffset_t max value.
+#define NO_OFFSET (ARDOUR::max_framepos) //< skip setting or modifying offset
 void
 VideoMonitor::srsupdate ()
 {
@@ -427,21 +485,23 @@ VideoMonitor::set_offset (ARDOUR::frameoffset_t offset)
 	if (offset == NO_OFFSET ) { return; }
 
 	framecnt_t video_frame_offset;
-	framecnt_t audio_frame_rate;
+	framecnt_t audio_sample_rate;
 	if (_session->config.get_videotimeline_pullup()) {
-		audio_frame_rate = _session->frame_rate();
+		audio_sample_rate = _session->frame_rate();
 	} else {
-		audio_frame_rate = _session->nominal_frame_rate();
+		audio_sample_rate = _session->nominal_frame_rate();
 	}
 
 	/* Note: pull-up/down are applied here: frame_rate() vs. nominal_frame_rate() */
 	if (_session->config.get_use_video_file_fps()) {
-		video_frame_offset = floor(offset * fps / audio_frame_rate);
+		video_frame_offset = floor(offset * fps / audio_sample_rate);
 	} else {
-		video_frame_offset = floor(offset * _session->timecode_frames_per_second() / audio_frame_rate);
+		video_frame_offset = floor(offset * _session->timecode_frames_per_second() / audio_sample_rate);
 	}
 
-	// TODO remember if changed..
+	if (video_offset == video_frame_offset) { return; }
+	video_offset = video_frame_offset;
+
 	std::ostringstream osstream1; osstream1 << -1 * video_frame_offset;
 	process->write_to_stdin("set offset " + osstream1.str() + "\n");
 }
@@ -452,18 +512,18 @@ VideoMonitor::manual_seek (framepos_t when, bool /*force*/, ARDOUR::frameoffset_
 	if (!is_started()) { return; }
 	if (!_session) { return; }
 	framecnt_t video_frame;
-	framecnt_t audio_frame_rate;
+	framecnt_t audio_sample_rate;
 	if (_session->config.get_videotimeline_pullup()) {
-		audio_frame_rate = _session->frame_rate();
+		audio_sample_rate = _session->frame_rate();
 	} else {
-		audio_frame_rate = _session->nominal_frame_rate();
+		audio_sample_rate = _session->nominal_frame_rate();
 	}
 
 	/* Note: pull-up/down are applied here: frame_rate() vs. nominal_frame_rate() */
 	if (_session->config.get_use_video_file_fps()) {
-		video_frame = floor(when * fps / audio_frame_rate);
+		video_frame = floor(when * fps / audio_sample_rate);
 	} else {
-		video_frame = floor(when * _session->timecode_frames_per_second() / audio_frame_rate);
+		video_frame = floor(when * _session->timecode_frames_per_second() / audio_sample_rate);
 	}
 	if (video_frame < 0 ) video_frame = 0;
 
@@ -498,7 +558,7 @@ VideoMonitor::xjadeo_sync_setup ()
 
 	bool my_manual_seek = true;
 	if (_session->config.get_external_sync()) {
-		if (ARDOUR::Config->get_sync_source() == ARDOUR::JACK)
+		if (ARDOUR::Config->get_sync_source() == ARDOUR::Engine)
 			my_manual_seek = false;
 	}
 
@@ -510,7 +570,7 @@ VideoMonitor::xjadeo_sync_setup ()
 			process->write_to_stdin("jack connect\n");
 		} else {
 			process->write_to_stdin("jack disconnect\n");
-			clock_connection = ARDOUR_UI::SuperRapidScreenUpdate.connect (sigc::mem_fun (*this, &VideoMonitor::srsupdate));
+			clock_connection = Timers::fps_connect (sigc::mem_fun (*this, &VideoMonitor::srsupdate));
 		}
 		sync_by_manual_seek = my_manual_seek;
 	}

@@ -33,7 +33,7 @@
 #include "main_clock.h"
 #include "gui_thread.h"
 #include "region_editor.h"
-#include "utils.h"
+#include "public_editor.h"
 
 #include "i18n.h"
 
@@ -161,7 +161,6 @@ RegionEditor::RegionEditor (Session* s, boost::shared_ptr<Region> r)
 	set_name ("RegionEditorWindow");
 	add_events (Gdk::KEY_PRESS_MASK|Gdk::KEY_RELEASE_MASK);
 
-	signal_delete_event().connect (sigc::bind (sigc::ptr_fun (just_hide_it), static_cast<Window *> (this)));
 	signal_response().connect (sigc::mem_fun (*this, &RegionEditor::handle_response));
 
 	set_title (string_compose (_("Region '%1'"), _region->name()));
@@ -271,7 +270,7 @@ RegionEditor::connect_editor_events ()
 void
 RegionEditor::position_clock_changed ()
 {
-	_session->begin_reversible_command (_("change region start position"));
+	PublicEditor::instance().begin_reversible_command (_("change region start position"));
 
 	boost::shared_ptr<Playlist> pl = _region->playlist();
 
@@ -281,13 +280,13 @@ RegionEditor::position_clock_changed ()
 		_session->add_command(new StatefulDiffCommand (_region));
 	}
 
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 }
 
 void
 RegionEditor::end_clock_changed ()
 {
-	_session->begin_reversible_command (_("change region end position"));
+	PublicEditor::instance().begin_reversible_command (_("change region end position"));
 
 	boost::shared_ptr<Playlist> pl = _region->playlist();
 
@@ -297,7 +296,7 @@ RegionEditor::end_clock_changed ()
 		_session->add_command(new StatefulDiffCommand (_region));
 	}
 
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 
 	end_clock.set (_region->position() + _region->length() - 1, true);
 }
@@ -307,7 +306,7 @@ RegionEditor::length_clock_changed ()
 {
 	framecnt_t frames = length_clock.current_time();
 
-	_session->begin_reversible_command (_("change region length"));
+	PublicEditor::instance().begin_reversible_command (_("change region length"));
 
 	boost::shared_ptr<Playlist> pl = _region->playlist();
 
@@ -317,7 +316,7 @@ RegionEditor::length_clock_changed ()
 		_session->add_command(new StatefulDiffCommand (_region));
 	}
 
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 
 	length_clock.set (_region->length());
 }
@@ -401,25 +400,25 @@ RegionEditor::audition_state_changed (bool yn)
 void
 RegionEditor::sync_offset_absolute_clock_changed ()
 {
-	_session->begin_reversible_command (_("change region sync point"));
+	PublicEditor::instance().begin_reversible_command (_("change region sync point"));
 
         _region->clear_changes ();
 	_region->set_sync_position (sync_offset_absolute_clock.current_time());
 	_session->add_command (new StatefulDiffCommand (_region));
 
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 }
 
 void
 RegionEditor::sync_offset_relative_clock_changed ()
 {
-	_session->begin_reversible_command (_("change region sync point"));
+	PublicEditor::instance().begin_reversible_command (_("change region sync point"));
 
         _region->clear_changes ();
 	_region->set_sync_position (sync_offset_relative_clock.current_time() + _region->position ());
 	_session->add_command (new StatefulDiffCommand (_region));
 
-	_session->commit_reversible_command ();
+	PublicEditor::instance().commit_reversible_command ();
 }
 
 bool

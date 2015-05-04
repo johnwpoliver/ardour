@@ -55,12 +55,15 @@ setup_enum_writer ()
 	AlignStyle _AlignStyle;
 	AlignChoice _AlignChoice;
 	MeterPoint _MeterPoint;
+	MeterType _MeterType;
 	TrackMode _TrackMode;
 	NoteMode _NoteMode;
 	ChannelMode _ChannelMode;
 	ColorMode _ColorMode;
 	MeterFalloff _MeterFalloff;
 	MeterHold _MeterHold;
+	VUMeterStandard _VUMeterStandard;
+	MeterLineUp _MeterLineUp;
 	EditMode _EditMode;
 	RegionPoint _RegionPoint;
 	Placement _Placement;
@@ -71,8 +74,6 @@ setup_enum_writer ()
 	AFLPosition _AFLPosition;
 	RemoteModel _RemoteModel;
 	DenormalModel _DenormalModel;
-	CrossfadeModel _CrossfadeModel;
-	CrossfadeChoice _CrossfadeChoice;
 	InsertMergePolicy _InsertMergePolicy;
 	ListenPosition _ListenPosition;
 	SampleFormat _SampleFormat;
@@ -84,15 +85,16 @@ setup_enum_writer ()
 	ShuttleUnits _ShuttleUnits;
 	Session::RecordState _Session_RecordState;
 	SessionEvent::Type _SessionEvent_Type;
+	SessionEvent::Action _SessionEvent_Action;
 	TimecodeFormat _Session_TimecodeFormat;
 	Session::PullupFormat _Session_PullupFormat;
 	FadeShape _FadeShape;
+	RegionSelectionAfterSplit _RegionSelectionAfterSplit;
 	IOChange _IOChange;
 	AutomationType _AutomationType;
 	AutoState _AutoState;
 	AutoStyle _AutoStyle;
 	AutoConnectOption _AutoConnectOption;
-	RouteSortOrderKey _RouteSortOrderKey;
 	Session::StateOfTheState _Session_StateOfTheState;
 	Route::Flag _Route_Flag;
 	Source::Flag _Source_Flag;
@@ -133,10 +135,12 @@ setup_enum_writer ()
 #define REGISTER_CLASS_ENUM(t,e) i.push_back (t::e); s.push_back (#e)
 
 	REGISTER_ENUM (GainAutomation);
+	REGISTER_ENUM (TrimAutomation);
 	REGISTER_ENUM (PanAzimuthAutomation);
 	REGISTER_ENUM (PanElevationAutomation);
 	REGISTER_ENUM (PanWidthAutomation);
 	REGISTER_ENUM (PluginAutomation);
+	REGISTER_ENUM (PluginPropertyAutomation);
 	REGISTER_ENUM (SoloAutomation);
 	REGISTER_ENUM (MuteAutomation);
 	REGISTER_ENUM (MidiCCAutomation);
@@ -171,6 +175,21 @@ setup_enum_writer ()
 	REGISTER_ENUM (MeterCustom);
 	REGISTER (_MeterPoint);
 
+	REGISTER_ENUM (MeterMaxSignal);
+	REGISTER_ENUM (MeterMaxPeak);
+	REGISTER_ENUM (MeterPeak);
+	REGISTER_ENUM (MeterKrms);
+	REGISTER_ENUM (MeterK20);
+	REGISTER_ENUM (MeterK14);
+	REGISTER_ENUM (MeterK12);
+	REGISTER_ENUM (MeterIEC1DIN);
+	REGISTER_ENUM (MeterIEC1NOR);
+	REGISTER_ENUM (MeterIEC2BBC);
+	REGISTER_ENUM (MeterIEC2EBU);
+	REGISTER_ENUM (MeterVU);
+	REGISTER_ENUM (MeterPeak0dB);
+	REGISTER (_MeterType);
+
 	REGISTER_ENUM (Normal);
 	REGISTER_ENUM (NonLayered);
 	REGISTER_ENUM (Destructive);
@@ -193,6 +212,8 @@ setup_enum_writer ()
 	REGISTER_ENUM (MeterFalloffOff);
 	REGISTER_ENUM (MeterFalloffSlowest);
 	REGISTER_ENUM (MeterFalloffSlow);
+	REGISTER_ENUM (MeterFalloffSlowish);
+	REGISTER_ENUM (MeterFalloffModerate);
 	REGISTER_ENUM (MeterFalloffMedium);
 	REGISTER_ENUM (MeterFalloffFast);
 	REGISTER_ENUM (MeterFalloffFaster);
@@ -205,10 +226,28 @@ setup_enum_writer ()
 	REGISTER_ENUM (MeterHoldLong);
 	REGISTER (_MeterHold);
 
+	REGISTER_ENUM (MeteringVUfrench);
+	REGISTER_ENUM (MeteringVUamerican);
+	REGISTER_ENUM (MeteringVUstandard);
+	REGISTER_ENUM (MeteringVUeight);
+	REGISTER (_VUMeterStandard);
+
+	REGISTER_ENUM (MeteringLineUp24);
+	REGISTER_ENUM (MeteringLineUp20);
+	REGISTER_ENUM (MeteringLineUp18);
+	REGISTER_ENUM (MeteringLineUp15);
+	REGISTER (_MeterLineUp);
+
 	REGISTER_ENUM (Slide);
 	REGISTER_ENUM (Splice);
+	REGISTER_ENUM (Ripple); // XXX do the old enum values have to stay in order?
 	REGISTER_ENUM (Lock);
 	REGISTER (_EditMode);
+	/*
+	 * Splice mode is undefined, undocumented, and basically fubar'ed
+	 * perhaps someday we will make it work.  but for now, avoid it
+	*/
+	enum_writer.add_to_hack_table ("Splice", "Slide");
 
 	REGISTER_ENUM (Start);
 	REGISTER_ENUM (End);
@@ -251,17 +290,13 @@ setup_enum_writer ()
 
 	REGISTER_ENUM (UserOrdered);
 	REGISTER_ENUM (MixerOrdered);
-	REGISTER_ENUM (EditorOrdered);
 	REGISTER (_RemoteModel);
-
-	REGISTER_ENUM (FullCrossfade);
-	REGISTER_ENUM (ShortCrossfade);
-	REGISTER (_CrossfadeModel);
-
-	REGISTER_ENUM (RegionFades);
-	REGISTER_ENUM (ConstantPowerMinus3dB);
-	REGISTER_ENUM (ConstantPowerMinus6dB);
-	REGISTER (_CrossfadeChoice);
+	/*
+	 * EditorOrdered has been deprecated
+	 * since the removal of independent 
+	 * editor / mixer ordering.
+	*/
+	enum_writer.add_to_hack_table ("EditorOrdered", "MixerOrdered");
 
         REGISTER_ENUM (InsertMergeReject);
         REGISTER_ENUM (InsertMergeRelax);
@@ -306,6 +341,7 @@ setup_enum_writer ()
 
 	REGISTER_ENUM (MTC);
 	REGISTER_ENUM (JACK);
+	REGISTER_ENUM (Engine);
 	REGISTER_ENUM (MIDIClock);
 	REGISTER_ENUM (LTC);
 	REGISTER (_SyncSource);
@@ -338,10 +374,23 @@ setup_enum_writer ()
 	REGISTER_CLASS_ENUM (SessionEvent, Audition);
 	REGISTER_CLASS_ENUM (SessionEvent, InputConfigurationChange);
 	REGISTER_CLASS_ENUM (SessionEvent, SetPlayAudioRange);
+	REGISTER_CLASS_ENUM (SessionEvent, CancelPlayAudioRange);
+	REGISTER_CLASS_ENUM (SessionEvent, RealTimeOperation);
+	REGISTER_CLASS_ENUM (SessionEvent, AdjustPlaybackBuffering);
+	REGISTER_CLASS_ENUM (SessionEvent, AdjustCaptureBuffering);
+	REGISTER_CLASS_ENUM (SessionEvent, SetTimecodeTransmission);
+	REGISTER_CLASS_ENUM (SessionEvent, Skip);
 	REGISTER_CLASS_ENUM (SessionEvent, StopOnce);
 	REGISTER_CLASS_ENUM (SessionEvent, AutoLoop);
+	REGISTER_CLASS_ENUM (SessionEvent, AutoLoopDeclick);
 	REGISTER (_SessionEvent_Type);
 
+	REGISTER_CLASS_ENUM (SessionEvent, Add);
+	REGISTER_CLASS_ENUM (SessionEvent, Remove);
+	REGISTER_CLASS_ENUM (SessionEvent, Replace);
+	REGISTER_CLASS_ENUM (SessionEvent, Clear);
+	REGISTER (_SessionEvent_Action);
+	
 	REGISTER_CLASS_ENUM (Session, Stopped);
 	REGISTER_CLASS_ENUM (Session, Waiting);
 	REGISTER_CLASS_ENUM (Session, Running);
@@ -403,10 +452,6 @@ setup_enum_writer ()
 	REGISTER_CLASS_ENUM (Route, MonitorOut);
 	REGISTER_BITS (_Route_Flag);
 
-	REGISTER_ENUM (MixerSort);
-	REGISTER_ENUM (EditorSort);
-	REGISTER (_RouteSortOrderKey);
-
 	REGISTER_CLASS_ENUM (Source, Writable);
 	REGISTER_CLASS_ENUM (Source, CanRename);
 	REGISTER_CLASS_ENUM (Source, Broadcast);
@@ -415,6 +460,7 @@ setup_enum_writer ()
 	REGISTER_CLASS_ENUM (Source, RemoveAtDestroy);
 	REGISTER_CLASS_ENUM (Source, NoPeakFile);
 	REGISTER_CLASS_ENUM (Source, Destructive);
+	REGISTER_CLASS_ENUM (Source, Empty);
 	REGISTER_BITS (_Source_Flag);
 
 	REGISTER_ENUM (FadeLinear);
@@ -423,6 +469,16 @@ setup_enum_writer ()
 	REGISTER_ENUM (FadeConstantPower);
 	REGISTER_ENUM (FadeSymmetric);
 	REGISTER (_FadeShape);
+
+	REGISTER_ENUM(None);
+	REGISTER_ENUM(NewlyCreatedLeft);
+	REGISTER_ENUM(NewlyCreatedRight);
+	REGISTER_ENUM(NewlyCreatedBoth);
+	REGISTER_ENUM(Existing);
+	REGISTER_ENUM(ExistingNewlyCreatedLeft);
+	REGISTER_ENUM(ExistingNewlyCreatedRight);
+	REGISTER_ENUM(ExistingNewlyCreatedBoth);
+	REGISTER (_RegionSelectionAfterSplit);
 
 	REGISTER_CLASS_ENUM (Diskstream, Recordable);
 	REGISTER_CLASS_ENUM (Diskstream, Hidden);
@@ -436,6 +492,7 @@ setup_enum_writer ()
 	REGISTER_CLASS_ENUM (Location, IsCDMarker);
 	REGISTER_CLASS_ENUM (Location, IsSessionRange);
 	REGISTER_CLASS_ENUM (Location, IsRangeMarker);
+	REGISTER_CLASS_ENUM (Location, IsSkip);
 	REGISTER_BITS (_Location_Flags);
 
 	REGISTER_CLASS_ENUM (Track, NoFreeze);
@@ -479,6 +536,7 @@ setup_enum_writer ()
 	REGISTER_CLASS_ENUM (ExportFormatBase, F_RAW);
 	REGISTER_CLASS_ENUM (ExportFormatBase, F_FLAC);
 	REGISTER_CLASS_ENUM (ExportFormatBase, F_Ogg);
+	REGISTER_CLASS_ENUM (ExportFormatBase, F_CAF);
 	REGISTER (_ExportFormatBase_FormatId);
 
 	REGISTER_CLASS_ENUM (ExportFormatBase, E_FileDefault);
@@ -652,6 +710,34 @@ std::ostream& operator<<(std::ostream& o, const MonitorModel& var)
 	return o << s;
 }
 
+std::istream& operator>>(std::istream& o, VUMeterStandard& var)
+{
+	std::string s;
+	o >> s;
+	var = (VUMeterStandard) string_2_enum (s, var);
+	return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const VUMeterStandard& var)
+{
+	std::string s = enum_2_string (var);
+	return o << s;
+}
+
+std::istream& operator>>(std::istream& o, MeterLineUp& var)
+{
+	std::string s;
+	o >> s;
+	var = (MeterLineUp) string_2_enum (s, var);
+	return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const MeterLineUp& var)
+{
+	std::string s = enum_2_string (var);
+	return o << s;
+}
+
 std::istream& operator>>(std::istream& o, PFLPosition& var)
 {
 	std::string s;
@@ -728,34 +814,6 @@ std::istream& operator>>(std::istream& o, InsertMergePolicy& var)
 	return o;
 }
 std::ostream& operator<<(std::ostream& o, const InsertMergePolicy& var)
-{
-	std::string s = enum_2_string (var);
-	return o << s;
-}
-
-std::istream& operator>>(std::istream& o, CrossfadeModel& var)
-{
-	std::string s;
-	o >> s;
-	var = (CrossfadeModel) string_2_enum (s, var);
-	return o;
-}
-
-std::ostream& operator<<(std::ostream& o, const CrossfadeModel& var)
-{
-	std::string s = enum_2_string (var);
-	return o << s;
-}
-
-std::istream& operator>>(std::istream& o, CrossfadeChoice& var)
-{
-	std::string s;
-	o >> s;
-	var = (CrossfadeChoice) string_2_enum (s, var);
-	return o;
-}
-
-std::ostream& operator<<(std::ostream& o, const CrossfadeChoice& var)
 {
 	std::string s = enum_2_string (var);
 	return o << s;
@@ -876,6 +934,34 @@ std::istream& operator>>(std::istream& o, Evoral::OverlapType& var)
 }
 
 std::ostream& operator<<(std::ostream& o, const Evoral::OverlapType& var)
+{
+	std::string s = enum_2_string (var);
+	return o << s;
+}
+
+std::istream& operator>>(std::istream& o, FadeShape& var)
+{
+	std::string s;
+	o >> s;
+	var = (FadeShape) string_2_enum (s, var);
+	return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const FadeShape& var)
+{
+	std::string s = enum_2_string (var);
+	return o << s;
+}
+
+std::istream& operator>>(std::istream& o, RegionSelectionAfterSplit& var)
+{
+	std::string s;
+	o >> s;
+	var = (RegionSelectionAfterSplit) string_2_enum (s, var);
+	return o;
+}
+
+std::ostream& operator<<(std::ostream& o, const RegionSelectionAfterSplit& var)
 {
 	std::string s = enum_2_string (var);
 	return o << s;

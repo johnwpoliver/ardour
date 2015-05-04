@@ -37,10 +37,11 @@
  * mackie_control_protocol.cc 
  */
 
-using namespace Mackie;
+using std::string;
 using namespace ARDOUR;
 using namespace PBD;
-using std::string;
+using namespace ArdourSurface;
+using namespace Mackie;
 
 LedState
 MackieControlProtocol::shift_press (Button &)
@@ -814,8 +815,12 @@ MackieControlProtocol::dyn_release (Button &)
 LedState
 MackieControlProtocol::flip_press (Button &) 
 { 
-	set_flip_mode (!_flip_mode);
-	return (_flip_mode ? on : off);
+	if (_flip_mode != Normal) {
+		set_flip_mode (Normal);
+	} else {
+		set_flip_mode (Mirror);
+	}
+	return ((_flip_mode != Normal) ? on : off);
 }
 LedState
 MackieControlProtocol::flip_release (Button &) 

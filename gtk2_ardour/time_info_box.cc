@@ -27,6 +27,7 @@
 #include "gtkmm2ext/actions.h"
 
 #include "ardour/location.h"
+#include "ardour/profile.h"
 #include "ardour/session.h"
 
 #include "time_info_box.h"
@@ -71,7 +72,9 @@ TimeInfoBox::TimeInfoBox ()
 	set_border_width (2);
 
 	pack_start (left, true, true);
-	pack_start (right, true, true);
+	if (!ARDOUR::Profile->get_trx()) {
+		pack_start (right, true, true);
+	}
 
 	left.set_homogeneous (false);
 	left.set_spacings (0);
@@ -146,6 +149,7 @@ TimeInfoBox::TimeInfoBox ()
 	Editor::instance().get_selection().TimeChanged.connect (sigc::mem_fun (*this, &TimeInfoBox::selection_changed));
 	Editor::instance().get_selection().RegionsChanged.connect (sigc::mem_fun (*this, &TimeInfoBox::selection_changed));
 
+	Region::RegionPropertyChanged.connect (region_property_connections, invalidator (*this), boost::bind (&TimeInfoBox::region_property_change, this, _1, _2), gui_context());
 	Editor::instance().MouseModeChanged.connect (editor_connections, invalidator(*this), boost::bind (&TimeInfoBox::track_mouse_mode, this), gui_context());
 }
 
@@ -162,6 +166,33 @@ TimeInfoBox::~TimeInfoBox ()
 void
 TimeInfoBox::track_mouse_mode ()
 {
+	selection_changed ();
+}
+
+void
+TimeInfoBox::region_property_change (boost::shared_ptr<ARDOUR::Region> /* r */, const PBD::PropertyChange& what_changed)
+{
+	Selection& selection (Editor::instance().get_selection());
+
+	if (selection.regions.empty()) {
+		return;
+	}
+
+	PBD::PropertyChange our_interests;
+
+	our_interests.add (ARDOUR::Properties::position);
+	our_interests.add (ARDOUR::Properties::length);
+	our_interests.add (ARDOUR::Properties::start);
+
+	if (!what_changed.contains (our_interests)) {
+		return;
+	}
+
+	/* TODO: check if RegionSelection includes the given region.
+	 * This is not straight foward because RegionSelection is done by
+	 * RegionView (not Region itself).
+	 */
+
 	selection_changed ();
 }
 
@@ -240,51 +271,40 @@ TimeInfoBox::selection_changed ()
 
 	switch (Editor::instance().current_mouse_mode()) {
 
+	case Editing::MouseContent:
+		/* displaying MIDI note selection is tricky */
+		selection_start->set_off (true);
+		selection_end->set_off (true);
+		selection_length->set_off (true);
+		break;
+
 	case Editing::MouseObject:
-		if (Editor::instance().internal_editing()) {
-			/* displaying MIDI note selection is tricky */
-			
-			selection_start->set_off (true);
-			selection_end->set_off (true);
-			selection_length->set_off (true);
+		if (selection.regions.empty()) {
+			if (selection.points.empty()) {
+				Glib::RefPtr<Action> act = ActionManager::get_action ("MouseMode", "set-mouse-mode-object-range");
+				Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic (act);
 
-		} else {
-			if (selection.regions.empty()) {
-				if (selection.points.empty()) {
-					Glib::RefPtr<Action> act = ActionManager::get_action ("MouseMode", "set-mouse-mode-object-range");
-					Glib::RefPtr<ToggleAction> tact = Glib::RefPtr<ToggleAction>::cast_dynamic (act);
-
-					if (tact && tact->get_active() && !selection.time.empty()) {
-						/* show selected range */
-						selection_start->set_off (false);
-						selection_end->set_off (false);
-						selection_length->set_off (false);
-						selection_start->set (selection.time.start());
-						selection_end->set (selection.time.end_frame());
-						selection_length->set (selection.time.length());
-					} else {
-						selection_start->set_off (true);
-						selection_end->set_off (true);
-						selection_length->set_off (true);
-					}
-				} else {
-					s = max_framepos;
-					e = 0;
-					for (PointSelection::iterator i = selection.points.begin(); i != selection.points.end(); ++i) {
-						framepos_t const p = (*i)->line().session_position ((*i)->model ());
-						s = min (s, p);
-						e = max (e, p);
-					}
+				if (tact && tact->get_active() && !selection.time.empty()) {
+					/* show selected range */
 					selection_start->set_off (false);
 					selection_end->set_off (false);
 					selection_length->set_off (false);
-					selection_start->set (s);
-					selection_end->set (e);
-					selection_length->set (e - s + 1);
+					selection_start->set (selection.time.start());
+					selection_end->set (selection.time.end_frame());
+					selection_length->set (selection.time.length());
+				} else {
+					selection_start->set_off (true);
+					selection_end->set_off (true);
+					selection_length->set_off (true);
 				}
 			} else {
-				s = selection.regions.start();
-				e = selection.regions.end_frame();
+				s = max_framepos;
+				e = 0;
+				for (PointSelection::iterator i = selection.points.begin(); i != selection.points.end(); ++i) {
+					framepos_t const p = (*i)->line().session_position ((*i)->model ());
+					s = min (s, p);
+					e = max (e, p);
+				}
 				selection_start->set_off (false);
 				selection_end->set_off (false);
 				selection_length->set_off (false);
@@ -292,6 +312,15 @@ TimeInfoBox::selection_changed ()
 				selection_end->set (e);
 				selection_length->set (e - s + 1);
 			}
+		} else {
+			s = selection.regions.start();
+			e = selection.regions.end_frame();
+			selection_start->set_off (false);
+			selection_end->set_off (false);
+			selection_length->set_off (false);
+			selection_start->set (s);
+			selection_end->set (e);
+			selection_length->set (e - s + 1);
 		}
 		break;
 

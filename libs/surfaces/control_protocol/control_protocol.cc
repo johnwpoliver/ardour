@@ -53,6 +53,8 @@ PBD::Signal0<void>          ControlProtocol::ClearRouteSelection;
 PBD::Signal0<void>          ControlProtocol::StepTracksDown;
 PBD::Signal0<void>          ControlProtocol::StepTracksUp;
 
+const std::string ControlProtocol::state_node_name ("Protocol");
+
 ControlProtocol::ControlProtocol (Session& s, string str)
 	: BasicUI (s)
 	, _name (str)
@@ -62,6 +64,13 @@ ControlProtocol::ControlProtocol (Session& s, string str)
 
 ControlProtocol::~ControlProtocol ()
 {
+}
+
+int
+ControlProtocol::set_active (bool yn)
+{
+	_active = yn;
+	return 0;
 }
 
 void
@@ -272,7 +281,7 @@ ControlProtocol::route_get_peak_input_power (uint32_t table_index, uint32_t whic
 		return 0.0f;
 	}
 
-	return r->peak_meter().peak_power (which_input);
+	return r->peak_meter().meter_level (which_input, MeterPeak);
 }
 
 
@@ -356,5 +365,15 @@ ControlProtocol:: route_get_name (uint32_t table_index)
 list<boost::shared_ptr<Bundle> >
 ControlProtocol::bundles ()
 {
-       return list<boost::shared_ptr<Bundle> > ();
+	return list<boost::shared_ptr<Bundle> > ();
+}
+
+XMLNode&
+ControlProtocol::get_state ()
+{
+	XMLNode* node = new XMLNode (state_node_name);
+
+	node->add_property ("name", _name);
+
+	return *node;
 }

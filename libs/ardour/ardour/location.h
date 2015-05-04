@@ -34,11 +34,14 @@
 #include "pbd/statefuldestructible.h"
 
 #include "ardour/ardour.h"
+#include "ardour/scene_change.h"
 #include "ardour/session_handle.h"
 
 namespace ARDOUR {
 
-class Location : public SessionHandleRef, public PBD::StatefulDestructible
+class SceneChange;
+
+class LIBARDOUR_API Location : public SessionHandleRef, public PBD::StatefulDestructible
 {
   public:
 	enum Flags {
@@ -48,7 +51,9 @@ class Location : public SessionHandleRef, public PBD::StatefulDestructible
 		IsHidden = 0x8,
 		IsCDMarker = 0x10,
 		IsRangeMarker = 0x20,
-		IsSessionRange = 0x40
+		IsSessionRange = 0x40,
+		IsSkip = 0x80,
+		IsSkipping = 0x100, /* skipping is active (or not) */
 	};
 
 	Location (Session &);
@@ -74,13 +79,15 @@ class Location : public SessionHandleRef, public PBD::StatefulDestructible
 	int move_to (framepos_t pos);
 
 	const std::string& name() const { return _name; }
-	void set_name (const std::string &str) { _name = str; name_changed(this); }
+	void set_name (const std::string &str);
 
 	void set_auto_punch (bool yn, void *src);
 	void set_auto_loop (bool yn, void *src);
 	void set_hidden (bool yn, void *src);
 	void set_cd (bool yn, void *src);
 	void set_is_range_marker (bool yn, void* src);
+        void set_skip (bool yn);
+        void set_skipping (bool yn);
 
 	bool is_auto_punch () const { return _flags & IsAutoPunch; }
 	bool is_auto_loop () const { return _flags & IsAutoLoop; }
@@ -89,21 +96,41 @@ class Location : public SessionHandleRef, public PBD::StatefulDestructible
 	bool is_cd_marker () const { return _flags & IsCDMarker; }
 	bool is_session_range () const { return _flags & IsSessionRange; }
 	bool is_range_marker() const { return _flags & IsRangeMarker; }
+	bool is_skip() const { return _flags & IsSkip; }
+	bool is_skipping() const { return (_flags & IsSkip) && (_flags & IsSkipping); }
 	bool matches (Flags f) const { return _flags & f; }
 
 	Flags flags () const { return _flags; }
 
-	PBD::Signal1<void,Location*> name_changed;
-	PBD::Signal1<void,Location*> end_changed;
-	PBD::Signal1<void,Location*> start_changed;
+	boost::shared_ptr<SceneChange> scene_change() const { return _scene_change; }
+	void set_scene_change (boost::shared_ptr<SceneChange>);
 
-	PBD::Signal1<void,Location*> LockChanged;
-	PBD::Signal2<void,Location*,void*> FlagsChanged;
-	PBD::Signal1<void,Location*> PositionLockStyleChanged;
+        /* these are static signals for objects that want to listen to all
+           locations at once.
+        */
+
+	static PBD::Signal1<void,Location*> name_changed;
+	static PBD::Signal1<void,Location*> end_changed;
+	static PBD::Signal1<void,Location*> start_changed;
+	static PBD::Signal1<void,Location*> flags_changed;
+        static PBD::Signal1<void,Location*> lock_changed;
+	static PBD::Signal1<void,Location*> position_lock_style_changed;
 
 	/* this is sent only when both start and end change at the same time */
-	PBD::Signal1<void,Location*> changed;
+	static PBD::Signal1<void,Location*> changed;
 
+        /* these are member signals for objects that care only about
+           changes to this object 
+        */
+
+	PBD::Signal0<void> NameChanged;
+	PBD::Signal0<void> EndChanged;
+	PBD::Signal0<void> StartChanged;
+	PBD::Signal0<void> Changed;
+	PBD::Signal0<void> FlagsChanged;
+	PBD::Signal0<void> LockChanged;
+	PBD::Signal0<void> PositionLockStyleChanged;
+        
 	/* CD Track / CD-Text info */
 
 	std::map<std::string, std::string> cd_info;
@@ -116,6 +143,8 @@ class Location : public SessionHandleRef, public PBD::StatefulDestructible
 	void set_position_lock_style (PositionLockStyle ps);
 	void recompute_frames_from_bbt ();
 
+	static PBD::Signal0<void> scene_changed;
+
   private:
 	std::string        _name;
 	framepos_t         _start;
@@ -125,13 +154,14 @@ class Location : public SessionHandleRef, public PBD::StatefulDestructible
 	Flags              _flags;
 	bool               _locked;
 	PositionLockStyle  _position_lock_style;
+	boost::shared_ptr<SceneChange> _scene_change;
 
 	void set_mark (bool yn);
 	bool set_flag_internal (bool yn, Flags flag);
 	void recompute_bbt_from_frames ();
 };
 
-class Locations : public SessionHandleRef, public PBD::StatefulDestructible
+class LIBARDOUR_API Locations : public SessionHandleRef, public PBD::StatefulDestructible
 {
   public:
 	typedef std::list<Location *> LocationList;
@@ -161,6 +191,8 @@ class Locations : public SessionHandleRef, public PBD::StatefulDestructible
 	int set_current (Location *, bool want_lock = true);
 	Location *current () const { return current_location; }
 
+	Location* mark_at (framepos_t, framecnt_t slop = 0) const;
+
         framepos_t first_mark_before (framepos_t, bool include_special_ranges = false);
 	framepos_t first_mark_after (framepos_t, bool include_special_ranges = false);
 
@@ -168,28 +200,26 @@ class Locations : public SessionHandleRef, public PBD::StatefulDestructible
 
 	void find_all_between (framepos_t start, framepos_t, LocationList&, Location::Flags);
 
-	enum Change {
-		ADDITION, ///< a location was added, but nothing else changed
-		REMOVAL, ///< a location was removed, but nothing else changed
-		OTHER ///< something more complicated happened
-	};
-
 	PBD::Signal1<void,Location*> current_changed;
-	/** something changed about the location list; the parameter gives some idea as to what */
-	PBD::Signal1<void,Change>    changed;
-	/** a location has been added to the end of the list */
+
+        /* Objects that care about individual addition and removal of Locations should connect to added/removed.
+           If an object additionally cares about potential mass clearance of Locations, they should connect to changed.
+        */
+
 	PBD::Signal1<void,Location*> added;
 	PBD::Signal1<void,Location*> removed;
-	PBD::Signal1<void,const PBD::PropertyChange&>    StateChanged;
+	PBD::Signal0<void> changed; /* emitted when any action that could have added/removed more than 1 location actually removed 1 or more */
 
-	template<class T> void apply (T& obj, void (T::*method)(LocationList&)) {
-		Glib::Threads::Mutex::Lock lm (lock);
-		(obj.*method)(locations);
-	}
-
-	template<class T1, class T2> void apply (T1& obj, void (T1::*method)(LocationList&, T2& arg), T2& arg) {
-		Glib::Threads::Mutex::Lock lm (lock);
-		(obj.*method)(locations, arg);
+	template<class T> void apply (T& obj, void (T::*method)(const LocationList&)) const {
+                /* We don't want to hold the lock while the given method runs, so take a copy
+                   of the list and pass that instead.
+                */
+                Locations::LocationList copy;
+                {
+                        Glib::Threads::Mutex::Lock lm (lock);
+                        copy = locations;
+                }
+		(obj.*method)(copy);
 	}
 
   private:
@@ -200,6 +230,7 @@ class Locations : public SessionHandleRef, public PBD::StatefulDestructible
 
 	int set_current_unlocked (Location *);
 	void location_changed (Location*);
+	void listen_to (Location*);
 };
 
 } // namespace ARDOUR

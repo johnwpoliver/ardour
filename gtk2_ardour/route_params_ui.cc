@@ -25,6 +25,7 @@
 #include <gtkmm2ext/window_title.h>
 
 #include "ardour/audioengine.h"
+#include "ardour/audio_track.h"
 #include "ardour/plugin.h"
 #include "ardour/plugin_insert.h"
 #include "ardour/plugin_manager.h"
@@ -32,6 +33,7 @@
 #include "ardour/return.h"
 #include "ardour/route.h"
 #include "ardour/send.h"
+#include "ardour/internal_send.h"
 
 #include "ardour_ui.h"
 #include "gui_thread.h"
@@ -44,7 +46,7 @@
 #include "return_ui.h"
 #include "route_params_ui.h"
 #include "send_ui.h"
-#include "utils.h"
+#include "timers.h"
 
 #include "i18n.h"
 
@@ -146,11 +148,7 @@ RouteParams_UI::RouteParams_UI ()
 	add_events (Gdk::KEY_PRESS_MASK|Gdk::KEY_RELEASE_MASK|Gdk::BUTTON_RELEASE_MASK);
 
 	_plugin_selector = new PluginSelector (PluginManager::instance());
-	_plugin_selector->signal_delete_event().connect (sigc::bind (ptr_fun (just_hide_it),
-						     static_cast<Window *> (_plugin_selector)));
-
-
-	signal_delete_event().connect(sigc::bind(ptr_fun(just_hide_it), static_cast<Gtk::Window *>(this)));
+	show_all();
 }
 
 RouteParams_UI::~RouteParams_UI ()
@@ -218,6 +216,25 @@ RouteParams_UI::route_property_changed (const PropertyChange& what_changed, boos
 }
 
 void
+RouteParams_UI::map_frozen()
+{
+	ENSURE_GUI_THREAD (*this, &RouteParams_UI::map_frozen)
+	boost::shared_ptr<AudioTrack> at = boost::dynamic_pointer_cast<AudioTrack>(_route);
+	if (at && insert_box) {
+		switch (at->freeze_state()) {
+			case AudioTrack::Frozen:
+				insert_box->set_sensitive (false);
+				//hide_redirect_editors (); // TODO hide editor windows
+				break;
+			default:
+				insert_box->set_sensitive (true);
+				// XXX need some way, maybe, to retoggle redirect editors
+				break;
+		}
+	}
+}
+
+void
 RouteParams_UI::setup_processor_boxes()
 {
 	if (_session && _route) {
@@ -229,9 +246,13 @@ RouteParams_UI::setup_processor_boxes()
 		insert_box = new ProcessorBox (_session, boost::bind (&RouteParams_UI::plugin_selector, this), _rr_selection, 0);
 		insert_box->set_route (_route);
 
+		boost::shared_ptr<AudioTrack> at = boost::dynamic_pointer_cast<AudioTrack>(_route);
+		if (at) {
+			at->FreezeChange.connect (route_connections, invalidator (*this), boost::bind (&RouteParams_UI::map_frozen, this), gui_context());
+		}
 		redir_hpane.pack1 (*insert_box);
 
-		insert_box->ProcessorSelected.connect (sigc::mem_fun(*this, &RouteParams_UI::redirect_selected));
+		insert_box->ProcessorSelected.connect (sigc::mem_fun(*this, &RouteParams_UI::redirect_selected));  //note:  this indicates a double-click activation, not just a "selection"
 		insert_box->ProcessorUnselected.connect (sigc::mem_fun(*this, &RouteParams_UI::redirect_selected));
 
 		redir_hpane.show_all();
@@ -280,7 +301,7 @@ RouteParams_UI::cleanup_latency_frame ()
 void
 RouteParams_UI::setup_latency_frame ()
 {
-	latency_widget = new LatencyGUI (*(_route->output()), _session->frame_rate(), _session->engine().frames_per_cycle());
+	latency_widget = new LatencyGUI (*(_route->output()), _session->frame_rate(), AudioEngine::instance()->samples_per_cycle());
 
 	char buf[128];
 	snprintf (buf, sizeof (buf), _("Playback delay: %" PRId64 " samples"), _route->initial_delay());
@@ -514,7 +535,12 @@ RouteParams_UI::redirect_selected (boost::shared_ptr<ARDOUR::Processor> proc)
 	boost::shared_ptr<PluginInsert> plugin_insert;
 	boost::shared_ptr<PortInsert> port_insert;
 
-	if ((send = boost::dynamic_pointer_cast<Send> (proc)) != 0) {
+	if ((boost::dynamic_pointer_cast<InternalSend> (proc)) != 0) {
+		cleanup_view();
+		_processor.reset ((Processor*) 0);
+		update_title();
+		return;
+	} else if ((send = boost::dynamic_pointer_cast<Send> (proc)) != 0) {
 
 		SendUI *send_ui = new SendUI (this, send, _session);
 
@@ -617,7 +643,7 @@ RouteParams_UI::update_title ()
 void
 RouteParams_UI::start_updating ()
 {
-	update_connection = ARDOUR_UI::instance()->RapidScreenUpdate.connect
+	update_connection = Timers::rapid_connect
 		(sigc::mem_fun(*this, &RouteParams_UI::update_views));
 }
 

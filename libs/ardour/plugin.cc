@@ -27,12 +27,16 @@
 #include <cstdlib>
 #include <cstdio> // so libraptor doesn't complain
 #include <cmath>
+#ifndef COMPILER_MSVC
 #include <dirent.h>
+#endif
 #include <sys/stat.h>
 #include <cerrno>
 #include <utility>
 
+#ifdef HAVE_LRDF
 #include <lrdf.h>
+#endif
 
 #include "pbd/compose.h"
 #include "pbd/error.h"
@@ -67,6 +71,11 @@ using namespace ARDOUR;
 using namespace PBD;
 
 namespace ARDOUR { class AudioEngine; }
+
+#ifdef NO_PLUGIN_STATE
+static bool seen_get_state_message = false;
+static bool seen_set_state_message = false;
+#endif
 
 bool
 PluginInfo::is_instrument () const
@@ -255,7 +264,7 @@ Plugin::connect_and_run (BufferSet& bufs,
 
 		/* Track notes that we are sending to the plugin */
 
-		MidiBuffer& b = bufs.get_midi (0);
+		const MidiBuffer& b = bufs.get_midi (0);
 
 		_tracker.track (b.begin(), b.end());
 
@@ -299,18 +308,29 @@ Plugin::resolve_midi ()
 	_have_pending_stop_events = true;
 }
 
+
 vector<Plugin::PresetRecord>
 Plugin::get_presets ()
 {
+	vector<PresetRecord> p;
+
+#ifndef NO_PLUGIN_STATE
 	if (!_have_presets) {
 		find_presets ();
 		_have_presets = true;
 	}
 
-	vector<PresetRecord> p;
 	for (map<string, PresetRecord>::const_iterator i = _presets.begin(); i != _presets.end(); ++i) {
 		p.push_back (i->second);
 	}
+#else
+	if (!seen_set_state_message) {
+		info << string_compose (_("Plugin presets are not supported in this build of %1. Consider paying for a full version"),
+					PROGRAM_NAME)
+		     << endmsg;
+		seen_set_state_message = true;
+	}
+#endif
 
 	return p;
 }
@@ -370,13 +390,23 @@ XMLNode &
 Plugin::get_state ()
 {
 	XMLNode* root = new XMLNode (state_node_name ());
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	root->add_property (X_("last-preset-uri"), _last_preset.uri);
 	root->add_property (X_("last-preset-label"), _last_preset.label);
 	root->add_property (X_("parameter-changed-since-last-preset"), _parameter_changed_since_last_preset ? X_("yes") : X_("no"));
 
+#ifndef NO_PLUGIN_STATE	
 	add_state (root);
+#else
+	if (!seen_get_state_message) {
+		info << string_compose (_("Saving plugin settings is not supported in this build of %1. Consider paying for the full version"),
+					PROGRAM_NAME)
+		     << endmsg;
+		seen_get_state_message = true;
+	}
+#endif
+
 	return *root;
 }
 

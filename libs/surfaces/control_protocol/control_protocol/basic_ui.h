@@ -28,16 +28,16 @@
 
 #include "ardour/types.h"
 
-#include <jack/types.h>
-
 #include "timecode/time.h"
+
+#include "control_protocol/visibility.h"
 
 namespace ARDOUR {
 	class Session;
 	class SessionEvent;
 }
 
-class BasicUI {
+class LIBCONTROLCP_API BasicUI {
   public:
 	BasicUI (ARDOUR::Session&);
 	virtual ~BasicUI ();
@@ -49,6 +49,7 @@ class BasicUI {
 	/* transport control */
 
 	void loop_toggle ();
+	void loop_location (framepos_t start, framepos_t end);
 	void access_action ( std::string action_path );
 	static PBD::Signal2<void,std::string,std::string> AccessAction;
 	void goto_start ();

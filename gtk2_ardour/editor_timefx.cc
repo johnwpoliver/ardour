@@ -45,7 +45,7 @@
 #include "ardour/stretch.h"
 
 #ifdef USE_RUBBERBAND
-#include "rubberband/RubberBandStretcher.h"
+#include <rubberband/RubberBandStretcher.h>
 using namespace RubberBand;
 #endif
 
@@ -402,9 +402,12 @@ Editor::timefx_thread (void *arg)
            by the GUI ...
         */
 
+#ifdef PLATFORM_WINDOWS
+	Glib::usleep(2 * G_USEC_PER_SEC);
+#else
         struct timespec t = { 2, 0 };
         nanosleep (&t, 0);
-
+#endif
 	return 0;
 }
 

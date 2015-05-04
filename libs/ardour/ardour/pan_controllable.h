@@ -34,11 +34,15 @@ namespace ARDOUR {
 class Session;
 class Pannable;
 
-class PanControllable : public AutomationControl
+class LIBARDOUR_API PanControllable : public AutomationControl
 {
 public:
 	PanControllable (Session& s, std::string name, Pannable* o, Evoral::Parameter param)
-		: AutomationControl (s, param, boost::shared_ptr<AutomationList>(new AutomationList(param)), name)
+		: AutomationControl (s,
+		                     param,
+		                     ParameterDescriptor(param),
+		                     boost::shared_ptr<AutomationList>(new AutomationList(param)),
+		                     name)
 		, owner (o)
 	{}
 

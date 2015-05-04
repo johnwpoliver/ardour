@@ -170,9 +170,9 @@ Scroomer::on_motion_notify_event (GdkEventMotion* ev)
 		page = min(page, adj.get_upper() - val);
 	} else if (ev->x < 0) {
 		/* on zoom out increase the page size as well as moving the range towards the mouse pos*/
-		zoom = abs(ev->x);
+		/*zoom = abs(ev->x);
 
-		/*double higher = unzoomed_val + unzoomed_page - half_min_page - val_at_pointer;
+		double higher = unzoomed_val + unzoomed_page - half_min_page - val_at_pointer;
 		double lower = val_at_pointer - (unzoomed_val + half_min_page);
 
 		higher *= zoom / 128;
@@ -213,7 +213,7 @@ Scroomer::on_scroll_event (GdkEventScroll* ev)
 {
 	switch (ev->direction) {
 	case GDK_SCROLL_UP:
-		adj.set_value (adj.get_value() + adj.get_page_size() / 10.0);
+		adj.set_value (min (adj.get_value() + adj.get_page_size() / 10.0, adj.get_upper() - adj.get_page_size()));
 		break;
 	case GDK_SCROLL_DOWN:
 		adj.set_value (adj.get_value() - adj.get_page_size() / 10.0);
@@ -255,7 +255,7 @@ Scroomer::on_button_press_event (GdkEventButton* ev)
 		DoubleClicked();
 	}
 
-	return false;
+	return true;
 }
 
 bool

@@ -22,6 +22,7 @@
 #include "pbd/malign.h"
 #include "pbd/compose.h"
 #include "pbd/debug.h"
+#include "pbd/stacktrace.h"
 
 #include "ardour/debug.h"
 #include "ardour/midi_buffer.h"
@@ -32,12 +33,12 @@ using namespace PBD;
 
 // FIXME: mirroring for MIDI buffers?
 MidiBuffer::MidiBuffer(size_t capacity)
-	: Buffer(DataType::MIDI, capacity)
-	, _data(0)
+	: Buffer (DataType::MIDI)
+	, _data (0)
 {
 	if (capacity) {
-		resize(_capacity);
-		silence(_capacity);
+		resize (capacity);
+		silence (capacity);
 	}
 }
 
@@ -49,17 +50,22 @@ MidiBuffer::~MidiBuffer()
 void
 MidiBuffer::resize(size_t size)
 {
-	assert(size > 0);
+	if (_data && size < _capacity) {
 
-	if (size < _capacity) {
+		if (_size < size) {
+			/* truncate */
+			_size = size;
+		}
+
 		return;
 	}
 
-	free(_data);
+	free (_data);
+
+	cache_aligned_malloc ((void**) &_data, size);
 
 	_size = 0;
 	_capacity = size;
-	cache_aligned_malloc ((void**) &_data, _capacity);
 
 	assert(_data);
 }
@@ -133,6 +139,7 @@ MidiBuffer::push_back(const Evoral::MIDIEvent<TimeType>& ev)
 
 	if (_size + stamp_size + ev.size() >= _capacity) {
 		cerr << "MidiBuffer::push_back failed (buffer is full)" << endl;
+		PBD::stacktrace (cerr, 20);
 		return false;
 	}
 
@@ -171,7 +178,9 @@ MidiBuffer::push_back(TimeType time, size_t size, const uint8_t* data)
 #endif
 
 	if (_size + stamp_size + size >= _capacity) {
-		cerr << "MidiBuffer::push_back failed (buffer is full)" << endl;
+		cerr << "MidiBuffer::push_back2 failed (buffer is full; _size = " << _size << " capacity " 
+		     << _capacity << " stamp " << stamp_size << " size = " << size << ")" << endl;
+		PBD::stacktrace (cerr, 20);
 		return false;
 	}
 
@@ -181,7 +190,7 @@ MidiBuffer::push_back(TimeType time, size_t size, const uint8_t* data)
 	}
 
 	uint8_t* const write_loc = _data + _size;
-	*((TimeType*)write_loc) = time;
+	*(reinterpret_cast<TimeType*>((uintptr_t)write_loc)) = time;
 	memcpy(write_loc + stamp_size, data, size);
 
 	_size += stamp_size + size;
@@ -190,54 +199,63 @@ MidiBuffer::push_back(TimeType time, size_t size, const uint8_t* data)
 	return true;
 }
 
-
-/** Push an event into the buffer.
- *
- * Note that the raw MIDI pointed to by ev will be COPIED and unmodified.
- * That is, the caller still owns it, if it needs freeing it's Not My Problem(TM).
- * Realtime safe.
- * @return false if operation failed (not enough room)
- */
 bool
-MidiBuffer::push_back(const jack_midi_event_t& ev)
+MidiBuffer::insert_event(const Evoral::MIDIEvent<TimeType>& ev)
 {
+	if (size() == 0) {
+		return push_back(ev);
+	}
+
 	const size_t stamp_size = sizeof(TimeType);
+	const size_t bytes_to_merge = stamp_size + ev.size();
 
-	if (_size + stamp_size + ev.size >= _capacity) {
+	if (_size + bytes_to_merge >= _capacity) {
 		cerr << "MidiBuffer::push_back failed (buffer is full)" << endl;
+		PBD::stacktrace (cerr, 20);
 		return false;
 	}
 
-	if (!Evoral::midi_event_is_valid(ev.buffer, ev.size)) {
-		cerr << "WARNING: MidiBuffer ignoring illegal MIDI event" << endl;
-		return false;
-	}
+	TimeType t = ev.time();
 
-#ifndef NDEBUG
-	if (DEBUG::MidiIO & PBD::debug_bits) {
-		DEBUG_STR_DECL(a);
-		DEBUG_STR_APPEND(a, string_compose ("midibuffer %1 push jack event @ %2 sz %3 ", this, ev.time, ev.size));
-		for (size_t i=0; i < ev.size; ++i) {
-			DEBUG_STR_APPEND(a,hex);
-			DEBUG_STR_APPEND(a,"0x");
-			DEBUG_STR_APPEND(a,(int)ev.buffer[i]);
-			DEBUG_STR_APPEND(a,' ');
+	ssize_t insert_offset = -1;
+	for (MidiBuffer::iterator m = begin(); m != end(); ++m) {
+		if ((*m).time() < t) {
+			continue;
 		}
-		DEBUG_STR_APPEND(a,'\n');
-		DEBUG_TRACE (DEBUG::MidiIO, DEBUG_STR(a).str());
+		if ((*m).time() == t) {
+			const uint8_t our_midi_status_byte = *(_data + m.offset + sizeof (TimeType));
+			if (second_simultaneous_midi_byte_is_first (ev.type(), our_midi_status_byte)) {
+				continue;
+			}
+		}
+		insert_offset = m.offset;
+		break;
 	}
-#endif
+	if (insert_offset == -1) {
+		return push_back(ev);
+	}
 
-	uint8_t* const write_loc = _data + _size;
-	*((TimeType*)write_loc) = ev.time;
-	memcpy(write_loc + stamp_size, ev.buffer, ev.size);
+	// don't use memmove - it may use malloc(!)
+	// memmove (_data + insert_offset + bytes_to_merge, _data + insert_offset, _size - insert_offset);
+	for (ssize_t a = _size + bytes_to_merge - 1, b = _size - 1; b >= insert_offset; --b, --a) {
+		_data[a] = _data[b];
+	}
 
-	_size += stamp_size + ev.size;
-	_silent = false;
+	uint8_t* const write_loc = _data + insert_offset;
+	*(reinterpret_cast<TimeType*>((uintptr_t)write_loc)) = t;
+	memcpy(write_loc + stamp_size, ev.buffer(), ev.size());
+
+	_size += bytes_to_merge;
 
 	return true;
 }
 
+uint32_t
+MidiBuffer::write(TimeType time, Evoral::EventType type, uint32_t size, const uint8_t* buf)
+{
+	insert_event(Evoral::MIDIEvent<TimeType>(type, time, size, const_cast<uint8_t*>(buf)));
+	return size;
+}
 
 /** Reserve space for a new event in the buffer.
  *
@@ -256,7 +274,7 @@ MidiBuffer::reserve(TimeType time, size_t size)
 
 	// write timestamp
 	uint8_t* write_loc = _data + _size;
-	*((TimeType*)write_loc) = time;
+	*(reinterpret_cast<TimeType*>((uintptr_t)write_loc)) = time;
 
 	// move write_loc to begin of MIDI buffer data to write to
 	write_loc += stamp_size;

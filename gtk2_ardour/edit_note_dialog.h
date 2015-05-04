@@ -18,28 +18,22 @@
 */
 
 #include <gtkmm/spinbutton.h>
-#include "ardour/midi_model.h"
 #include "ardour_dialog.h"
 #include "audio_clock.h"
 
 class MidiRegionView;
-
-namespace Gnome {
-	namespace Canvas {
-		class CanvasNoteEvent;
-	}
-}
+class NoteBase;
 
 class EditNoteDialog : public ArdourDialog
 {
-  public:
-	EditNoteDialog (MidiRegionView *, std::set<Gnome::Canvas::CanvasNoteEvent*>);
+public:
+	EditNoteDialog (MidiRegionView* rv, std::set<NoteBase*> n);
 
-        void done (int);
+	void done (int);
     
   private:
 	MidiRegionView* _region_view;
-	std::set<Gnome::Canvas::CanvasNoteEvent*> _events;
+	std::set<NoteBase*> _events;
 	Gtk::SpinButton _channel;
 	Gtk::CheckButton _channel_all;
 	Gtk::SpinButton _pitch;

@@ -35,7 +35,6 @@
 #include <list>
 #include <cmath>
 
-#include <libgnomecanvasmm/canvas.h>
 
 #include "pbd/xml++.h"
 #include "pbd/controllable.h"
@@ -64,51 +63,55 @@
 #include "ardour/utils.h"
 #include "ardour/plugin.h"
 #include "ardour/session_handle.h"
+#include "ardour/system_exec.h"
 
 #include "video_timeline.h"
 
+#include "about.h"
 #include "ardour_button.h"
 #include "ardour_dialog.h"
 #include "ardour_window.h"
 #include "editing.h"
-#include "nsm.h"
+#include "engine_dialog.h"
+#include "export_video_dialog.h"
+#include "meterbridge.h"
 #include "ui_config.h"
 #include "enums.h"
 #include "visibility_group.h"
 #include "window_manager.h"
 
-class About;
-class AddRouteDialog;
-class AddVideoDialog;
+#include "add_route_dialog.h"
+#include "add_video_dialog.h"
+#include "big_clock_window.h"
+#include "bundle_manager.h"
+#include "global_port_matrix.h"
+#include "keyeditor.h"
+#include "location_ui.h"
+#include "rc_option_editor.h"
+#include "route_params_ui.h"
+#include "session_option_editor.h"
+#include "speaker_dialog.h"
+
 class VideoTimeLine;
-class SystemExec;
-class ArdourStartup;
 class ArdourKeyboard;
 class AudioClock;
-class BigClockWindow;
-class BundleManager;
 class ButtonJoiner;
 class ConnectionEditor;
-class KeyEditor;
-class LocationUIWindow;
 class MainClock;
 class Mixer_UI;
 class PublicEditor;
 class RCOptionEditor;
 class RouteParams_UI;
+class SaveAsDialog;
+class SessionDialog;
 class SessionOptionEditor;
 class ShuttleControl;
 class Splash;
-class SpeakerDialog;
-class ThemeManager;
 class TimeInfoBox;
 class MidiTracer;
-class GlobalPortMatrixWindow;
+class NSM_Client;
+class LevelMeterHBox;
 class GUIObjectState;
-
-namespace Gtkmm2ext {
-	class TearOff;
-}
 
 namespace ARDOUR {
 	class ControlProtocolInfo;
@@ -120,9 +123,23 @@ namespace ARDOUR {
 	class ProcessThread;
 }
 
+namespace Gtkmm2ext {
+	class TearOff;
+}
+
+namespace Gtk {
+	class ProgressBar;
+}
+
 class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 {
-  public:
+    private:
+	/* This must be the first data element because constructor ordering
+	   relies on it.
+	*/
+	UIConfiguration*     ui_config;
+
+    public:
         ARDOUR_UI (int *argcp, char **argvp[], const char* localedir);
 	~ARDOUR_UI();
 
@@ -134,10 +151,17 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void launch_chat ();
 	void launch_manual ();
 	void launch_reference ();
+	void launch_tracker ();
+	void launch_subscribe ();
+	void launch_cheat_sheet ();
+	void launch_website ();
+	void launch_website_dev ();
+	void launch_forums ();
+	void launch_howto_report ();
 	void show_about ();
 	void hide_about ();
 
-	void idle_load (const std::string& path);
+	void load_from_application_api (const std::string& path);
 	void finish();
 
 	int load_session (const std::string& path, const std::string& snapshot, std::string mix_template = std::string());
@@ -150,7 +174,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	bool get_smart_mode () const;
 	
 	int get_session_parameters (bool quit_on_cancel, bool should_be_new = false, std::string load_template = "");
-	int  build_session_from_nsd (const std::string& session_name, const std::string& session_path);
+        int  build_session_from_dialog (SessionDialog&, const std::string& session_name, const std::string& session_path);
 	bool ask_about_loading_existing_session (const std::string& session_path);
 
 	/// @return true if session was successfully unloaded.
@@ -161,13 +185,15 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void save_state (const std::string & state_name = "", bool switch_to_it = false);
 
 	static ARDOUR_UI *instance () { return theArdourUI; }
-	static UIConfiguration *config () { return ui_config; }
-
-	PublicEditor&	  the_editor(){return *editor;}
+	static UIConfiguration *config () { return theArdourUI->ui_config; }
+	static float ui_scale;
+	
+	PublicEditor&	  the_editor() { return *editor;}
 	Mixer_UI* the_mixer() { return mixer; }
 
 	void new_midi_tracer_window ();
 	void toggle_editing_space();
+	void toggle_mixer_space();
 	void toggle_keep_tearoffs();
 
 	Gtk::Tooltips& tooltips() { return _tooltips; }
@@ -175,11 +201,11 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	Gtk::HBox& editor_transport_box() { return _editor_transport_box; }
 
 	static PublicEditor* _instance;
-	static sigc::signal<void,bool> Blink;
-	static sigc::signal<void>      RapidScreenUpdate;
-	static sigc::signal<void>      SuperRapidScreenUpdate;
+
 	/** Emitted frequently with the audible frame, false, and the edit point as
 	 *  parameters respectively.
+	 *
+	 *  (either RapidScreenUpdate || SuperRapidScreenUpdate - user-config)
 	 */
 	static sigc::signal<void, framepos_t, bool, framepos_t> Clock;
 
@@ -199,7 +225,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void create_xrun_marker (framepos_t);
 
 	GUIObjectState* gui_object_state;
-
+	
 	MainClock* primary_clock;
 	MainClock* secondary_clock;
 	void focus_on_clock ();
@@ -225,6 +251,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	bool start_video_server (Gtk::Window* float_window, bool popup_msg);
 	void stop_video_server (bool ask_confirm=false);
 	void flush_videotimeline_cache (bool localcacheonly=false);
+	void export_video (bool range = false);
 
 	void session_add_audio_track (
 		int input_channels,
@@ -255,13 +282,15 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 		session_add_midi_route (false);
 	}*/
 
-	int  create_engine ();
+        void attach_to_engine ();
 	void post_engine ();
 
 	gint exit_on_main_window_close (GdkEventAny *);
 
 	void maximise_editing_space ();
 	void restore_editing_space ();
+
+	void show_ui_prefs ();
 
 	void update_tearoff_visibility ();
 
@@ -273,7 +302,14 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void get_process_buffers ();
 	void drop_process_buffers ();
 
+	void reset_peak_display ();
+	void reset_route_peak_display (ARDOUR::Route*);
+	void reset_group_peak_display (ARDOUR::RouteGroup*);
+
         const std::string& announce_string() const { return _announce_string; }
+
+        int disconnect_from_engine ();
+        int reconnect_to_engine ();
 
   protected:
 	friend class PublicEditor;
@@ -289,23 +325,24 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void reenable_hide_loop_punch_ruler_if_appropriate ();
 	void toggle_auto_return ();
 	void toggle_click ();
-
+        void toggle_audio_midi_setup ();
 	void toggle_session_auto_loop ();
-
 	void toggle_rc_options_window ();
 	void toggle_session_options_window ();
 
   private:
-	ArdourStartup*      _startup;
-	ARDOUR::AudioEngine *engine;
-	Gtk::Tooltips        _tooltips;
-	NSM_Client          *nsm;
-	bool                 _was_dirty;
-        bool                 _mixer_on_top;
+	PublicEditor*        editor;
+	Mixer_UI*            mixer;
+	Gtk::Tooltips       _tooltips;
+	NSM_Client*          nsm;
+	bool                _was_dirty;
+        bool                _mixer_on_top;
+        bool first_time_engine_run;
 
 	void goto_editor_window ();
 	void goto_mixer_window ();
 	void toggle_mixer_window ();
+	void toggle_meterbridge ();
         void toggle_editor_mixer ();
 
 	int  setup_windows ();
@@ -314,11 +351,11 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 
 	static ARDOUR_UI *theArdourUI;
 
-	void startup ();
-	void shutdown ();
+        int starting ();
 
 	int  ask_about_saving_session (const std::vector<std::string>& actions);
 
+	void save_session_at_its_request (std::string);
 	/* periodic safety backup, to be precise */
 	gint autosave_session();
 	void update_autosave();
@@ -332,13 +369,6 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void engine_running ();
 
 	void use_config ();
-
-	static gint _blink  (void *);
-	void blink ();
-	gint blink_timeout_tag;
-	bool blink_on;
-	void start_blinking ();
-	void stop_blinking ();
 
 	void about_signal_response(int response);
 
@@ -356,10 +386,11 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 
 	std::list<MidiTracer*> _midi_tracer_windows;
 
-	/* Transport Control */
-
 	void detach_tearoff (Gtk::Box* parent, Gtk::Widget* contents);
 	void reattach_tearoff (Gtk::Box* parent, Gtk::Widget* contents, int32_t order);
+	void reattach_all_tearoffs ();
+
+	/* Transport Control */
 
 	Gtkmm2ext::TearOff*      transport_tearoff;
 	Gtk::Frame               transport_frame;
@@ -405,7 +436,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	boost::shared_ptr<TransportControllable> play_selection_controllable;
 	boost::shared_ptr<TransportControllable> rec_controllable;
 
-	void toggle_always_play_range ();
+	void toggle_follow_edits ();
 
 	void set_transport_controllable_state (const XMLNode&);
 	XMLNode& get_transport_controllable_state ();
@@ -433,13 +464,25 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	ArdourButton auditioning_alert_button;
 	ArdourButton solo_alert_button;
 	ArdourButton feedback_alert_button;
+	ArdourButton error_alert_button;
 
 	Gtk::VBox alert_box;
+	Gtk::VBox meter_box;
+	LevelMeterHBox * editor_meter;
+	float            editor_meter_max_peak;
+	ArdourButton     editor_meter_peak_display;
+	bool             editor_meter_peak_button_release (GdkEventButton*);
+
+	void blink_handler (bool);
+	sigc::connection blink_connection;
 
 	void solo_blink (bool);
 	void sync_blink (bool);
 	void audition_blink (bool);
 	void feedback_blink (bool);
+	void error_blink (bool);
+	
+	void set_flat_buttons();
 
 	void soloing_changed (bool);
 	void auditioning_changed (bool);
@@ -448,6 +491,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	bool solo_alert_press (GdkEventButton* ev);
 	bool audition_alert_press (GdkEventButton* ev);
 	bool feedback_alert_press (GdkEventButton *);
+	bool error_alert_press (GdkEventButton *);
 
 	void big_clock_value_changed ();
 	void primary_clock_value_changed ();
@@ -483,7 +527,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 
 	struct RecentSessionsSorter {
 		bool operator() (std::pair<std::string,std::string> a, std::pair<std::string,std::string> b) const {
-		    return cmp_nocase(a.first, b.first) == -1;
+		    return ARDOUR::cmp_nocase(a.first, b.first) == -1;
 	    }
 	};
 
@@ -508,6 +552,9 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	Gtk::Label   cpu_load_label;
 	void update_cpu_load ();
 
+	Gtk::Label   xrun_label;
+	void update_xrun_count ();
+
 	Gtk::Label   buffer_load_label;
 	void update_buffer_load ();
 
@@ -517,14 +564,16 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	Gtk::Label    format_label;
 	void update_format ();
 	
-	gint every_second ();
-	gint every_point_one_seconds ();
-	gint every_point_zero_one_seconds ();
+	void every_second ();
+	void every_point_one_seconds ();
+	void every_point_zero_something_seconds ();
 
 	sigc::connection second_connection;
 	sigc::connection point_one_second_connection;
-	sigc::connection point_oh_five_second_connection;
-	sigc::connection point_zero_one_second_connection;
+	sigc::connection point_zero_something_second_connection;
+	sigc::connection fps_connection;
+
+	void set_fps_timeout_connection ();
 
 	void open_session ();
 	void open_recent_session ();
@@ -538,6 +587,15 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 
 	void set_transport_sensitivity (bool);
 
+	//stuff for ProTools-style numpad
+	void transport_numpad_event (int num);
+	void transport_numpad_decimal ();
+	bool _numpad_locate_happening;
+	int _pending_locate_num;
+	gint transport_numpad_timeout ();
+	sigc::connection _numpad_timeout_connection;
+
+	void transport_goto_nth_marker (int nth);
 	void transport_goto_zero ();
 	void transport_goto_start ();
 	void transport_goto_end ();
@@ -551,6 +609,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void transport_rewind (int option);
 	void transport_loop ();
 	void toggle_roll (bool with_abort, bool roll_out_of_bounded_mode);
+	bool trx_record_enable_all_tracks ();
 
 	bool _session_is_new;
 	void set_session (ARDOUR::Session *);
@@ -562,24 +621,30 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	guint32  last_key_press_time;
 
 	void snapshot_session (bool switch_to_it);
+
+	SaveAsDialog* save_as_dialog;
+
+	bool save_as_progress_update (float fraction, int64_t cnt, int64_t total, Gtk::Label* label, Gtk::ProgressBar* bar);
+	void save_session_as ();
 	void rename_session ();
+	void setup_order_hint (AddRouteDialog::InsertAt);
 
-	Mixer_UI   *mixer;
 	int         create_mixer ();
-
-	PublicEditor     *editor;
 	int         create_editor ();
 
+	Meterbridge  *meterbridge;
+	int         create_meterbridge ();
         /* Dialogs that can be created via new<T> */
 
         WM::Proxy<SpeakerDialog> speaker_config_window;
-        WM::Proxy<ThemeManager> theme_manager;
         WM::Proxy<KeyEditor> key_editor;
         WM::Proxy<RCOptionEditor> rc_option_editor;
         WM::Proxy<AddRouteDialog> add_route_dialog;
         WM::Proxy<About> about;
         WM::Proxy<LocationUIWindow> location_ui;
         WM::Proxy<RouteParams_UI> route_params;
+        WM::Proxy<EngineControl> audio_midi_setup;
+        WM::Proxy<ExportVideoDialog> export_video_dialog;
 
         /* Windows/Dialogs that require a creator method */
 
@@ -598,9 +663,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
         BigClockWindow*         create_big_clock_window(); 
         GlobalPortMatrixWindow* create_global_port_matrix (ARDOUR::DataType);
 
-	static UIConfiguration *ui_config;
-
-	SystemExec *video_server_process;
+	ARDOUR::SystemExec *video_server_process;
 
 	void handle_locations_change (ARDOUR::Location*);
 
@@ -640,16 +703,18 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void disk_speed_dialog_gone (int ignored_response, Gtk::MessageDialog*);
 	void disk_overrun_handler ();
 	void disk_underrun_handler ();
+	void gui_idle_handler ();
+
+	void cancel_plugin_scan ();
+	void cancel_plugin_timeout ();
+	void plugin_scan_dialog (std::string type, std::string plugin, bool);
+	void plugin_scan_timeout (int);
 
         void session_format_mismatch (std::string, std::string);
 
 	void session_dialog (std::string);
 	int pending_state_dialog ();
 	int sr_mismatch_dialog (ARDOUR::framecnt_t, ARDOUR::framecnt_t);
-
-	void disconnect_from_jack ();
-	void reconnect_to_jack ();
-	void set_jack_buffer_size (ARDOUR::pframes_t);
 
 	Gtk::MenuItem* jack_disconnect_item;
 	Gtk::MenuItem* jack_reconnect_item;
@@ -674,7 +739,6 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 
 	bool first_idle ();
 
-	void no_memory_warning ();
 	void check_memory_locking ();
 
 	bool check_audioengine();
@@ -685,11 +749,11 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 			const char *msg);
 	Gtk::Label status_bar_label;
         bool status_bar_button_press (GdkEventButton*);
-	Gtk::ToggleButton error_log_button;
 
 	void loading_message (const std::string& msg);
 
 	PBD::ScopedConnectionList forever_connections;
+        PBD::ScopedConnection halt_connection; 
 
         void step_edit_status_change (bool);
 
@@ -703,7 +767,7 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void fontconfig_dialog ();
 
         int missing_file (ARDOUR::Session*s, std::string str, ARDOUR::DataType type);
-        int ambiguous_file (std::string file, std::string path, std::vector<std::string> hits);
+        int ambiguous_file (std::string file, std::vector<std::string> hits);
 
 	bool click_button_clicked (GdkEventButton *);
 
@@ -722,10 +786,24 @@ class ARDOUR_UI : public Gtkmm2ext::UI, public ARDOUR::SessionHandlePtr
 	void successful_graph_sort ();
 	bool _feedback_exists;
 
+	enum ArdourLogLevel {
+		LogLevelNone = 0,
+		LogLevelInfo,
+		LogLevelWarning,
+		LogLevelError
+	};
+
+	ArdourLogLevel _log_not_acknowledged;
+
 	void resize_text_widgets ();
+
+	bool xrun_button_release (GdkEventButton* ev);
 
         std::string _announce_string;
         void check_announcements ();
+
+        int do_audio_midi_setup (uint32_t);
+	void audioengine_became_silent ();
 };
 
 #endif /* __ardour_gui_h__ */

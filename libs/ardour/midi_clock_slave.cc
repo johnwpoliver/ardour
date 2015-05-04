@@ -20,7 +20,6 @@
 
 #include <cmath>
 #include <errno.h>
-#include <poll.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include "pbd/error.h"
@@ -31,6 +30,8 @@
 #include "midi++/port.h"
 
 #include "ardour/debug.h"
+#include "ardour/midi_buffer.h"
+#include "ardour/midi_port.h"
 #include "ardour/slave.h"
 #include "ardour/tempo.h"
 
@@ -41,9 +42,9 @@ using namespace ARDOUR;
 using namespace MIDI;
 using namespace PBD;
 
-MIDIClock_Slave::MIDIClock_Slave (Session& s, MIDI::Port& p, int ppqn)
+MIDIClock_Slave::MIDIClock_Slave (Session& s, MidiPort& p, int ppqn)
 	: ppqn (ppqn)
-	, bandwidth (10.0 / 60.0) // 1 BpM = 1 / 60 Hz
+	, bandwidth (2.0 / 60.0) // 1 BpM = 1 / 60 Hz
 {
 	session = (ISlaveSessionProxy *) new SlaveSessionProxy(s);
 	rebind (p);
@@ -53,7 +54,7 @@ MIDIClock_Slave::MIDIClock_Slave (Session& s, MIDI::Port& p, int ppqn)
 MIDIClock_Slave::MIDIClock_Slave (ISlaveSessionProxy* session_proxy, int ppqn)
 	: session(session_proxy)
 	, ppqn (ppqn)
-	, bandwidth (10.0 / 60.0) // 1 BpM = 1 / 60 Hz
+	, bandwidth (2.0 / 60.0) // 1 BpM = 1 / 60 Hz
 {
 	reset ();
 }
@@ -64,19 +65,18 @@ MIDIClock_Slave::~MIDIClock_Slave()
 }
 
 void
-MIDIClock_Slave::rebind (MIDI::Port& p)
+MIDIClock_Slave::rebind (MidiPort& port)
 {
-	port_connections.drop_connections();
+	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("MIDIClock_Slave: connecting to port %1\n", port.name()));
 
-	port = &p;
+	port_connections.drop_connections ();
 
-	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("MIDIClock_Slave: connecting to port %1\n", port->name()));
+	port.self_parser().timing.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::update_midi_clock, this, _1, _2));
+	port.self_parser().start.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::start, this, _1, _2));
+	port.self_parser().contineu.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::contineu, this, _1, _2));
+	port.self_parser().stop.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::stop, this, _1, _2));
+	port.self_parser().position.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::position, this, _1, _2, 3));
 
-	port->parser()->timing.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::update_midi_clock, this, _1, _2));
-	port->parser()->start.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::start, this, _1, _2));
-	port->parser()->contineu.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::contineu, this, _1, _2));
-	port->parser()->stop.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::stop, this, _1, _2));
-	port->parser()->position.connect_same_thread (port_connections, boost::bind (&MIDIClock_Slave::position, this, _1, _2, 3));
 }
 
 void
@@ -122,6 +122,8 @@ MIDIClock_Slave::update_midi_clock (Parser& /*parser*/, framepos_t timestamp)
 		return;
 	}
 
+	pframes_t cycle_offset = timestamp - session->sample_time_at_cycle_start();
+
 	calculate_one_ppqn_in_frames_at(should_be_position);
 
 	framepos_t elapsed_since_start = timestamp - first_timestamp;
@@ -132,6 +134,8 @@ MIDIClock_Slave::update_midi_clock (Parser& /*parser*/, framepos_t timestamp)
 
 		first_timestamp = timestamp;
 		elapsed_since_start = should_be_position;
+
+		DEBUG_TRACE (DEBUG::MidiClock, string_compose ("first clock message after start received @ %1\n", timestamp));
 
 		// calculate filter coefficients
 		calculate_filter_coefficients();
@@ -152,7 +156,7 @@ MIDIClock_Slave::update_midi_clock (Parser& /*parser*/, framepos_t timestamp)
 		// we use session->transport_frame() instead of t1 here
 		// because t1 is used to calculate the transport speed,
 		// so the loop will compensate for accumulating rounding errors
-		error = (double(should_be_position) - double(session->transport_frame()));
+		error = (double(should_be_position) - (double(session->transport_frame()) + double(cycle_offset)));
 		e = error / double(session->frame_rate());
 		current_delta = error;
 
@@ -162,21 +166,23 @@ MIDIClock_Slave::update_midi_clock (Parser& /*parser*/, framepos_t timestamp)
 		e2 += c * e;
 	}
 
-	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("clock #%1 @ %2 arrived %3 (theoretical) audible %4 transport %5 error %6 "
-						       "read delta %7 should-be delta %8 t1-t0 %9 t0 %10 t1 %11 framerate %12 appspeed %13\n",
-						       midi_clock_count,
-						       elapsed_since_start,
-						       should_be_position,
-						       session->audible_frame(),
-						       session->transport_frame(),
-						       error,
-						       timestamp - last_timestamp,
-						       one_ppqn_in_frames,
-						       (t1 -t0) * session->frame_rate(),
-						       t0 * session->frame_rate(),
-						       t1 * session->frame_rate(),
-						       session->frame_rate(),
-						       ((t1 - t0) * session->frame_rate()) / one_ppqn_in_frames));
+	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("clock #%1 @ %2 should-be %3 transport %4 error %5 appspeed %6 "
+						       "read-delta %7 should-be delta %8 t1-t0 %9 t0 %10 t1 %11 framerate %12 engine %13\n",
+						       midi_clock_count,                                          // #
+						       elapsed_since_start,                                       // @
+						       should_be_position,                                        // should-be
+						       session->transport_frame(),                                // transport
+						       error,                                                     // error
+						       ((t1 - t0) * session->frame_rate()) / one_ppqn_in_frames, // appspeed
+						       timestamp - last_timestamp,                                // read delta
+						       one_ppqn_in_frames,                                        // should-be delta
+						       (t1 - t0) * session->frame_rate(),                         // t1-t0
+						       t0 * session->frame_rate(),                                // t0
+						       t1 * session->frame_rate(),                                // t1
+						       session->frame_rate(),                                      // framerate
+						       session->frame_time()
+
+	));
 
 	last_timestamp = timestamp;
 }
@@ -184,7 +190,7 @@ MIDIClock_Slave::update_midi_clock (Parser& /*parser*/, framepos_t timestamp)
 void
 MIDIClock_Slave::start (Parser& /*parser*/, framepos_t timestamp)
 {
-	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("MIDIClock_Slave got start message at time %1 engine time %2\n", timestamp, session->frame_time()));
+	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("MIDIClock_Slave got start message at time %1 engine time %2 transport_frame %3\n", timestamp, session->frame_time(), session->transport_frame()));
 
 	if (!_started) {
 		reset();
@@ -199,6 +205,8 @@ MIDIClock_Slave::start (Parser& /*parser*/, framepos_t timestamp)
 void
 MIDIClock_Slave::reset ()
 {
+	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("MidiClock_Slave reset(): calculated filter bandwidth is %1 for period size %2\n", bandwidth, session->frames_per_cycle()));
+
 	should_be_position = session->transport_frame();
 	last_timestamp = 0;
 
@@ -252,7 +260,7 @@ MIDIClock_Slave::stop (Parser& /*parser*/, framepos_t /*timestamp*/)
 }
 
 void
-MIDIClock_Slave::position (Parser& /*parser*/, byte* message, size_t size)
+MIDIClock_Slave::position (Parser& /*parser*/, MIDI::byte* message, size_t size)
 {
 	// we are note supposed to get position messages while we are running
 	// so lets be robust and ignore those
@@ -261,8 +269,8 @@ MIDIClock_Slave::position (Parser& /*parser*/, byte* message, size_t size)
 	}
 
 	assert(size == 3);
-	byte lsb = message[1];
-	byte msb = message[2];
+	MIDI::byte lsb = message[1];
+	MIDI::byte msb = message[2];
 	assert((lsb <= 0x7f) && (msb <= 0x7f));
 
 	uint16_t position_in_sixteenth_notes = (uint16_t(msb) << 7) | uint16_t(lsb);
@@ -344,7 +352,7 @@ MIDIClock_Slave::speed_and_position (double& speed, framepos_t& pos)
 		pos = should_be_position;
 	}
 
-	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("speed_and_position: %1 & %2 <-> %3 (transport)\n", speed, pos, session->transport_frame()));
+	DEBUG_TRACE (DEBUG::MidiClock, string_compose ("speed_and_position: speed %1 should-be %2 transport %3 \n", speed, pos, session->transport_frame()));
 
 	return true;
 }

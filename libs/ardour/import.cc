@@ -34,6 +34,7 @@
 #include <sndfile.h>
 #include <samplerate.h>
 
+#include <glib/gstdio.h>
 #include <glibmm.h>
 
 #include <boost/scoped_array.hpp>
@@ -116,78 +117,36 @@ open_importable_source (const string& path, framecnt_t samplerate, ARDOUR::SrcQu
 	}
 }
 
-static std::string
-get_non_existent_filename (HeaderFormat hf, DataType type, const bool allow_replacing, const std::string& destdir, const std::string& basename, uint channel, uint channels)
-{
-	char buf[PATH_MAX+1];
-	bool goodfile = false;
-	string base = basename;
-	string ext = native_header_format_extension (hf, type);
-	uint32_t cnt = 1;
-
-	do {
-
-		if (type == DataType::AUDIO && channels == 2) {
-			if (channel == 0) {
-				if (cnt == 1) {
-					snprintf (buf, sizeof(buf), "%s-L%s", base.c_str(), ext.c_str());
-				} else {
-					snprintf (buf, sizeof(buf), "%s-%d-L%s", base.c_str(), cnt, ext.c_str());
-				}
-			} else {
-				if (cnt == 1) {
-					snprintf (buf, sizeof(buf), "%s-R%s", base.c_str(), ext.c_str());
-				} else {
-					snprintf (buf, sizeof(buf), "%s-%d-R%s", base.c_str(), cnt, ext.c_str());
-				}
-			}
-		} else if (channels > 1) {
-			if (cnt == 1) {
-				snprintf (buf, sizeof(buf), "%s-c%d%s", base.c_str(), channel, ext.c_str());
-			} else {
-				snprintf (buf, sizeof(buf), "%s-%d-c%d%s", base.c_str(), cnt, channel, ext.c_str());
-			}
-		} else {
-			if (cnt == 1) {
-				snprintf (buf, sizeof(buf), "%s%s", base.c_str(), ext.c_str());
-			} else {
-				snprintf (buf, sizeof(buf), "%s-%d%s", base.c_str(), cnt, ext.c_str());
-			}
-		}
-
-		string tempname = destdir + "/" + buf;
-
-		if (!allow_replacing && Glib::file_test (tempname, Glib::FILE_TEST_EXISTS)) {
-
-			cnt++;
-
-		} else {
-
-			goodfile = true;
-		}
-
-	} while (!goodfile);
-
-	return buf;
-}
-
-static vector<string>
-get_paths_for_new_sources (HeaderFormat hf, const bool allow_replacing, const string& import_file_path, const string& session_dir, uint channels)
+vector<string>
+Session::get_paths_for_new_sources (bool /*allow_replacing*/, const string& import_file_path, uint32_t channels)
 {
 	vector<string> new_paths;
 	const string basename = basename_nosuffix (import_file_path);
 
-	SessionDirectory sdir(session_dir);
-
-	for (uint n = 0; n < channels; ++n) {
+	for (uint32_t n = 0; n < channels; ++n) {
 
 		const DataType type = SMFSource::safe_midi_file_extension (import_file_path) ? DataType::MIDI : DataType::AUDIO;
+		string filepath;
 
-		std::string filepath = (type == DataType::MIDI)
-			? sdir.midi_path() : sdir.sound_path();
+		switch (type) {
+		  case DataType::MIDI:
+				if (channels > 1) {
+					string mchn_name = string_compose ("%1-t%2", basename, n);
+					filepath = new_midi_source_path (mchn_name);
+				} else {
+					filepath = new_midi_source_path (basename);
+				}
+			break;
+		case DataType::AUDIO:
+			filepath = new_audio_source_path (basename, channels, n, false, false);
+			break;
+		}
 
-		filepath = Glib::build_filename (filepath,
-		                                 get_non_existent_filename (hf, type, allow_replacing, filepath, basename, n, channels));
+		if (filepath.empty()) {
+			error << string_compose (_("Cannot find new filename for imported file %1"), import_file_path) << endmsg;
+			return vector<string>();
+		}
+
 		new_paths.push_back (filepath);
 	}
 
@@ -196,12 +155,12 @@ get_paths_for_new_sources (HeaderFormat hf, const bool allow_replacing, const st
 
 static bool
 map_existing_mono_sources (const vector<string>& new_paths, Session& /*sess*/,
-                           uint /*samplerate*/, vector<boost::shared_ptr<Source> >& newfiles, Session *session)
+                           uint32_t /*samplerate*/, vector<boost::shared_ptr<Source> >& newfiles, Session *session)
 {
 	for (vector<string>::const_iterator i = new_paths.begin();
 	     i != new_paths.end(); ++i)
 	{
-		boost::shared_ptr<Source> source = session->source_by_path_and_channel(*i, 0);
+		boost::shared_ptr<Source> source = session->audio_source_by_path_and_channel(*i, 0);
 
 		if (source == 0) {
 			error << string_compose(_("Could not find a source for %1 even though we are updating this file!"), (*i)) << endl;
@@ -215,7 +174,7 @@ map_existing_mono_sources (const vector<string>& new_paths, Session& /*sess*/,
 
 static bool
 create_mono_sources_for_writing (const vector<string>& new_paths,
-                                 Session& sess, uint samplerate,
+                                 Session& sess, uint32_t samplerate,
                                  vector<boost::shared_ptr<Source> >& newfiles,
                                  framepos_t timeline_position)
 {
@@ -253,10 +212,10 @@ create_mono_sources_for_writing (const vector<string>& new_paths,
 
 static string
 compose_status_message (const string& path,
-                        uint file_samplerate,
-                        uint session_samplerate,
-                        uint /* current_file */,
-                        uint /* total_files */)
+                        uint32_t file_samplerate,
+                        uint32_t session_samplerate,
+                        uint32_t /* current_file */,
+                        uint32_t /* total_files */)
 {
 	if (file_samplerate != session_samplerate) {
 		return string_compose (_("Resampling %1 from %2kHz to %3kHz"),
@@ -274,12 +233,15 @@ write_audio_data_to_new_files (ImportableSource* source, ImportStatus& status,
 {
 	const framecnt_t nframes = ResampledImportableSource::blocksize;
 	boost::shared_ptr<AudioFileSource> afs;
-	uint channels = source->channels();
+	uint32_t channels = source->channels();
+	if (channels == 0) {
+		return;
+	}
 
 	boost::scoped_array<float> data(new float[nframes * channels]);
 	vector<boost::shared_array<Sample> > channel_data;
 
-	for (uint n = 0; n < channels; ++n) {
+	for (uint32_t n = 0; n < channels; ++n) {
 		channel_data.push_back(boost::shared_array<Sample>(new Sample[nframes]));
 	}
 
@@ -300,7 +262,7 @@ write_audio_data_to_new_files (ImportableSource* source, ImportStatus& status,
 		*/
 
 		float peak = 0;
-		uint read_count = 0;
+		uint32_t read_count = 0;
 
 		while (!status.cancel) {
 			framecnt_t const nread = source->read (data.get(), nframes);
@@ -324,15 +286,23 @@ write_audio_data_to_new_files (ImportableSource* source, ImportStatus& status,
 		progress_base = 0.5;
 	}
 
-	uint read_count = 0;
+	framecnt_t read_count = 0;
 
 	while (!status.cancel) {
 
 		framecnt_t nread, nfread;
-		uint x;
-		uint chn;
+		uint32_t x;
+		uint32_t chn;
 
 		if ((nread = source->read (data.get(), nframes)) == 0) {
+#ifdef PLATFORM_WINDOWS
+			/* Flush the data once we've finished importing the file. Windows can  */
+			/* cache the data for very long periods of time (perhaps not writing   */
+			/* it to disk until Ardour closes). So let's force it to flush now.    */
+			for (chn = 0; chn < channels; ++chn)
+				if ((afs = boost::dynamic_pointer_cast<AudioFileSource>(newfiles[chn])) != 0)
+					afs->flush ();
+#endif
 			break;
 		}
 
@@ -384,7 +354,9 @@ write_midi_data_to_new_files (Evoral::SMF* source, ImportStatus& status,
 
 			boost::shared_ptr<SMFSource> smfs = boost::dynamic_pointer_cast<SMFSource> (*s);
 
-			smfs->drop_model ();
+			Glib::Threads::Mutex::Lock source_lock(smfs->mutex());
+
+			smfs->drop_model (source_lock);
 			source->seek_to_track (i);
 
 			uint64_t t       = 0;
@@ -414,15 +386,17 @@ write_midi_data_to_new_files (Evoral::SMF* source, ImportStatus& status,
 				}
 
 				if (first) {
-					smfs->mark_streaming_write_started ();
+					smfs->mark_streaming_write_started (source_lock);
 					first = false;
 				}
 
-				smfs->append_event_unlocked_beats(
-					Evoral::Event<double>(0,
-					                      (double)t / (double)source->ppqn(),
-					                      size,
-					                      buf));
+				smfs->append_event_beats(
+					source_lock,
+					Evoral::Event<Evoral::Beats>(
+						0,
+						Evoral::Beats::ticks_at_rate(t, source->ppqn()),
+						size,
+						buf));
 
 				if (status.progress < 0.99) {
 					status.progress += 0.01;
@@ -433,24 +407,24 @@ write_midi_data_to_new_files (Evoral::SMF* source, ImportStatus& status,
 
 				/* we wrote something */
 
-				const framepos_t pos = 0;
-				const double length_beats = ceil(t / (double)source->ppqn());
+				const framepos_t     pos          = 0;
+				const Evoral::Beats  length_beats = Evoral::Beats::ticks_at_rate(t, source->ppqn());
 				BeatsFramesConverter converter(smfs->session().tempo_map(), pos);
-				smfs->update_length(pos + converter.to(length_beats));
-				smfs->mark_streaming_write_completed ();
+				smfs->update_length(pos + converter.to(length_beats.round_up_to_beat()));
+				smfs->mark_streaming_write_completed (source_lock);
 
 				if (status.cancel) {
 					break;
 				}
 			} else {
-				warning << string_compose (_("Track %1 of %2 contained no usable MIDI data"), i, source->file_path()) << endmsg;
+				info << string_compose (_("Track %1 of %2 contained no usable MIDI data"), i, source->num_tracks()) << endmsg;
 			}
 
 			++s; // next source
 		}
 
-	} catch (...) {
-		error << string_compose (_("MIDI file %1 was not readable (no reason available)"), source->file_path()) << endmsg;
+	} catch (exception& e) {
+		error << string_compose (_("MIDI file could not be written (best guess: %1)"), e.what()) << endmsg;
 	}
 
 	if (buf) {
@@ -463,8 +437,10 @@ remove_file_source (boost::shared_ptr<Source> source)
 {
 	boost::shared_ptr<FileSource> fs = boost::dynamic_pointer_cast<FileSource> (source);
 
+	fs->DropReferences ();
+
 	if (fs) {
-		::unlink (fs->path().c_str());
+		::g_unlink (fs->path().c_str());
 	}
 }
 
@@ -479,7 +455,7 @@ Session::import_files (ImportStatus& status)
 	Sources all_new_sources;
 	boost::shared_ptr<AudioFileSource> afs;
 	boost::shared_ptr<SMFSource> smfs;
-	uint channels = 0;
+	uint32_t channels = 0;
 
 	status.sources.clear ();
 
@@ -512,11 +488,13 @@ Session::import_files (ImportStatus& status)
 				return;
 			}
 		}
+		
+		if (channels == 0) {
+			error << _("Import: file contains no channels.") << endmsg;
+			continue;
+		}
 
-		vector<string> new_paths = get_paths_for_new_sources (config.get_native_file_header_format(),
-		                                                      status.replace_existing_source, *p,
-		                                                      get_best_session_directory_for_new_source (),
-		                                                      channels);
+		vector<string> new_paths = get_paths_for_new_sources (status.replace_existing_source, *p, channels);
 		Sources newfiles;
 		framepos_t natural_position = source ? source->natural_position() : 0;
 

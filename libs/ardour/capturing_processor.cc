@@ -28,7 +28,7 @@ namespace ARDOUR {
 
 CapturingProcessor::CapturingProcessor (Session & session)
 	: Processor (session, X_("capture point"))
-	, block_size (session.engine().frames_per_cycle())
+	, block_size (AudioEngine::instance()->samples_per_cycle())
 {
 	realloc_buffers ();
 }
@@ -62,7 +62,7 @@ CapturingProcessor::configure_io (ChanCount in, ChanCount out)
 }
 
 bool
-CapturingProcessor::can_support_io_configuration (const ChanCount& in, ChanCount& out) const
+CapturingProcessor::can_support_io_configuration (const ChanCount& in, ChanCount& out)
 {
 	out = in;
 	return true;

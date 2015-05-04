@@ -53,7 +53,7 @@ class AudioPlaylist;
 class AudioFileSource;
 class IO;
 
-class AudioDiskstream : public Diskstream
+class LIBARDOUR_API AudioDiskstream : public Diskstream
 {
   public:
 	AudioDiskstream (Session &, const std::string& name, Diskstream::Flag f = Recordable);
@@ -108,13 +108,14 @@ class AudioDiskstream : public Diskstream
 	int remove_channel (uint32_t how_many);
 
 	bool set_name (std::string const &);
+	bool set_write_source_name (const std::string& str);
 
 	/* stateful */
 
 	XMLNode& get_state(void);
 	int      set_state(const XMLNode& node, int version);
 
-	void request_jack_monitors_input (bool);
+	void request_input_monitoring (bool);
 
 	static void swap_by_ptr (Sample *first, Sample *last) {
 		while (first < last) {
@@ -124,7 +125,6 @@ class AudioDiskstream : public Diskstream
 		}
 	}
 
-	CubicInterpolation interpolation;
 
   protected:
 	friend class Session;
@@ -139,19 +139,17 @@ class AudioDiskstream : public Diskstream
 	void set_block_size (pframes_t);
 	int  internal_playback_seek (framecnt_t distance);
 	int  can_internal_playback_seek (framecnt_t distance);
-	std::list<boost::shared_ptr<Source> > steal_write_sources();
 	void reset_write_sources (bool, bool force = false);
 	void non_realtime_input_change ();
 	void non_realtime_locate (framepos_t location);
 
   protected:
 	friend class Auditioner;
+	friend class AudioTrack;
 	int  seek (framepos_t which_sample, bool complete_refill = false);
 
-  protected:
-	friend class AudioTrack;
-
         int  process (BufferSet&, framepos_t transport_frame, pframes_t nframes, framecnt_t &, bool need_disk_signal);
+        frameoffset_t calculate_playback_distance (pframes_t nframes);
 	bool commit  (framecnt_t);
 
   private:
@@ -159,7 +157,7 @@ class AudioDiskstream : public Diskstream
 		std::string name;
 
 		bool is_physical () const;
-		void request_jack_monitors_input (bool) const;
+		void request_input_monitoring (bool) const;
 	};
 
 	/** Information about one of our channels */
@@ -205,6 +203,8 @@ class AudioDiskstream : public Diskstream
 	};
 
 	typedef std::vector<ChannelInfo*> ChannelList;
+
+	CubicInterpolation interpolation;
 
 	/* The two central butler operations */
 	int do_flush (RunContext context, bool force = false);

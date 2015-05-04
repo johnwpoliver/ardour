@@ -35,17 +35,15 @@
 #include "ardour/graph.h"
 #include "ardour/port.h"
 #include "ardour/process_thread.h"
+#include "ardour/scene_changer.h"
 #include "ardour/session.h"
 #include "ardour/slave.h"
 #include "ardour/ticker.h"
 #include "ardour/types.h"
 
-#include "midi++/manager.h"
 #include "midi++/mmc.h"
 
 #include "i18n.h"
-
-#include <xmmintrin.h>
 
 using namespace ARDOUR;
 using namespace PBD;
@@ -77,6 +75,29 @@ Session::process (pframes_t nframes)
 
 	(this->*process_function) (nframes);
 
+	/* realtime-safe meter-position and processor-order changes
+	 *
+	 * ideally this would be done in
+	 * Route::process_output_buffers() but various functions
+	 * callig it hold a _processor_lock reader-lock
+	 */
+	boost::shared_ptr<RouteList> r = routes.reader ();
+	for (RouteList::const_iterator i = r->begin(); i != r->end(); ++i) {
+		if ((*i)->apply_processor_changes_rt()) {
+			_rt_emit_pending = true;
+		}
+	}
+	if (_rt_emit_pending) {
+		if (!_rt_thread_active) {
+			emit_route_signals ();
+		}
+		if (pthread_mutex_trylock (&_rt_emit_mutex) == 0) {
+			pthread_cond_signal (&_rt_emit_cond);
+			pthread_mutex_unlock (&_rt_emit_mutex);
+			_rt_emit_pending = false;
+		}
+	}
+
 	_engine.main_thread()->drop_buffers ();
 
 	/* deliver MIDI clock. Note that we need to use the transport frame
@@ -86,9 +107,12 @@ Session::process (pframes_t nframes)
 	 */
 
 	try {
-		if (!_engine.freewheeling() && Config->get_send_midi_clock() && transport_speed() == 1.0f && midi_clock->has_midi_port()) {
-			midi_clock->tick (transport_at_start);
+		if (!_silent && !_engine.freewheeling() && Config->get_send_midi_clock() && (transport_speed() == 1.0f || transport_speed() == 0.0f) && midi_clock->has_midi_port()) {
+			midi_clock->tick (transport_at_start, nframes);
 		}
+
+		_scene_changer->run (transport_at_start, transport_at_start + nframes);
+
 	} catch (...) {
 		/* don't bother with a message */
 	}
@@ -153,17 +177,15 @@ Session::process_routes (pframes_t nframes, bool& need_butler)
 	int  declick = get_transport_declick_required();
 	boost::shared_ptr<RouteList> r = routes.reader ();
 
-	if (transport_sub_state & StopPendingCapture) {
-		/* force a declick out */
-		declick = -1;
-	}
-
 	const framepos_t start_frame = _transport_frame;
 	const framepos_t end_frame = _transport_frame + floor (nframes * _transport_speed);
 	
 	if (_process_graph) {
 		DEBUG_TRACE(DEBUG::ProcessThreads,"calling graph/process-routes\n");
-		_process_graph->process_routes (nframes, start_frame, end_frame, declick, need_butler);
+		if (_process_graph->process_routes (nframes, start_frame, end_frame, declick, need_butler) < 0) {
+			stop_transport ();
+			return -1;
+		}
 	} else {
 
 		for (RouteList::iterator i = r->begin(); i != r->end(); ++i) {
@@ -327,7 +349,7 @@ Session::process_with_events (pframes_t nframes)
 	 * and prepare for rolling)
 	 */
 	if (_send_timecode_update) {
-		send_full_time_code (_transport_frame);
+		send_full_time_code (_transport_frame, nframes);
 	}
 
 	if (!process_can_proceed()) {
@@ -373,6 +395,8 @@ Session::process_with_events (pframes_t nframes)
 		if (!_exporting && !timecode_transmission_suspended()) {
 			send_midi_time_code_for_cycle (_transport_frame, end_frame, nframes);
 		}
+
+		ltc_tx_send_time_code_for_cycle (_transport_frame, end_frame, _target_transport_speed, _transport_speed, nframes);
 
 		framepos_t stop_limit = compute_stop_limit ();
 
@@ -424,7 +448,9 @@ Session::process_with_events (pframes_t nframes)
 				check_declick_out ();
 			}
 
-			_engine.split_cycle (this_nframes);
+			if (nframes > 0) {
+				_engine.split_cycle (this_nframes);
+			}
 
 			/* now handle this event and all others scheduled for the same time */
 
@@ -578,7 +604,7 @@ Session::follow_slave (pframes_t nframes)
 #endif
 
 			if (_slave->give_slave_full_control_over_transport_speed()) {
-				set_transport_speed (slave_speed, false, false);
+				set_transport_speed (slave_speed, 0, false, false);
 				//std::cout << "set speed = " << slave_speed << "\n";
 			} else {
 				float adjusted_speed = slave_speed + (1.5 * (delta /  float(_current_frame_rate)));
@@ -759,7 +785,7 @@ Session::follow_slave_silently (pframes_t nframes, float slave_speed)
 		   for now.
 		*/
 
-		bool need_butler;
+		bool need_butler = false;
 
 		silent_process_routes (nframes, need_butler);
 
@@ -876,7 +902,7 @@ Session::process_audition (pframes_t nframes)
 
 	/* if using a monitor section, run it because otherwise we don't hear anything */
 
-	if (auditioner->needs_monitor()) {
+	if (_monitor_out && auditioner->needs_monitor()) {
 		_monitor_out->monitor_run (_transport_frame, _transport_frame + nframes, nframes, false);
 	}
 
@@ -1011,7 +1037,7 @@ Session::process_event (SessionEvent* ev)
 
 	switch (ev->type) {
 	case SessionEvent::SetLoop:
-		set_play_loop (ev->yes_or_no);
+		set_play_loop (ev->yes_or_no, ev->speed);
 		break;
 
 	case SessionEvent::AutoLoop:
@@ -1058,6 +1084,15 @@ Session::process_event (SessionEvent* ev)
 		_send_timecode_update = true;
 		break;
 
+	case SessionEvent::Skip:
+		if (Config->get_skip_playback()) {
+			start_locate (ev->target_frame, true, true, false);
+			_send_timecode_update = true;
+		}
+		remove = false;
+		del = false;
+		break;
+
 	case SessionEvent::LocateRollLocate:
 		// locate is handled by ::request_roll_at_and_return()
 		_requested_return_frame = ev->target_frame;
@@ -1066,7 +1101,7 @@ Session::process_event (SessionEvent* ev)
 
 
 	case SessionEvent::SetTransportSpeed:
-		set_transport_speed (ev->speed, ev->yes_or_no, ev->second_yes_or_no, ev->third_yes_or_no);
+		set_transport_speed (ev->speed, ev->target_frame, ev->yes_or_no, ev->second_yes_or_no, ev->third_yes_or_no);
 		break;
 
 	case SessionEvent::PunchIn:
@@ -1089,8 +1124,8 @@ Session::process_event (SessionEvent* ev)
 
 	case SessionEvent::StopOnce:
 		if (!non_realtime_work_pending()) {
-			stop_transport (ev->yes_or_no);
 			_clear_event_type (SessionEvent::StopOnce);
+			stop_transport (ev->yes_or_no);
 		}
 		remove = false;
 		del = false;
@@ -1139,6 +1174,10 @@ Session::process_event (SessionEvent* ev)
 		set_play_range (ev->audio_range, (ev->speed == 1.0f));
 		break;
 
+	case SessionEvent::CancelPlayAudioRange:
+		unset_play_range();
+		break;
+
 	case SessionEvent::RealTimeOperation:
 		process_rtop (ev);
 		del = false; // other side of RT request needs to clean up
@@ -1158,7 +1197,7 @@ Session::process_event (SessionEvent* ev)
 
 	default:
 	  fatal << string_compose(_("Programming error: illegal event type in process_event (%1)"), ev->type) << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 		break;
 	};
 
@@ -1198,4 +1237,80 @@ Session::compute_stop_limit () const
 	}
 
 	return current_end_frame ();
+}
+
+
+
+/* dedicated thread for signal emission.
+ *
+ * while sending cross-thread signals from the process thread
+ * is fine in general, PBD::Signal's use of boost::function and
+ * boost:bind can produce a vast overhead which is not
+ * acceptable for low latency.
+ *
+ * This works around the issue by moving the boost overhead
+ * out of the RT thread. The overall load is probably higher but
+ * the realtime thread remains unaffected.
+ */
+
+void
+Session::emit_route_signals ()
+{
+	// TODO use RAII to allow using these signals in other places
+	BatchUpdateStart(); /* EMIT SIGNAL */
+	boost::shared_ptr<RouteList> r = routes.reader ();
+	for (RouteList::const_iterator ci = r->begin(); ci != r->end(); ++ci) {
+		(*ci)->emit_pending_signals ();
+	}
+	BatchUpdateEnd(); /* EMIT SIGNAL */
+}
+
+void
+Session::emit_thread_start ()
+{
+	if (_rt_thread_active) {
+		return;
+	}
+	_rt_thread_active = true;
+
+	if (pthread_create (&_rt_emit_thread, NULL, emit_thread, this)) {
+		_rt_thread_active = false;
+	}
+}
+
+void
+Session::emit_thread_terminate ()
+{
+	if (!_rt_thread_active) {
+		return;
+	}
+	_rt_thread_active = false;
+
+	if (pthread_mutex_lock (&_rt_emit_mutex) == 0) {
+		pthread_cond_signal (&_rt_emit_cond);
+		pthread_mutex_unlock (&_rt_emit_mutex);
+	}
+
+	void *status;
+	pthread_join (_rt_emit_thread, &status);
+}
+
+void *
+Session::emit_thread (void *arg)
+{
+	Session *s = static_cast<Session *>(arg);
+	s->emit_thread_run ();
+	pthread_exit (0);
+	return 0;
+}
+
+void
+Session::emit_thread_run ()
+{
+	pthread_mutex_lock (&_rt_emit_mutex);
+	while (_rt_thread_active) {
+		emit_route_signals();
+		pthread_cond_wait (&_rt_emit_cond, &_rt_emit_mutex);
+	}
+	pthread_mutex_unlock (&_rt_emit_mutex);
 }

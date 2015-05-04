@@ -22,15 +22,17 @@
 
 #include <sigc++/trackable.h>
 
+#include "gtkmm2ext/visibility.h"
+
 namespace Gtkmm2ext {
 
 /** A class which offers a tooltip-like window which can be made to
  *  stay open during a drag.
  */
-class PersistentTooltip : public sigc::trackable
+class LIBGTKMM2EXT_API PersistentTooltip : public sigc::trackable
 {
 public:
-	PersistentTooltip (Gtk::Widget *);
+	PersistentTooltip (Gtk::Widget *, int margin_y = 0);
 	virtual ~PersistentTooltip ();
 	
 	void set_tip (std::string);
@@ -60,6 +62,7 @@ private:
 	sigc::connection _timeout;
 	/** The tip text */
 	std::string _tip;
+	int _margin_y;
 };
 
 }

@@ -28,17 +28,18 @@
 #include "pbd/controllable_descriptor.h"
 #include "pbd/error.h"
 #include "pbd/failed_constructor.h"
-#include "pbd/pathscanner.h"
+#include "pbd/file_utils.h"
 #include "pbd/xml++.h"
 
 #include "midi++/port.h"
-#include "midi++/manager.h"
 
+#include "ardour/audioengine.h"
 #include "ardour/filesystem_paths.h"
 #include "ardour/session.h"
 #include "ardour/route.h"
 #include "ardour/midi_ui.h"
 #include "ardour/rc_configuration.h"
+#include "ardour/midiport_manager.h"
 
 #include "generic_midi_control_protocol.h"
 #include "midicontrollable.h"
@@ -59,8 +60,8 @@ GenericMidiControlProtocol::GenericMidiControlProtocol (Session& s)
 	, _threshold (10)
 	, gui (0)
 {
-	_input_port = MIDI::Manager::instance()->midi_input_port ();
-	_output_port = MIDI::Manager::instance()->midi_output_port ();
+	_input_port = s.midi_input_port ();
+	_output_port = s.midi_output_port ();
 
 	do_feedback = false;
 	_feedback_interval = 10000; // microseconds
@@ -79,16 +80,14 @@ GenericMidiControlProtocol::GenericMidiControlProtocol (Session& s)
 	Controllable::CreateBinding.connect_same_thread (*this, boost::bind (&GenericMidiControlProtocol::create_binding, this, _1, _2, _3));
 	Controllable::DeleteBinding.connect_same_thread (*this, boost::bind (&GenericMidiControlProtocol::delete_binding, this, _1));
 
-	Session::SendFeedback.connect (*this, MISSING_INVALIDATOR, boost::bind (&GenericMidiControlProtocol::send_feedback, this), midi_ui_context());;
-#if 0
-	/* XXXX SOMETHING GOES WRONG HERE (april 2012) - STILL DEBUGGING */
 	/* this signal is emitted by the process() callback, and if
 	 * send_feedback() is going to do anything, it should do it in the
 	 * context of the process() callback itself.
 	 */
 
 	Session::SendFeedback.connect_same_thread (*this, boost::bind (&GenericMidiControlProtocol::send_feedback, this));
-#endif
+	//Session::SendFeedback.connect (*this, MISSING_INVALIDATOR, boost::bind (&GenericMidiControlProtocol::send_feedback, this), midi_ui_context());;
+
 	/* this one is cross-thread */
 
 	Route::RemoteControlIDChange.connect (*this, MISSING_INVALIDATOR, boost::bind (&GenericMidiControlProtocol::reset_controllables, this), midi_ui_context());
@@ -106,7 +105,7 @@ static const char * const midimap_env_variable_name = "ARDOUR_MIDIMAPS_PATH";
 static const char* const midi_map_dir_name = "midi_maps";
 static const char* const midi_map_suffix = ".map";
 
-SearchPath
+Searchpath
 system_midi_map_search_path ()
 {
 	bool midimap_path_defined = false;
@@ -116,7 +115,7 @@ system_midi_map_search_path ()
 		return spath_env;
 	}
 
-	SearchPath spath (ardour_data_search_path());
+	Searchpath spath (ardour_data_search_path());
 	spath.add_subdirectory_to_paths(midi_map_dir_name);
 	return spath;
 }
@@ -128,7 +127,7 @@ user_midi_map_directory ()
 }
 
 static bool
-midi_map_filter (const string &str, void */*arg*/)
+midi_map_filter (const string &str, void* /*arg*/)
 {
 	return (str.length() > strlen(midi_map_suffix) &&
 		str.find (midi_map_suffix) == (str.length() - strlen (midi_map_suffix)));
@@ -137,20 +136,19 @@ midi_map_filter (const string &str, void */*arg*/)
 void
 GenericMidiControlProtocol::reload_maps ()
 {
-	vector<string *> *midi_maps;
-	PathScanner scanner;
-	SearchPath spath (system_midi_map_search_path());
+	vector<string> midi_maps;
+	Searchpath spath (system_midi_map_search_path());
 	spath += user_midi_map_directory ();
 
-	midi_maps = scanner (spath.to_string(), midi_map_filter, 0, false, true);
+	find_files_matching_filter (midi_maps, spath, midi_map_filter, 0, false, true);
 
-	if (!midi_maps) {
+	if (midi_maps.empty()) {
 		cerr << "No MIDI maps found using " << spath.to_string() << endl;
 		return;
 	}
 
-	for (vector<string*>::iterator i = midi_maps->begin(); i != midi_maps->end(); ++i) {
-		string fullpath = *(*i);
+	for (vector<string>::iterator i = midi_maps.begin(); i != midi_maps.end(); ++i) {
+		string fullpath = *i;
 
 		XMLTree tree;
 
@@ -171,8 +169,6 @@ GenericMidiControlProtocol::reload_maps ()
 		
 		map_info.push_back (mi);
 	}
-
-	delete midi_maps;
 }
 	
 void
@@ -338,7 +334,7 @@ GenericMidiControlProtocol::start_learning (Controllable* c)
 	}
 
 	if (!mc) {
-		mc = new MIDIControllable (this, *_input_port, *c, false);
+		mc = new MIDIControllable (this, *_input_port->parser(), *c, false);
 	}
 	
 	{
@@ -435,7 +431,7 @@ GenericMidiControlProtocol::create_binding (PBD::Controllable* control, int pos,
 		MIDI::byte value = control_number;
 		
 		// Create a MIDIControllable
-		MIDIControllable* mc = new MIDIControllable (this, *_input_port, *control, false);
+		MIDIControllable* mc = new MIDIControllable (this, *_input_port->parser(), *control, false);
 
 		// Remove any old binding for this midi channel/type/value pair
 		// Note:  can't use delete_binding() here because we don't know the specific controllable we want to remove, only the midi information
@@ -465,21 +461,22 @@ GenericMidiControlProtocol::create_binding (PBD::Controllable* control, int pos,
 XMLNode&
 GenericMidiControlProtocol::get_state () 
 {
-	XMLNode* node = new XMLNode ("Protocol"); 
+	XMLNode& node (ControlProtocol::get_state());
 	char buf[32];
 
-	node->add_property (X_("name"), _name);
-	node->add_property (X_("feedback"), do_feedback ? "1" : "0");
+	node.add_property (X_("feedback"), do_feedback ? "1" : "0");
 	snprintf (buf, sizeof (buf), "%" PRIu64, _feedback_interval);
-	node->add_property (X_("feedback_interval"), buf);
+	node.add_property (X_("feedback_interval"), buf);
+	snprintf (buf, sizeof (buf), "%d", _threshold);
+	node.add_property (X_("threshold"), buf);
 
 	if (!_current_binding.empty()) {
-		node->add_property ("binding", _current_binding);
+		node.add_property ("binding", _current_binding);
 	}
 
 	XMLNode* children = new XMLNode (X_("Controls"));
 
-	node->add_child_nocopy (*children);
+	node.add_child_nocopy (*children);
 
 	Glib::Threads::Mutex::Lock lm2 (controllables_lock);
 	for (MIDIControllables::iterator i = controllables.begin(); i != controllables.end(); ++i) {
@@ -494,7 +491,7 @@ GenericMidiControlProtocol::get_state ()
 		}
 	}
 
-	return *node;
+	return node;
 }
 
 int
@@ -516,6 +513,14 @@ GenericMidiControlProtocol::set_state (const XMLNode& node, int version)
 		}
 	} else {
 		_feedback_interval = 10000;
+	}
+
+	if ((prop = node.property ("threshold")) != 0) {
+		if (sscanf (prop->value().c_str(), "%d", &_threshold) != 1) {
+			_threshold = 10;
+		}
+	} else {
+		_threshold = 10;
 	}
 
 	boost::shared_ptr<Controllable> c;
@@ -549,7 +554,7 @@ GenericMidiControlProtocol::set_state (const XMLNode& node, int version)
 						Controllable* c = Controllable::by_id (id);
 						
 						if (c) {
-							MIDIControllable* mc = new MIDIControllable (this, *_input_port, *c, false);
+							MIDIControllable* mc = new MIDIControllable (this, *_input_port->parser(), *c, false);
 							
 							if (mc->set_state (**niter, version) == 0) {
 								controllables.push_back (mc);
@@ -744,7 +749,7 @@ GenericMidiControlProtocol::create_binding (const XMLNode& node)
 	prop = node.property (X_("uri"));
 	uri = prop->value();
 
-	MIDIControllable* mc = new MIDIControllable (this, *_input_port, momentary);
+	MIDIControllable* mc = new MIDIControllable (this, *_input_port->parser(), momentary);
 
 	if (mc->init (uri)) {
 		delete mc;
@@ -882,7 +887,7 @@ GenericMidiControlProtocol::create_function (const XMLNode& node)
 
 	prop = node.property (X_("function"));
 	
-	MIDIFunction* mf = new MIDIFunction (*_input_port);
+	MIDIFunction* mf = new MIDIFunction (*_input_port->parser());
 	
 	if (mf->setup (*this, prop->value(), argument, data, data_size)) {
 		delete mf;
@@ -978,7 +983,7 @@ GenericMidiControlProtocol::create_action (const XMLNode& node)
 
 	prop = node.property (X_("action"));
 	
-	MIDIAction* ma = new MIDIAction (*_input_port);
+	MIDIAction* ma = new MIDIAction (*_input_port->parser());
         
 	if (ma->init (*this, prop->value(), data, data_size)) {
 		delete ma;

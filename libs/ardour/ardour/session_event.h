@@ -28,6 +28,7 @@
 #include "pbd/ringbuffer.h"
 #include "pbd/event_loop.h"
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
 
 namespace ARDOUR {
@@ -35,7 +36,7 @@ namespace ARDOUR {
 class Slave;
 class Region;
 
-class SessionEvent {
+class LIBARDOUR_API SessionEvent {
 public:
 	enum Type {
 		SetTransportSpeed,
@@ -53,10 +54,12 @@ public:
 		Audition,
 		InputConfigurationChange,
 		SetPlayAudioRange,
+		CancelPlayAudioRange,
 		RealTimeOperation,
 		AdjustPlaybackBuffering,
 		AdjustCaptureBuffering,
 		SetTimecodeTransmission,
+		Skip,
 
 		/* only one of each of these events can be queued at any one time */
 
@@ -108,16 +111,7 @@ public:
 
 	boost::shared_ptr<Region> region;
 
-    SessionEvent (Type t, Action a, framepos_t when, framepos_t where, double spd, bool yn = false, bool yn2 = false, bool yn3 = false)
-		: type (t)
-		, action (a)
-		, action_frame (when)
-		, target_frame (where)
-		, speed (spd)
-		, yes_or_no (yn)
-		, second_yes_or_no (yn2)
-		, third_yes_or_no (yn3)
-		, event_loop (0) {}
+	SessionEvent (Type t, Action a, framepos_t when, framepos_t where, double spd, bool yn = false, bool yn2 = false, bool yn3 = false);
 
 	void set_ptr (void* p) {
 		ptr = p;
@@ -138,11 +132,13 @@ public:
 	void* operator new (size_t);
 	void  operator delete (void *ptr, size_t /*size*/);
 
-	static const framepos_t Immediate = 0;
+	static const framepos_t Immediate = -1;
 
 	static void create_per_thread_pool (const std::string& n, uint32_t nitems);
 	static void init_event_pool ();
 
+	CrossThreadPool* event_pool() const { return own_pool; }
+	
 private:
 	static PerThreadPool* pool;
 	CrossThreadPool* own_pool;
@@ -158,6 +154,7 @@ public:
 
 	virtual void queue_event (SessionEvent *ev) = 0;
 	void clear_events (SessionEvent::Type type);
+	void clear_events (SessionEvent::Type type, boost::function<void (void)> after);
 
 protected:
 	RingBuffer<SessionEvent*> pending_events;

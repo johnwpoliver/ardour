@@ -19,6 +19,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include <unistd.h>
 #include <locale.h>
@@ -395,7 +396,9 @@ IO::disconnect (void* src)
 int
 IO::ensure_ports_locked (ChanCount count, bool clear, bool& changed)
 {
+#ifndef PLATFORM_WINDOWS
 	assert (!AudioEngine::instance()->process_lock().trylock());
+#endif
 
 	boost::shared_ptr<Port> port;
 
@@ -466,7 +469,9 @@ IO::ensure_ports_locked (ChanCount count, bool clear, bool& changed)
 int
 IO::ensure_ports (ChanCount count, bool clear, void* src)
 {
+#ifndef PLATFORM_WINDOWS
 	assert (!AudioEngine::instance()->process_lock().trylock());
+#endif
 
 	bool changed = false;
 
@@ -501,7 +506,9 @@ IO::ensure_ports (ChanCount count, bool clear, void* src)
 int
 IO::ensure_io (ChanCount count, bool clear, void* src)
 {
+#ifndef PLATFORM_WINDOWS
 	assert (!AudioEngine::instance()->process_lock().trylock());
+#endif
 
 	return ensure_ports (count, clear, src);
 }
@@ -520,7 +527,7 @@ IO::state (bool /*full_state*/)
 	string str;
 	vector<string>::iterator ci;
 	int n;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 	Glib::Threads::Mutex::Lock lm (io_lock);
 
 	node->add_property("name", _name);
@@ -581,7 +588,7 @@ IO::set_state (const XMLNode& node, int version)
 
 	const XMLProperty* prop;
 	XMLNodeConstIterator iter;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	/* force use of non-localized representation of decimal point,
 	   since we use it a lot in XML files and so forth.
@@ -637,7 +644,7 @@ IO::set_state_2X (const XMLNode& node, int version, bool in)
 {
 	const XMLProperty* prop;
 	XMLNodeConstIterator iter;
-	LocaleGuard lg (X_("POSIX"));
+	LocaleGuard lg (X_("C"));
 
 	/* force use of non-localized representation of decimal point,
 	   since we use it a lot in XML files and so forth.
@@ -847,6 +854,7 @@ IO::get_port_counts (const XMLNode& node, int version, ChanCount& n, boost::shar
 	for (iter = node.children().begin(); iter != node.children().end(); ++iter) {
 
 		if ((*iter)->name() == X_("Bundle")) {
+			prop = (*iter)->property ("name");
 			if ((c = find_possible_bundle (prop->value())) != 0) {
 				n = ChanCount::max (n, c->nchannels());
 				return 0;
@@ -1032,7 +1040,8 @@ IO::make_connections_2X (const XMLNode& node, int /*version*/, bool in)
 					if (p != string::npos) {
 						ports[x].replace (p, 4, "/audio_out");
 					}
-					nth(i)->connect (ports[x]);
+					if (NULL != nth(i).get())
+						nth(i)->connect (ports[x]);
 				}
 			}
 
@@ -1074,7 +1083,8 @@ IO::make_connections_2X (const XMLNode& node, int /*version*/, bool in)
 					if (p != string::npos) {
 						ports[x].replace (p, 3, "/audio_in");
 					}
-					nth(i)->connect (ports[x]);
+					if (NULL != nth(i).get())
+						nth(i)->connect (ports[x]);
 				}
 			}
 
@@ -1090,7 +1100,6 @@ int
 IO::set_ports (const string& str)
 {
 	vector<string> ports;
-	int i;
 	int n;
 	uint32_t nports;
 
@@ -1107,14 +1116,10 @@ IO::set_ports (const string& str)
 		}
 	}
 
-	string::size_type start, end, ostart;
-
-	ostart = 0;
-	start = 0;
-	end = 0;
-	i = 0;
-
-	while ((start = str.find_first_of ('{', ostart)) != string::npos) {
+	string::size_type start  = 0;
+	string::size_type end    = 0;
+	string::size_type ostart = 0;
+	for (int i = 0; (start = str.find_first_of ('{', ostart)) != string::npos; ++i) {
 		start += 1;
 
 		if ((end = str.find_first_of ('}', start)) == string::npos) {
@@ -1135,7 +1140,6 @@ IO::set_ports (const string& str)
 		}
 
 		ostart = end+1;
-		i++;
 	}
 
 	return 0;
@@ -1172,7 +1176,6 @@ IO::parse_gain_string (const string& str, vector<string>& ports)
 {
 	string::size_type pos, opos;
 
-	pos = 0;
 	opos = 0;
 	ports.clear ();
 
@@ -1337,7 +1340,7 @@ IO::bundle_changed (Bundle::Change /*c*/)
 string
 IO::build_legal_port_name (DataType type)
 {
-	const int name_size = jack_port_name_size();
+	const int name_size = AudioEngine::instance()->port_name_size();
 	int limit;
 	string suffix;
 
@@ -1371,22 +1374,22 @@ IO::build_legal_port_name (DataType type)
 
 	// allow up to 4 digits for the output port number, plus the slash, suffix and extra space
 
-	limit = name_size - _session.engine().client_name().length() - (suffix.length() + 5);
+	limit = name_size - AudioEngine::instance()->my_name().length() - (suffix.length() + 5);
 
-	char buf1[name_size+1];
-	char buf2[name_size+1];
+	std::vector<char> buf1(name_size+1);
+	std::vector<char> buf2(name_size+1);
 
 	/* colons are illegal in port names, so fix that */
 
 	string nom = _name.val();
 	replace_all (nom, ":", ";");
 
-	snprintf (buf1, name_size+1, ("%.*s/%s"), limit, nom.c_str(), suffix.c_str());
+	snprintf (&buf1[0], name_size+1, ("%.*s/%s"), limit, nom.c_str(), suffix.c_str());
 
-	int port_number = find_port_hole (buf1);
-	snprintf (buf2, name_size+1, "%s %d", buf1, port_number);
+	int port_number = find_port_hole (&buf1[0]);
+	snprintf (&buf2[0], name_size+1, "%s %d", &buf1[0], port_number);
 
-	return string (buf2);
+	return string (&buf2[0]);
 }
 
 int32_t
@@ -1404,13 +1407,13 @@ IO::find_port_hole (const char* base)
 	 */
 
 	for (n = 1; n < 9999; ++n) {
-		char buf[jack_port_name_size()];
+		std::vector<char> buf (AudioEngine::instance()->port_name_size());
 		PortSet::iterator i = _ports.begin();
 
-		snprintf (buf, jack_port_name_size(), _("%s %u"), base, n);
+		snprintf (&buf[0], buf.size()+1, _("%s %u"), base, n);
 
 		for ( ; i != _ports.end(); ++i) {
-			if (i->name() == buf) {
+			if (string(i->name()) == string(&buf[0])) {
 				break;
 			}
 		}
@@ -1604,8 +1607,10 @@ IO::connected_to (boost::shared_ptr<const IO> other) const
 
 	for (i = 0; i < no; ++i) {
 		for (j = 0; j < ni; ++j) {
-			if (nth(i)->connected_to (other->nth(j)->name())) {
-				return true;
+			if ((NULL != nth(i).get()) && (NULL != other->nth(j).get())) {
+				if (nth(i)->connected_to (other->nth(j)->name())) {
+					return true;
+				}
 			}
 		}
 	}
@@ -1638,8 +1643,10 @@ IO::process_input (boost::shared_ptr<Processor> proc, framepos_t start_frame, fr
 		return;
 	}
 
-	_buffers.get_jack_port_addresses (_ports, nframes);
-	proc->run (_buffers, start_frame, end_frame, nframes, true);
+	_buffers.get_backend_port_addresses (_ports, nframes);
+	if (proc) {
+		proc->run (_buffers, start_frame, end_frame, nframes, true);
+	}
 }
 
 void

@@ -20,8 +20,9 @@
 #ifndef __midi_types_h__
 #define __midi_types_h__
 
-#include <jack/jack.h>
 #include <inttypes.h>
+
+#include "midi++/libmidi_visibility.h"
 
 namespace MIDI {
 
@@ -32,8 +33,8 @@ namespace MIDI {
 	typedef uint32_t       timestamp_t;
 
 	/** XXX: dupes from libardour */
-	typedef int64_t        framecnt_t;
-	typedef jack_nframes_t pframes_t;
+	typedef int64_t  framecnt_t;
+	typedef uint32_t pframes_t;
 
 	enum eventType {
 	    none = 0x0,
@@ -60,10 +61,10 @@ namespace MIDI {
 	    reset = 0xFF
     };
 
-    extern const char *controller_names[];
+    LIBMIDIPP_API extern const char *controller_names[];
 	byte decode_controller_name (const char *name);
 
-    struct EventTwoBytes {
+    struct LIBMIDIPP_API EventTwoBytes {
 	union {
 	    byte note_number;
 	    byte controller_number;
@@ -74,14 +75,14 @@ namespace MIDI {
 	};
     };
 
-    enum MTC_FPS {
+    enum LIBMIDIPP_API MTC_FPS {
 	    MTC_24_FPS = 0,
 	    MTC_25_FPS = 1,
 	    MTC_30_FPS_DROP = 2,
 	    MTC_30_FPS = 3
     };
 
-    enum MTC_Status {
+    enum LIBMIDIPP_API MTC_Status {
 	    MTC_Stopped = 0,
 	    MTC_Forward,
 	    MTC_Backward

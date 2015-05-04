@@ -23,9 +23,11 @@
 
 #include <string>
 
-#include "taglib/tag.h"
-#include "taglib/taglib.h"
-#include "taglib/xiphcomment.h"
+#include <taglib/tag.h>
+#include <taglib/taglib.h>
+#include <taglib/xiphcomment.h>
+
+#include "ardour/libardour_visibility.h"
 
 namespace ARDOUR
 {
@@ -33,7 +35,7 @@ namespace ARDOUR
 class SessionMetadata;
 
 /// Class with static functions for tagging audiofiles
-class AudiofileTagger
+class LIBARDOUR_API AudiofileTagger
 {
   public:
 

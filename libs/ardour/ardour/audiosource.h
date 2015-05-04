@@ -28,17 +28,17 @@
 
 #include <glibmm/threads.h>
 #include <boost/function.hpp>
+#include <boost/scoped_array.hpp>
 
 #include "ardour/source.h"
 #include "ardour/ardour.h"
 #include "ardour/readable.h"
-#include "pbd/file_manager.h"
 #include "pbd/stateful.h"
 #include "pbd/xml++.h"
 
 namespace ARDOUR {
 
-class AudioSource : virtual public Source,
+class LIBARDOUR_API AudioSource : virtual public Source,
 		public ARDOUR::Readable,
 		public boost::enable_shared_from_this<ARDOUR::AudioSource>
 {
@@ -61,7 +61,7 @@ class AudioSource : virtual public Source,
 
 	virtual float sample_rate () const = 0;
 
-	virtual void mark_streaming_write_completed ();
+	virtual void mark_streaming_write_completed (const Lock& lock);
 
 	virtual bool can_truncate_peaks() const { return true; }
 
@@ -160,12 +160,17 @@ class AudioSource : virtual public Source,
 	 */
         mutable Glib::Threads::Mutex _peaks_ready_lock;
 
-	PBD::FdFileDescriptor* _peakfile_descriptor;
 	int        _peakfile_fd;
 	framecnt_t peak_leftover_cnt;
 	framecnt_t peak_leftover_size;
 	Sample*    peak_leftovers;
 	framepos_t peak_leftover_frame;
+
+	mutable bool _first_run;
+	mutable double _last_scale;
+	mutable off_t _last_map_off;
+	mutable size_t  _last_raw_map_length;
+	mutable boost::scoped_array<PeakData> peak_cache;
 };
 
 }

@@ -86,7 +86,7 @@ Editor::show_editor_mixer (bool yn)
 			screen = Gdk::Screen::get_default();
 		}
 
-		if (screen && screen->get_height() < 700) {
+		if (g_getenv ("ARDOUR_LOVES_STUPID_TINY_SCREENS") == 0 && screen && screen->get_height() < 700) {
 			Gtk::MessageDialog msg (_("This screen is not tall enough to display the editor mixer"));
 			msg.run ();
 			return;
@@ -133,15 +133,17 @@ Editor::show_editor_mixer (bool yn)
 			if (current_mixer_strip == 0) {
 				create_editor_mixer ();
 			}
-
-			current_mixer_strip->set_route (r);
-			current_mixer_strip->set_width_enum (editor_mixer_strip_width, (void*) this);
 		}
 
-		if (current_mixer_strip->get_parent() == 0) {
+		if (current_mixer_strip && current_mixer_strip->get_parent() == 0) {
 			global_hpacker.pack_start (*current_mixer_strip, Gtk::PACK_SHRINK );
  			global_hpacker.reorder_child (*current_mixer_strip, 0);
 			current_mixer_strip->show ();
+		}
+
+		if (r) {
+			current_mixer_strip->set_route (r);
+			current_mixer_strip->set_width_enum (editor_mixer_strip_width, (void*) this);
 		}
 
 	} else {
@@ -164,8 +166,7 @@ void
 Editor::ensure_all_elements_drawn ()
 {
 	controls_layout.queue_draw ();
-	ruler_label_event_box.queue_draw ();
-	time_button_event_box.queue_draw ();
+	time_bars_event_box.queue_draw ();
 }
 #endif
 
@@ -182,6 +183,7 @@ Editor::create_editor_mixer ()
 	current_mixer_strip->WidthChanged.connect (sigc::mem_fun(*this, &Editor::ensure_all_elements_drawn));
 #endif
 	current_mixer_strip->set_embedded (true);
+	
 }
 
 void
@@ -281,7 +283,7 @@ Editor::track_mixer_selection ()
 void
 Editor::follow_mixer_selection ()
 {
-	if (!ARDOUR::Config->get_link_editor_and_mixer_selection() || _following_mixer_selection) {
+	if (_following_mixer_selection) {
 		return;
 	}
 

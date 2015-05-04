@@ -25,12 +25,14 @@
 #include "gtkmm2ext/actions.h"
 #include "ardour/rc_configuration.h"
 
+#include "ui_config.h"
+
 namespace ActionManager {
 
 	/* Ardour specific */
 
 	extern void init ();
-	extern void load_menus ();
+	extern void load_menus (const std::string& menus_file_name); /* not path, just name */
 
 	extern std::vector<Glib::RefPtr<Gtk::Action> > session_sensitive_actions;
 	extern std::vector<Glib::RefPtr<Gtk::Action> > write_sensitive_actions;
@@ -46,12 +48,14 @@ namespace ActionManager {
 
 	extern std::vector<Glib::RefPtr<Gtk::Action> > range_sensitive_actions;
 	extern std::vector<Glib::RefPtr<Gtk::Action> > transport_sensitive_actions;
-	extern std::vector<Glib::RefPtr<Gtk::Action> > jack_sensitive_actions;
-	extern std::vector<Glib::RefPtr<Gtk::Action> > jack_opposite_sensitive_actions;
+	extern std::vector<Glib::RefPtr<Gtk::Action> > engine_sensitive_actions;
+	extern std::vector<Glib::RefPtr<Gtk::Action> > engine_opposite_sensitive_actions;
 	extern std::vector<Glib::RefPtr<Gtk::Action> > edit_point_in_region_sensitive_actions;
 
 	extern void map_some_state (const char* group, const char* action, bool (ARDOUR::RCConfiguration::*get)() const);
+	extern void map_some_state (const char* group, const char* action, bool (UIConfiguration::*get)() const);
 	extern void map_some_state (const char* group, const char* action, sigc::slot<bool>);
+	extern void toggle_config_state (const char* group, const char* action, bool (UIConfiguration::*set)(bool), bool (UIConfiguration::*get)(void) const);
 	extern void toggle_config_state (const char* group, const char* action, bool (ARDOUR::RCConfiguration::*set)(bool), bool (ARDOUR::RCConfiguration::*get)(void) const);
 	extern void toggle_config_state_foo (const char* group, const char* action, sigc::slot<bool, bool>, sigc::slot<bool>);
 }

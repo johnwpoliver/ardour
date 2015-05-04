@@ -53,6 +53,7 @@
 
 using namespace std;
 using namespace ARDOUR;
+using namespace ARDOUR_UI_UTILS;
 using namespace PBD;
 using namespace Gtk;
 using namespace Glib;
@@ -108,17 +109,17 @@ EditorRegions::EditorRegions (Editor* e)
 	Gtk::Label* l;
 
 	ColumnInfo ci[] = {
-		{ 0, _("Region"), _("Region name, with number of channels in []'s") },
-		{ 1, _("Position"),  _("Position of start of region") },
-		{ 2, _("End"),  _("Position of end of region") },
-		{ 3, _("Length"),  _("Length of the region") },
-		{ 4, _("Sync"),  _("Position of region sync point, relative to start of the region") },
-		{ 5, _("Fade In"),  _("Length of region fade-in (units: secondary clock), () if disabled") },
-		{ 6, _("Fade Out"),  _("Length of region fade-out (units: secondary clock), () if dsisabled") },
-		{ 7, _("L"),  _("Region position locked?") },
-		{ 8, _("G"),  _("Region position glued to Bars|Beats time?") },
-		{ 9, _("M"),  _("Region muted?") },
-		{ 10, _("O"),  _("Region opaque (blocks regions below it from being heard)?") },
+		{ 0,   _("Region"),    _("Region name, with number of channels in []'s") },
+		{ 1,   _("Position"),  _("Position of start of region") },
+		{ 2,   _("End"),       _("Position of end of region") },
+		{ 3,   _("Length"),    _("Length of the region") },
+		{ 4,   _("Sync"),      _("Position of region sync point, relative to start of the region") },
+		{ 5,   _("Fade In"),   _("Length of region fade-in (units: secondary clock), () if disabled") },
+		{ 6,   _("Fade Out"),  _("Length of region fade-out (units: secondary clock), () if disabled") },
+		{ 7,  S_("Lock|L"),    _("Region position locked?") },
+		{ 8,  S_("Gain|G"),    _("Region position glued to Bars|Beats time?") },
+		{ 9,  S_("Mute|M"),    _("Region muted?") },
+		{ 10, S_("Opaque|O"),  _("Region opaque (blocks regions below it from being heard)?") },
 		{ -1, 0, 0 }
 	};
 	
@@ -294,7 +295,7 @@ EditorRegions::add_region (boost::shared_ptr<Region> region)
 	string str;
 	TreeModel::Row row;
 	Gdk::Color c;
-	bool missing_source = boost::dynamic_pointer_cast<SilentFileSource>(region->source());
+	bool missing_source = boost::dynamic_pointer_cast<SilentFileSource>(region->source()) != NULL;
 
 	if (!_show_automatic_regions && region->automatic()) {
 		return;
@@ -340,14 +341,15 @@ EditorRegions::add_region (boost::shared_ptr<Region> region)
 		row = *(_model->append());
 
 		if (missing_source) {
-			c.set_rgb(65535,0,0);     // FIXME: error color from style
+			// c.set_rgb(65535,0,0);     // FIXME: error color from style
+			set_color_from_rgba (c, ARDOUR_UI::config()->color ("region list missing source"));
 
 		} else if (region->automatic()){
-			c.set_rgb(0,65535,0);     // FIXME: error color from style
+			// c.set_rgb(0,65535,0);     // FIXME: error color from style
+			set_color_from_rgba (c, ARDOUR_UI::config()->color ("region list automatic"));
 
 		} else {
-			set_color(c, rgba_from_style ("RegionListWholeFile", 0xff, 0, 0, 0, "fg", Gtk::STATE_NORMAL, false ));
-
+			set_color_from_rgba (c, ARDOUR_UI::config()->color ("region list whole file"));
 		}
 
 		row[_columns.color_] = c;
@@ -688,6 +690,12 @@ EditorRegions::format_position (framepos_t pos, char* buf, size_t bufsize, bool 
 	Timecode::BBT_Time bbt;
 	Timecode::Time timecode;
 
+	if (pos < 0) {
+		error << string_compose (_("EditorRegions::format_position: negative timecode position: %1"), pos) << endmsg;
+		snprintf (buf, bufsize, "invalid");
+		return;
+	}
+
 	switch (ARDOUR_UI::instance()->secondary_clock->mode ()) {
 	case AudioClock::BBT:
 		_session->tempo_map().bbt_time (pos, bbt);
@@ -814,10 +822,12 @@ EditorRegions::populate_row_end (boost::shared_ptr<Region> region, TreeModel::Ro
 		row[_columns.end] = "";
 	} else if (used > 1) {
 		row[_columns.end] = _("Mult.");
-	} else {
+	} else if (region->last_frame() >= region->first_frame()) {
 		char buf[16];
 		format_position (region->last_frame(), buf, sizeof (buf));
 		row[_columns.end] = buf;
+	} else {
+		row[_columns.end] = "empty";
 	}
 }
 
@@ -1115,7 +1125,7 @@ EditorRegions::sorter (TreeModel::iterator a, TreeModel::iterator b)
 
 	switch (_sort_type) {
 	case ByName:
-		cmp = strcasecmp (region1->name().c_str(), region2->name().c_str());
+		cmp = region1->name().compare(region2->name());
 		break;
 
 	case ByLength:
@@ -1140,7 +1150,7 @@ EditorRegions::sorter (TreeModel::iterator a, TreeModel::iterator b)
 		break;
 
 	case BySourceFileName:
-		cmp = strcasecmp (region1->source()->name().c_str(), region2->source()->name().c_str());
+		cmp = region1->source()->name().compare(region2->source()->name());
 		break;
 
 	case BySourceFileLength:
@@ -1153,9 +1163,9 @@ EditorRegions::sorter (TreeModel::iterator a, TreeModel::iterator b)
 
 	case BySourceFileFS:
 		if (region1->source()->name() == region2->source()->name()) {
-			cmp = strcasecmp (region1->name().c_str(),  region2->name().c_str());
+			cmp = region1->name().compare(region2->name());
 		} else {
-			cmp = strcasecmp (region1->source()->name().c_str(),  region2->source()->name().c_str());
+			cmp = region1->source()->name().compare(region2->source()->name());
 		}
 		break;
 	}
@@ -1235,7 +1245,7 @@ EditorRegions::drag_data_received (const RefPtr<Gdk::DragContext>& context,
 		framepos_t pos = 0;
 		bool copy = ((context->get_actions() & (Gdk::ACTION_COPY | Gdk::ACTION_LINK | Gdk::ACTION_MOVE)) == Gdk::ACTION_COPY);
 
-		if (Profile->get_sae() || Config->get_only_copy_imported_files() || copy) {
+		if (Profile->get_sae() || ARDOUR_UI::config()->get_only_copy_imported_files() || copy) {
 			_editor->do_import (paths, Editing::ImportDistinctFiles, Editing::ImportAsRegion, SrcBest, pos);
 		} else {
 			_editor->do_embed (paths, Editing::ImportDistinctFiles, ImportAsRegion, pos);
@@ -1559,7 +1569,7 @@ EditorRegions::sort_type_action (Editing::RegionListSortType t) const
 		break;
 	default:
 		fatal << string_compose (_("programming error: %1: %2"), "EditorRegions: impossible sort type", (int) t) << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	RefPtr<Action> act = ActionManager::get_action (X_("RegionList"), action);

@@ -27,7 +27,6 @@
 
 #include "midi++/midnam_patch.h"
 
-#include "ardour/midi_patch_manager.h"
 #include "ardour/beats_frames_converter.h"
 #include "ardour/instrument_info.h"
 
@@ -42,12 +41,12 @@ using namespace Gtkmm2ext;
 
 /** @param tc If non-0, a time converter for this patch change.  If 0, time control will be desensitized */
 PatchChangeDialog::PatchChangeDialog (
-	const ARDOUR::BeatsFramesConverter*              tc,
-	ARDOUR::Session*                                 session,
-	Evoral::PatchChange<Evoral::MusicalTime> const & patch,
-	ARDOUR::InstrumentInfo&                          info,
-	const Gtk::BuiltinStockID&                       ok,
-	bool                                             allow_delete)
+	const ARDOUR::BeatsFramesConverter*        tc,
+	ARDOUR::Session*                           session,
+	Evoral::PatchChange<Evoral::Beats> const & patch,
+	ARDOUR::InstrumentInfo&                    info,
+	const Gtk::BuiltinStockID&                 ok,
+	bool                                       allow_delete)
 	: ArdourDialog (_("Patch Change"), true)
 	, _time_converter (tc)
 	, _info (info)
@@ -117,7 +116,7 @@ PatchChangeDialog::PatchChangeDialog (
 	add_button (Stock::CANCEL, RESPONSE_CANCEL);
 	add_button (ok, RESPONSE_ACCEPT);
 	if (allow_delete) {
-		add_button (Stock::DELETE, RESPONSE_REJECT);
+		add_button (Gtk::StockID(GTK_STOCK_DELETE), RESPONSE_REJECT);
 	}
 	set_default_response (RESPONSE_ACCEPT);
 
@@ -140,16 +139,16 @@ PatchChangeDialog::instrument_info_changed ()
 	fill_patch_combo ();
 }
 
-Evoral::PatchChange<Evoral::MusicalTime>
+Evoral::PatchChange<Evoral::Beats>
 PatchChangeDialog::patch () const
 {
-	Evoral::MusicalTime t = 0;
+	Evoral::Beats t = Evoral::Beats();
 
 	if (_time_converter) {
 		t = _time_converter->from (_time.current_time ());
 	}
 
-	return Evoral::PatchChange<Evoral::MusicalTime> (
+	return Evoral::PatchChange<Evoral::Beats> (
 		t,
 		_channel.get_value_as_int() - 1,
 		_program.get_value_as_int() - 1,
@@ -286,7 +285,7 @@ PatchChangeDialog::set_active_patch_combo ()
 		boost::replace_all (n, "_", " ");
 
 		MIDI::Name::PatchPrimaryKey const & key = (*j)->patch_primary_key ();
-		if (key.program_number == _program.get_value() - 1) {
+		if (key.program() == _program.get_value() - 1) {
 			_ignore_signals = true;
 			_patch_combo.set_active_text (n);
 			_ignore_signals = false;

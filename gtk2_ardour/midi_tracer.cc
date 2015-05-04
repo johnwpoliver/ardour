@@ -23,8 +23,14 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "pbd/localtime_r.h"
+#include "pbd/timersub.h"
+
 #include "midi++/parser.h"
-#include "midi++/manager.h"
+
+#include "ardour/async_midi_port.h"
+#include "ardour/midi_port.h"
+#include "ardour/audioengine.h"
 
 #include "midi_tracer.h"
 #include "gui_thread.h"
@@ -37,13 +43,11 @@ using namespace Glib;
 
 MidiTracer::MidiTracer ()
 	: ArdourWindow (_("MIDI Tracer"))
-	, parser (0)
 	, line_count_adjustment (200, 1, 2000, 1, 10)
 	, line_count_spinner (line_count_adjustment)
 	, line_count_label (_("Line history: "))
 	, autoscroll (true)
 	, show_hex (true)
-	, collect (true)
 	, show_delta_time (false)
 	, _update_queued (0)
 	, fifo (1024)
@@ -53,7 +57,8 @@ MidiTracer::MidiTracer ()
 	, collect_button (_("Enabled"))
 	, delta_time_button (_("Delta times"))
 {
-	Manager::instance()->PortsChanged.connect (_manager_connection, invalidator (*this), boost::bind (&MidiTracer::ports_changed, this), gui_context());
+	ARDOUR::AudioEngine::instance()->PortRegisteredOrUnregistered.connect 
+		(_manager_connection, invalidator (*this), boost::bind (&MidiTracer::ports_changed, this), gui_context());
 
 	_last_receipt.tv_sec = 0;
 	_last_receipt.tv_usec = 0;
@@ -126,24 +131,60 @@ MidiTracer::ports_changed ()
 {
 	string const c = _port_combo.get_active_text ();
 	_port_combo.clear ();
+	
+	ARDOUR::PortManager::PortList pl;
+	ARDOUR::AudioEngine::instance()->get_ports (ARDOUR::DataType::MIDI, pl);
 
-	boost::shared_ptr<const Manager::PortList> p = Manager::instance()->get_midi_ports ();
-	for (Manager::PortList::const_iterator i = p->begin(); i != p->end(); ++i) {
+	if (pl.empty()) {
+		_port_combo.set_active_text ("");
+		return;
+	}
+
+	for (ARDOUR::PortManager::PortList::const_iterator i = pl.begin(); i != pl.end(); ++i) {
 		_port_combo.append_text ((*i)->name());
 	}
 
-	_port_combo.set_active_text (c);
+	if (c.empty()) {
+		_port_combo.set_active_text (pl.front()->name());
+	} else {
+		_port_combo.set_active_text (c);
+	}
 }
 
 void
 MidiTracer::port_changed ()
 {
+	using namespace ARDOUR;
+
 	disconnect ();
 
-	Port* p = Manager::instance()->port (_port_combo.get_active_text());
+	boost::shared_ptr<ARDOUR::Port> p = AudioEngine::instance()->get_port_by_name (_port_combo.get_active_text());
 
-	if (p) {
-		p->parser()->any.connect_same_thread (_parser_connection, boost::bind (&MidiTracer::tracer, this, _1, _2, _3));
+	if (!p) {
+		std::cerr << "port not found\n";
+		return;
+	}
+
+	/* The inheritance heirarchy makes this messy. AsyncMIDIPort has two
+	 * available MIDI::Parsers what we could connect to, ::self_parser()
+	 * (from ARDOUR::MidiPort) and ::parser() from MIDI::Port. One day,
+	 * this mess will all go away ...
+	 */
+
+	boost::shared_ptr<AsyncMIDIPort> async = boost::dynamic_pointer_cast<AsyncMIDIPort> (p);
+
+	if (!async) {
+
+		boost::shared_ptr<ARDOUR::MidiPort> mp = boost::dynamic_pointer_cast<ARDOUR::MidiPort> (p);
+
+		if (mp) {
+			mp->self_parser().any.connect_same_thread (_parser_connection, boost::bind (&MidiTracer::tracer, this, _1, _2, _3));
+			mp->set_trace_on (true);
+			traced_port = mp;
+		}
+		
+	} else {
+		async->parser()->any.connect_same_thread (_parser_connection, boost::bind (&MidiTracer::tracer, this, _1, _2, _3));
 	}
 }
 
@@ -151,6 +192,11 @@ void
 MidiTracer::disconnect ()
 {
 	_parser_connection.disconnect ();
+
+	if (traced_port) {
+		traced_port->set_trace_on (false);
+		traced_port.reset ();
+	}
 }
 
 void
@@ -174,7 +220,7 @@ MidiTracer::tracer (Parser&, byte* msg, size_t len)
 		s = snprintf (buf, bufsize, "+%02" PRId64 ":%06" PRId64, (int64_t) delta.tv_sec, (int64_t) delta.tv_usec);
 		bufsize -= s;
 	} else {
-		localtime_r (&tv.tv_sec, &now);
+		localtime_r ((const time_t*)&tv.tv_sec, &now);
 		s = strftime (buf, bufsize, "%H:%M:%S", &now);
 		bufsize -= s;
 		s += snprintf (&buf[s], bufsize, ".%06" PRId64, (int64_t) tv.tv_usec);
@@ -300,7 +346,11 @@ MidiTracer::tracer (Parser&, byte* msg, size_t len)
 			s += snprintf (
 				&buf[s], bufsize, " MTC full frame to %02d:%02d:%02d:%02d\n", msg[5] & 0x1f, msg[6], msg[7], msg[8]
 				);
+		} else if (len == 3 && msg[0] == MIDI::position) {
 
+			/* MIDI Song Position */
+			int midi_beats = (msg[2] << 7) | msg[1];
+			s += snprintf (&buf[s], bufsize, "%16s %d\n", "Position", (int) midi_beats);
 		} else {
 
 			/* other sys-ex */
@@ -360,11 +410,13 @@ MidiTracer::tracer (Parser&, byte* msg, size_t len)
 	// If you want to append more to the line, uncomment this first
 	// bufsize -= s;
 
+	assert(s <= buffer_size); // clang dead-assignment
+
 	fifo.write (&buf, 1);
 
-	if (g_atomic_int_get (&_update_queued) == 0) {
+	if (g_atomic_int_get (const_cast<gint*> (&_update_queued)) == 0) {
 		gui_context()->call_slot (invalidator (*this), boost::bind (&MidiTracer::update, this));
-		g_atomic_int_inc (&_update_queued);
+		g_atomic_int_inc (const_cast<gint*> (&_update_queued));
 	}
 }
 
@@ -372,7 +424,7 @@ void
 MidiTracer::update ()
 {
 	bool updated = false;
-	g_atomic_int_dec_and_test (&_update_queued);
+	g_atomic_int_dec_and_test (const_cast<gint*> (&_update_queued));
 
 	RefPtr<TextBuffer> buf (text.get_buffer());
 

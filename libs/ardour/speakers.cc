@@ -149,32 +149,73 @@ Speakers::move_speaker (int id, const AngularVector& new_position)
 void
 Speakers::setup_default_speakers (uint32_t n)
 {
+	double o = 180.0;
+
         /* default assignment of speaker position for n speakers */
 
         assert (n>0);
 
 	switch (n) {
         case 1:
-                add_speaker (AngularVector (0.0, 0.0));
+                add_speaker (AngularVector (o   +0.0, 0.0));
                 break;
 
         case 2:
-                add_speaker (AngularVector (0.0, 0.0));
-                add_speaker (AngularVector (180.0, 0,0));
+                add_speaker (AngularVector (o  +60.0, 0.0));
+                add_speaker (AngularVector (o  -60.0, 0.0));
                 break;
 
 	case 3:
-		/* top, bottom kind-of-left & bottom kind-of-right */
-                add_speaker (AngularVector (90.0, 0.0));
-                add_speaker (AngularVector (215.0, 0,0));
-                add_speaker (AngularVector (335.0, 0,0));
+                add_speaker (AngularVector (o  +60.0, 0.0));
+                add_speaker (AngularVector (o  -60.0, 0.0));
+                add_speaker (AngularVector (o +180.0, 0.0));
 		break;
 	case 4:
-		/* clockwise from top left */
-                add_speaker (AngularVector (135.0, 0.0));
-                add_speaker (AngularVector (45.0, 0.0));
-                add_speaker (AngularVector (335.0, 0.0));
-                add_speaker (AngularVector (215.0, 0.0));
+		/* 4.0 with regular spacing */
+                add_speaker (AngularVector (o  +45.0, 0.0));
+                add_speaker (AngularVector (o  -45.0, 0.0));
+                add_speaker (AngularVector (o +135.0, 0.0));
+                add_speaker (AngularVector (o -135.0, 0.0));
+		break;
+	case 5:
+		/* 5.0 with regular spacing */
+                add_speaker (AngularVector (o  +72.0, 0.0));
+                add_speaker (AngularVector (o  -72.0, 0.0));
+                add_speaker (AngularVector (o   +0.0, 0.0));
+                add_speaker (AngularVector (o +144.0, 0.0));
+                add_speaker (AngularVector (o -144.0, 0.0));
+		break;
+	case 6:
+		/* 6.0 with regular spacing */
+                add_speaker (AngularVector (o  +60.0, 0.0));
+                add_speaker (AngularVector (o  -60.0, 0.0));
+                add_speaker (AngularVector (o   +0.0, 0.0));
+                add_speaker (AngularVector (o +120.0, 0.0));
+                add_speaker (AngularVector (o -120.0, 0.0));
+                add_speaker (AngularVector (o +180.0, 0.0));
+		break;
+	case 7:
+		/* 7.0 with regular front spacing */
+                add_speaker (AngularVector (o  +45.0, 0.0));
+                add_speaker (AngularVector (o  -45.0, 0.0));
+                add_speaker (AngularVector (o   +0.0, 0.0));
+                add_speaker (AngularVector (o  +90.0, 0.0));
+                add_speaker (AngularVector (o  -90.0, 0.0));
+                add_speaker (AngularVector (o +150.0, 0.0));
+                add_speaker (AngularVector (o -150.0, 0.0));
+		break;
+	case 10:
+		/* 5+4 with 45°/90° spacing */
+                add_speaker (AngularVector (o  +45.0, 0.0));
+                add_speaker (AngularVector (o  -45.0, 0.0));
+                add_speaker (AngularVector (o   +0.0, 0.0));
+                add_speaker (AngularVector (o +135.0, 0.0));
+                add_speaker (AngularVector (o -135.0, 0.0));
+                add_speaker (AngularVector (o  +45.0, 60.0));
+                add_speaker (AngularVector (o  -45.0, 60.0));
+                add_speaker (AngularVector (o +135.0, 60.0));
+                add_speaker (AngularVector (o -135.0, 60.0));
+                add_speaker (AngularVector (o   +0.0, 90.0));
 		break;
 
 	default:
@@ -188,12 +229,12 @@ Speakers::setup_default_speakers (uint32_t n)
 		*/
 
 		if (n % 2) {
-			deg = 90.0 - degree_step;
+			deg = 360 + o + degree_step;
 		} else {
-			deg = 90.0;
+			deg = 360 + o;
 		}
-		for (i = 0; i < n; ++i, deg += degree_step) {
-			add_speaker (AngularVector (deg, 0.0));
+		for (i = 0; i < n; ++i, deg -= degree_step) {
+			add_speaker (AngularVector (fmod(deg, 360), 0.0));
 		}
 	}
         }
@@ -204,7 +245,7 @@ Speakers::get_state ()
 {
         XMLNode* node = new XMLNode (X_("Speakers"));
         char buf[32];
-        LocaleGuard lg (X_("POSIX"));
+        LocaleGuard lg (X_("C"));
 
         for (vector<Speaker>::const_iterator i = _speakers.begin(); i != _speakers.end(); ++i) {
                 XMLNode* speaker = new XMLNode (X_("Speaker"));
@@ -228,7 +269,7 @@ Speakers::set_state (const XMLNode& node, int /*version*/)
         XMLNodeConstIterator i;
         const XMLProperty* prop;
         double a, e, d;
-        LocaleGuard lg (X_("POSIX"));
+        LocaleGuard lg (X_("C"));
         int n = 0;
 
         _speakers.clear ();

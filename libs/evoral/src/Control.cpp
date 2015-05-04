@@ -17,16 +17,21 @@
  */
 
 #include <iostream>
+
+#include "pbd/stacktrace.h"
+
 #include "evoral/Control.hpp"
 #include "evoral/ControlList.hpp"
+#include "evoral/ParameterDescriptor.hpp"
+#include "evoral/TypeMap.hpp"
 
 namespace Evoral {
 
-Parameter::TypeMetadata Parameter::_type_metadata;
-
-Control::Control(const Parameter& parameter, boost::shared_ptr<ControlList> list)
+Control::Control(const Parameter&               parameter,
+                 const ParameterDescriptor&     desc,
+                 boost::shared_ptr<ControlList> list)
 	: _parameter(parameter)
-	, _user_value(list ? list->default_value() : parameter.normal())
+	, _user_value(list ? list->default_value() : desc.normal)
 {
 	set_list (list);
 }
@@ -49,9 +54,13 @@ void
 Control::set_double (double value, double frame, bool to_list)
 {
 	_user_value = value;
+	
+	/* if we're in a write pass, the automation watcher will determine the
+	   values and add them to the list, so we we don't need to bother.
+	*/
 
-	if (to_list) {
-		_list->add (frame, value);
+	if (to_list && (!_list->in_write_pass() || _list->descriptor().toggled)) {
+		_list->add (frame, value, false);
 	}
 }
 

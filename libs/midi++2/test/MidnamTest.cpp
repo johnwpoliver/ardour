@@ -1,6 +1,7 @@
 #include "MidnamTest.hpp"
 
 #include <glibmm/fileutils.h>
+#include <glibmm/miscutils.h>
 
 #include "pbd/xml++.h"
 #include "pbd/file_utils.h"
@@ -8,16 +9,33 @@
 #include "midi++/midnam_patch.h"
 
 using namespace std;
+using namespace PBD;
 using namespace MIDI::Name;
 
 CPPUNIT_TEST_SUITE_REGISTRATION( MidnamTest );
 
-static string const prefix = "../../../patchfiles/";
+PBD::Searchpath
+test_search_path ()
+{
+#ifdef PLATFORM_WINDOWS
+	std::vector<std::string> path_tok;
+	path_tok.push_back (g_win32_get_package_installation_directory_of_module(NULL));
+	path_tok.push_back ("share");
+	path_tok.push_back ("ardour3");
+	path_tok.push_back ("patchfiles");
+	return Glib::build_filename (path_tok);
+#else
+	return Glib::getenv("MIDIPP_TEST_PATH");
+#endif
+}
 
 void
 MidnamTest::protools_patchfile_test()
 {
-    XMLTree xmldoc(prefix + "Roland_SC-88_Pro.midnam");
+    std::string test_file_path;
+
+    CPPUNIT_ASSERT(find_file (test_search_path (), "Roland_SC-88_Pro.midnam", test_file_path));
+    XMLTree xmldoc(test_file_path);
     boost::shared_ptr<XMLSharedNodeList> result = xmldoc.find(
             "//MIDINameDocument");
     CPPUNIT_ASSERT(result->size() == 1);
@@ -25,7 +43,7 @@ MidnamTest::protools_patchfile_test()
     result = xmldoc.find("//ChannelNameSet");
     CPPUNIT_ASSERT(result->size() == 2);
 
-    MIDINameDocument doc(prefix + "Roland_SC-88_Pro.midnam");
+    MIDINameDocument doc(test_file_path);
     CPPUNIT_ASSERT(doc.all_models().size() == 1);
     CPPUNIT_ASSERT(doc.author().find("Mark of the Unicorn") == 0);
 
@@ -56,11 +74,9 @@ MidnamTest::protools_patchfile_test()
     }
 
     boost::shared_ptr<ChannelNameSet> nameSet1 =
-            masterDeviceNames->channel_name_set_by_device_mode_and_channel(
-                    modename, 0);
+            masterDeviceNames->channel_name_set_by_channel(modename, 0);
     boost::shared_ptr<ChannelNameSet> nameSet2 =
-            masterDeviceNames->channel_name_set_by_device_mode_and_channel(
-                    modename, 9);
+            masterDeviceNames->channel_name_set_by_channel(modename, 9);
 
     CPPUNIT_ASSERT_EQUAL(ns1, nameSet1->name());
     CPPUNIT_ASSERT_EQUAL(ns2, nameSet2->name());
@@ -84,7 +100,10 @@ MidnamTest::protools_patchfile_test()
 void
 MidnamTest::yamaha_PSRS900_patchfile_test()
 {
-    XMLTree xmldoc(prefix + "Yamaha_PSR-S900.midnam");
+    std::string test_file_path;
+
+    CPPUNIT_ASSERT(find_file (test_search_path (), "Yamaha_PSR-S900.midnam", test_file_path));
+    XMLTree xmldoc(test_file_path);
     boost::shared_ptr<XMLSharedNodeList> result = xmldoc.find(
             "//MIDINameDocument");
     CPPUNIT_ASSERT(result->size() == 1);
@@ -92,7 +111,7 @@ MidnamTest::yamaha_PSRS900_patchfile_test()
     result = xmldoc.find("//ChannelNameSet");
     CPPUNIT_ASSERT(result->size() == 3);
 
-    MIDINameDocument doc(prefix + "Yamaha_PSR-S900.midnam");
+    MIDINameDocument doc(test_file_path);
     CPPUNIT_ASSERT(doc.all_models().size() == 1);
     CPPUNIT_ASSERT(doc.author().find("Hans Baier") == 0);
 
@@ -127,8 +146,7 @@ MidnamTest::yamaha_PSRS900_patchfile_test()
                 CPPUNIT_ASSERT_EQUAL(ns,
                         mode->channel_name_set_name_by_channel(i));
                 boost::shared_ptr<ChannelNameSet> nameSet =
-                        masterDeviceNames->channel_name_set_by_device_mode_and_channel(
-                                ns, 1);
+                        masterDeviceNames->channel_name_set_by_channel(ns, 1);
 
                 CPPUNIT_ASSERT_EQUAL(ns, nameSet->name());
 
@@ -141,13 +159,11 @@ MidnamTest::yamaha_PSRS900_patchfile_test()
                 for(PatchNameList::const_iterator p = list.begin(); p != list.end(); ++p) {
 
                 if (ns == string("GM+XG")) {
-                    cerr << "got Patch with name " << (*p)->name() << " bank " << (*p)->bank_number() << " program " << (int)(*p)->program_number() << endl;
                     uint8_t msb = (((*p)->bank_number()) >> 7) & 0x7f;
                     CPPUNIT_ASSERT( msb == 0 || msb == 64);
                 }
 
                 if (ns == string("GM2")) {
-                    cerr << "got Patch with name " << (*p)->name() << " bank " << (*p)->bank_number() << " program " << (int)(*p)->program_number() << endl;
                     CPPUNIT_ASSERT((*p)->bank_number() >= (uint16_t(120) << 7));
                 }
                 }
@@ -158,17 +174,16 @@ MidnamTest::yamaha_PSRS900_patchfile_test()
 void 
 MidnamTest::load_all_midnams_test ()
 {
-    assert (Glib::file_test (prefix, Glib::FILE_TEST_IS_DIR));
-
-    Glib::PatternSpec pattern(string("*.midnam"));
     vector<std::string> result;
 
-    PBD::find_matching_files_in_directory (prefix, pattern, result);
+    PBD::find_files_matching_pattern (result, test_search_path (), "*.midnam");
 
-    cout << "Loading " << result.size() << " MIDI patches from " << prefix << endl;
+    CPPUNIT_ASSERT(!result.empty());
+
+    cout << "Loading " << result.size() << " MIDI patches from " << test_search_path ().to_string () << endl;
 
     for (vector<std::string>::iterator i = result.begin(); i != result.end(); ++i) {
-        cout << "Processing file " << *i << endl;
+        cout << "Processing file " << Glib::path_get_basename(*i) << endl;
         boost::shared_ptr<MIDINameDocument> document(new MIDINameDocument(*i));
 
         XMLTree xmldoc(*i);
@@ -177,9 +192,6 @@ MidnamTest::load_all_midnams_test ()
 
         result = xmldoc.find("//MasterDeviceNames");
         CPPUNIT_ASSERT(result->size() == 1);
-
-        result = xmldoc.find("//ChannelNameSet");
-        CPPUNIT_ASSERT(result->size() >= 1);
 
         result = xmldoc.find("//PatchBank");
         //int banks = result->size();
@@ -192,11 +204,10 @@ MidnamTest::load_all_midnams_test ()
                     document->master_device_names_by_model().begin();
 
         string modename = device->second->custom_device_mode_names().front();
-        cerr << "modename:" << modename << endl;
         boost::shared_ptr<CustomDeviceMode> mode = device->second->custom_device_mode_by_name(modename);
         CPPUNIT_ASSERT_EQUAL(deviceModeName, mode->name());
 
-        boost::shared_ptr<ChannelNameSet> nameSet = device->second->channel_name_set_by_device_mode_and_channel(modename, 0);
+        boost::shared_ptr<ChannelNameSet> nameSet = device->second->channel_name_set_by_channel(modename, 0);
     }
 }
 

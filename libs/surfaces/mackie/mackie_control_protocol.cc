@@ -29,7 +29,6 @@
 #include <float.h>
 #include <sys/time.h>
 #include <errno.h>
-#include <poll.h>
 
 #include <boost/shared_array.hpp>
 
@@ -42,6 +41,7 @@
 #include "pbd/convert.h"
 
 #include "ardour/automation_control.h"
+#include "ardour/async_midi_port.h"
 #include "ardour/dB.h"
 #include "ardour/debug.h"
 #include "ardour/location.h"
@@ -71,9 +71,10 @@
 
 using namespace ARDOUR;
 using namespace std;
-using namespace Mackie;
 using namespace PBD;
 using namespace Glib;
+using namespace ArdourSurface;
+using namespace Mackie;
 
 #include "i18n.h"
 
@@ -96,12 +97,10 @@ MackieControlProtocol::MackieControlProtocol (Session& session)
 	, AbstractUI<MackieControlUIRequest> ("mackie")
 	, _current_initial_bank (0)
 	, _timecode_type (ARDOUR::AnyTime::BBT)
-	, _input_bundle (new ARDOUR::Bundle (_("Mackie Control In"), true))
-	, _output_bundle (new ARDOUR::Bundle (_("Mackie Control Out"), false))
 	, _gui (0)
 	, _zoom_mode (false)
 	, _scrub_mode (false)
-	, _flip_mode (false)
+	, _flip_mode (Normal)
 	, _view_mode (Mixer)
 	, _current_selected_track (-1)
 	, _modifier_state (0)
@@ -109,6 +108,8 @@ MackieControlProtocol::MackieControlProtocol (Session& session)
 	, needs_ipmidi_restart (false)
 	, _metering_active (true)
 	, _initialized (false)
+	, _surfaces_state (0)
+	, _surfaces_version (0)
 {
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::MackieControlProtocol\n");
 
@@ -132,7 +133,7 @@ MackieControlProtocol::~MackieControlProtocol()
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::~MackieControlProtocol tear_down_gui ()\n");
 	tear_down_gui ();
 
-	_active = false;
+	delete _surfaces_state;
 
 	/* stop event loop */
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::~MackieControlProtocol BaseUI::quit ()\n");
@@ -345,7 +346,9 @@ MackieControlProtocol::switch_banks (uint32_t initial, bool force)
 
 	if (_current_initial_bank <= sorted.size()) {
 
-		DEBUG_TRACE (DEBUG::MackieControl, string_compose ("switch to %1, %2, available routes %3\n", _current_initial_bank, strip_cnt, sorted.size()));
+		DEBUG_TRACE (DEBUG::MackieControl, string_compose ("switch to %1, %2, available routes %3 on %4 surfaces\n", 
+								   _current_initial_bank, strip_cnt, sorted.size(),
+								   surfaces.size()));
 
 		// link routes to strips
 
@@ -383,7 +386,7 @@ MackieControlProtocol::set_active (bool yn)
 {
 	DEBUG_TRACE (DEBUG::MackieControl, string_compose("MackieControlProtocol::set_active init with yn: '%1'\n", yn));
 
-	if (yn == _active) {
+	if (yn == active()) {
 		return 0;
 	}
 
@@ -393,9 +396,10 @@ MackieControlProtocol::set_active (bool yn)
 		
 		BaseUI::run ();
 		
-		create_surfaces ();
+		if (create_surfaces ()) {
+			return -1;
+		}
 		connect_session_signals ();
-		_active = true;
 		update_surfaces ();
 		
 		/* set up periodic task for metering and automation
@@ -409,9 +413,10 @@ MackieControlProtocol::set_active (bool yn)
 
 		BaseUI::quit ();
 		close ();
-		_active = false;
 
 	}
+
+	ControlProtocol::set_active (yn);
 
 	DEBUG_TRACE (DEBUG::MackieControl, string_compose("MackieControlProtocol::set_active done with yn: '%1'\n", yn));
 
@@ -421,7 +426,7 @@ MackieControlProtocol::set_active (bool yn)
 bool
 MackieControlProtocol::periodic ()
 {
-	if (!_active) {
+	if (!active()) {
 		return false;
 	}
 
@@ -519,12 +524,24 @@ MackieControlProtocol::update_global_led (int id, LedState ls)
 	}
 }
 
+void
+MackieControlProtocol::device_ready ()
+{
+	/* this is not required to be called, but for devices which do
+	 * handshaking, it can be called once the device has verified the
+	 * connection.
+	 */
+	 
+	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("device ready init (active=%1)\n", active()));
+	update_surfaces ();
+}
+
 // send messages to surface to set controls to correct values
 void 
 MackieControlProtocol::update_surfaces()
 {
-	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::update_surfaces() init\n");
-	if (!_active) {
+	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("MackieControlProtocol::update_surfaces() init (active=%1)\n", active()));
+	if (!active()) {
 		return;
 	}
 
@@ -606,36 +623,48 @@ MackieControlProtocol::set_profile (const string& profile_name)
 	_device_profile = d->second;
 }	
 
-void
-MackieControlProtocol::set_device (const string& device_name, bool allow_activation)
+int
+MackieControlProtocol::set_device_info (const string& device_name)
 {
 	map<string,DeviceInfo>::iterator d = DeviceInfo::device_info.find (device_name);
 
-	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("new device chosen %1, activation allowed ? %2\n",
-							   device_name, allow_activation));
+	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("new device chosen %1\n", device_name));
 
 	if (d == DeviceInfo::device_info.end()) {
-		return;
+		return -1;
 	}
 	
-	if (_active) {
-		clear_ports ();
-		clear_surfaces ();
-	}
-
 	_device_info = d->second;
 
-	if (allow_activation) {
-		set_active (true);
-	} else {
-		if (_active) {
-			create_surfaces ();
-			switch_banks (0, true);
-		}
-	}
+	return 0;
 }
 
-void 
+int
+MackieControlProtocol::set_device (const string& device_name)
+{
+	if (set_device_info (device_name)) {
+		return -1;
+	}
+
+	clear_surfaces ();
+
+	if (create_surfaces ()) {
+		return -1;
+	}
+
+	switch_banks (0, true);
+
+	return 0;
+}
+
+gboolean 
+ArdourSurface::ipmidi_input_handler (GIOChannel*, GIOCondition condition, void *data)
+{
+	ArdourSurface::MackieControlProtocol::ipMIDIHandler* ipm = static_cast<ArdourSurface::MackieControlProtocol::ipMIDIHandler*>(data);
+        return ipm->mcp->midi_input_handler (Glib::IOCondition (condition), ipm->port);
+}
+
+int
 MackieControlProtocol::create_surfaces ()
 {
 	string device_name;
@@ -652,7 +681,17 @@ MackieControlProtocol::create_surfaces ()
 
 	for (uint32_t n = 0; n < 1 + _device_info.extenders(); ++n) {
 
-		boost::shared_ptr<Surface> surface (new Surface (*this, device_name, n, stype));
+		boost::shared_ptr<Surface> surface;
+
+		try {
+			surface.reset (new Surface (*this, device_name, n, stype));
+		} catch (...) {
+			return -1;
+		}
+
+		if (_surfaces_state) {
+			surface->set_state (*_surfaces_state, _surfaces_version);
+		}
 
 		{
 			Glib::Threads::Mutex::Lock lm (surfaces_lock);
@@ -670,6 +709,10 @@ MackieControlProtocol::create_surfaces ()
 		stype = ext;
 
 		if (!_device_info.uses_ipmidi()) {
+
+			_input_bundle.reset (new ARDOUR::Bundle (_("Mackie Control In"), true));
+			_output_bundle.reset (new ARDOUR::Bundle (_("Mackie Control Out"), false));
+
 			_input_bundle->add_channel (
 				surface->port().input_port().name(),
 				ARDOUR::DataType::MIDI,
@@ -681,31 +724,62 @@ MackieControlProtocol::create_surfaces ()
 				ARDOUR::DataType::MIDI,
 				session->engine().make_port_name_non_relative (surface->port().output_port().name())
 				);
+
+			session->BundleAddedOrRemoved ();
+
+		} else {
+			_input_bundle.reset ((ARDOUR::Bundle*) 0);
+			_output_bundle.reset ((ARDOUR::Bundle*) 0);
+
+			session->BundleAddedOrRemoved ();
 		}
 
-		int fd;
 		MIDI::Port& input_port (surface->port().input_port());
+		AsyncMIDIPort* asp = dynamic_cast<AsyncMIDIPort*> (&input_port);
 
-		if ((fd = input_port.selectable ()) >= 0) {
-			Glib::RefPtr<IOSource> psrc = IOSource::create (fd, IO_IN|IO_HUP|IO_ERR);
+		if (asp) {
 
-			psrc->connect (sigc::bind (sigc::mem_fun (this, &MackieControlProtocol::midi_input_handler), &input_port));
-			psrc->attach (main_loop()->get_context());
-			
-			// glibmm hack: for now, store only the GSource*
+			/* async MIDI port */
 
-			port_sources.push_back (psrc->gobj());
-			g_source_ref (psrc->gobj());
+			asp->xthread().set_receive_handler (sigc::bind (sigc::mem_fun (this, &MackieControlProtocol::midi_input_handler), &input_port));
+			asp->xthread().attach (main_loop()->get_context());
+
+		} else {
+
+			/* ipMIDI port, no IOSource method at this time */
+
+			int fd;
+
+			if ((fd = input_port.selectable ()) >= 0) {
+
+                                GIOChannel* ioc = g_io_channel_unix_new (fd);
+                                GSource* gsrc = g_io_create_watch (ioc, GIOCondition (G_IO_IN|G_IO_HUP|G_IO_ERR));
+                                
+                                /* hack up an object so that in the callback from the event loop
+                                   we have both the MackieControlProtocol and the input port.
+                                   
+                                   If we were using C++ for this stuff we wouldn't need this
+                                   but a nasty, not-fixable bug in the binding between C 
+                                   and C++ makes it necessary to avoid C++ for the IO
+                                   callback setup.
+                                */
+
+                                ipMIDIHandler* ipm = new ipMIDIHandler (); /* we will leak this sizeof(pointer)*2 sized object */
+                                ipm->mcp = this;
+                                ipm->port = &input_port;
+
+                                g_source_set_callback (gsrc, (GSourceFunc) ipmidi_input_handler, ipm, NULL);
+                                g_source_attach (gsrc, main_loop()->get_context()->gobj());
+			}
 		}
 	}
+
+	return 0;
 }
 
 void 
 MackieControlProtocol::close()
 {
-	clear_ports ();
-
-	port_connections.drop_connections ();
 	session_connections.drop_connections ();
 	route_connections.drop_connections ();
 	periodic_connection.disconnect ();
@@ -716,38 +790,42 @@ MackieControlProtocol::close()
 XMLNode& 
 MackieControlProtocol::get_state()
 {
+	XMLNode& node (ControlProtocol::get_state());
+
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::get_state init\n");
 	char buf[16];
 
-	// add name of protocol
-	XMLNode* node = new XMLNode (X_("Protocol"));
-	node->add_property (X_("name"), ARDOUR::ControlProtocol::_name);
-
 	// add current bank
 	snprintf (buf, sizeof (buf), "%d", _current_initial_bank);
-	node->add_property (X_("bank"), buf);
+	node.add_property (X_("bank"), buf);
 
 	// ipMIDI base port (possibly not used)
 	snprintf (buf, sizeof (buf), "%d", _ipmidi_base);
-	node->add_property (X_("ipmidi-base"), buf);
+	node.add_property (X_("ipmidi-base"), buf);
 
-	node->add_property (X_("device-profile"), _device_profile.name());
-	node->add_property (X_("device-name"), _device_info.name());
+	node.add_property (X_("device-profile"), _device_profile.name());
+	node.add_property (X_("device-name"), _device_info.name());
+
+	XMLNode* snode = new XMLNode (X_("Surfaces"));
+	for (Surfaces::iterator s = surfaces.begin(); s != surfaces.end(); ++s) {
+		snode->add_child_nocopy ((*s)->get_state());
+	}
+
+	node.add_child_nocopy (*snode);
 
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::get_state done\n");
 
-	return *node;
+	return node;
 }
 
 int 
-MackieControlProtocol::set_state (const XMLNode & node, int /*version*/)
+MackieControlProtocol::set_state (const XMLNode & node, int version)
 {
-	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("MackieControlProtocol::set_state: active %1\n", _active));
+	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("MackieControlProtocol::set_state: active %1\n", active()));
 
 	int retval = 0;
 	const XMLProperty* prop;
 	uint32_t bank = 0;
-	bool active = _active;
 
 	if ((prop = node.property (X_("ipmidi-base"))) != 0) {
 		set_ipmidi_base (atoi (prop->value()));
@@ -758,24 +836,26 @@ MackieControlProtocol::set_state (const XMLNode & node, int /*version*/)
 		bank = atoi (prop->value());
 	}
 	
-	if ((prop = node.property (X_("active"))) != 0) {
-		active = string_is_affirmative (prop->value());
-	}
-
 	if ((prop = node.property (X_("device-name"))) != 0) {
-		set_device (prop->value(), false);
+		set_device_info (prop->value());
 	}
 
 	if ((prop = node.property (X_("device-profile"))) != 0) {
 		set_profile (prop->value());
 	}
+	
+	XMLNode* snode = node.child (X_("Surfaces"));
+	
+	delete _surfaces_state;
+	_surfaces_state = 0;
 
-	set_active (active);
-
-	if (_active) {
-		switch_banks (bank, true);
+	if (snode) {
+		_surfaces_state = new XMLNode (*snode);
+		_surfaces_version = version;
 	}
 
+	switch_banks (bank, true);
+	
 	DEBUG_TRACE (DEBUG::MackieControl, "MackieControlProtocol::set_state done\n");
 
 	return retval;
@@ -1022,8 +1102,12 @@ list<boost::shared_ptr<ARDOUR::Bundle> >
 MackieControlProtocol::bundles ()
 {
 	list<boost::shared_ptr<ARDOUR::Bundle> > b;
-	b.push_back (_input_bundle);
-	b.push_back (_output_bundle);
+
+	if (_input_bundle) {
+		b.push_back (_input_bundle);
+		b.push_back (_output_bundle);
+	}
+
 	return b;
 }
 
@@ -1232,11 +1316,14 @@ MackieControlProtocol::midi_input_handler (IOCondition ioc, MIDI::Port* port)
 		*/
 
 		if (!_device_info.uses_ipmidi()) {
-			CrossThreadChannel::drain (port->selectable());
+			AsyncMIDIPort* asp = dynamic_cast<AsyncMIDIPort*>(port);
+			if (asp) {
+				asp->clear ();
+			}
 		}
 
 		DEBUG_TRACE (DEBUG::MackieControl, string_compose ("data available on %1\n", port->name()));
-		framepos_t now = session->engine().frame_time();
+		framepos_t now = session->engine().sample_time();
 		port->parse (now);
 	}
 
@@ -1246,15 +1333,10 @@ MackieControlProtocol::midi_input_handler (IOCondition ioc, MIDI::Port* port)
 void
 MackieControlProtocol::clear_ports ()
 {
-	_input_bundle->remove_channels ();
-	_output_bundle->remove_channels ();
-
-	for (PortSources::iterator i = port_sources.begin(); i != port_sources.end(); ++i) {
-		g_source_destroy (*i);
-		g_source_unref (*i);
+	if (_input_bundle) {
+		_input_bundle->remove_channels ();
+		_output_bundle->remove_channels ();
 	}
-
-	port_sources.clear ();
 }
 
 void
@@ -1271,11 +1353,11 @@ MackieControlProtocol::set_view_mode (ViewMode m)
 }
 
 void
-MackieControlProtocol::set_flip_mode (bool yn)
+MackieControlProtocol::set_flip_mode (FlipMode fm)
 {
 	Glib::Threads::Mutex::Lock lm (surfaces_lock);
 
-	_flip_mode = yn;
+	_flip_mode = fm;
 	
 	for (Surfaces::iterator s = surfaces.begin(); s != surfaces.end(); ++s) {
 		(*s)->update_flip_mode_display ();
@@ -1369,7 +1451,7 @@ MackieControlProtocol::add_down_select_button (int surface, int strip)
 void
 MackieControlProtocol::remove_down_select_button (int surface, int strip)
 {
-	DownButtonList::iterator x = find (_down_select_buttons.begin(), _down_select_buttons.end(), (surface<<8)|(strip&0xf));
+	DownButtonList::iterator x = find (_down_select_buttons.begin(), _down_select_buttons.end(), (uint32_t) (surface<<8)|(strip&0xf));
 	DEBUG_TRACE (DEBUG::MackieControl, string_compose ("removing surface %1 strip %2 from down select buttons\n", surface, strip));
 	if (x != _down_select_buttons.end()) {
 		_down_select_buttons.erase (x);
@@ -1568,24 +1650,27 @@ MackieControlProtocol::set_ipmidi_base (int16_t portnum)
 	   to restart.
 	*/
 
-	if (_active && _device_info.uses_ipmidi()) {
+	if (active() && _device_info.uses_ipmidi()) {
 		needs_ipmidi_restart = true;
 	}
 }
 
-void
+int
 MackieControlProtocol::ipmidi_restart ()
 {
-	clear_ports ();
 	clear_surfaces ();
-	create_surfaces ();
+	if (create_surfaces ()) {
+		return -1;
+	}
 	switch_banks (_current_initial_bank, true);
 	needs_ipmidi_restart = false;
+	return 0;
 }
 
 void
 MackieControlProtocol::clear_surfaces ()
 {
+	clear_ports ();
 	Glib::Threads::Mutex::Lock lm (surfaces_lock);
 	surfaces.clear ();	
 }

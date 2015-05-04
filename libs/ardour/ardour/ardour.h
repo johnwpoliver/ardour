@@ -34,9 +34,9 @@
 #include "pbd/locale_guard.h"
 #include "pbd/stateful.h"
 
+#include "ardour/libardour_visibility.h"
 #include "ardour/types.h"
-
-#include <jack/jack.h>
+#include "ardour/libardour_visibility.h"
 
 namespace MIDI {
 	class MachineControl;
@@ -47,32 +47,49 @@ namespace ARDOUR {
 
 	class AudioEngine;
 
-	extern PBD::Signal1<void,std::string> BootMessage;
-	extern PBD::Signal0<void> GUIIdle;
+	extern LIBARDOUR_API PBD::Signal1<void,std::string> BootMessage;
+	extern LIBARDOUR_API PBD::Signal3<void,std::string,std::string,bool> PluginScanMessage;
+	extern LIBARDOUR_API PBD::Signal1<void,int> PluginScanTimeout;
+	extern LIBARDOUR_API PBD::Signal0<void> GUIIdle;
+	extern LIBARDOUR_API PBD::Signal3<bool,std::string,std::string,int> CopyConfigurationFiles;
 
-	int init (bool with_vst, bool try_optimization, const char* localedir);
-	void init_post_engine ();
-	int cleanup ();
-	bool no_auto_connect ();
-	void make_property_quarks ();
+	/**
+	 * @param with_vst true to enable VST Support
+	 * @param try_optimization true to enable hardware optimized routines
+	 * for mixing, finding peak values etc.
+	 * @param localedir Directory to look for localisation files
+	 *
+	 * @return true if Ardour library was successfully initialized
+	 */
+	LIBARDOUR_API bool init (bool with_vst, bool try_optimization, const char* localedir);
+	LIBARDOUR_API void init_post_engine ();
+	LIBARDOUR_API void cleanup ();
+	LIBARDOUR_API bool no_auto_connect ();
+	LIBARDOUR_API void make_property_quarks ();
 
-	extern PBD::PropertyChange bounds_change;
+	extern LIBARDOUR_API PBD::PropertyChange bounds_change;
+	
+	extern LIBARDOUR_API const char* const ardour_config_info;
 
-	extern const char* const ardour_config_info;
-
-	void find_bindings_files (std::map<std::string,std::string>&);
+	LIBARDOUR_API void find_bindings_files (std::map<std::string,std::string>&);
 
 	/* these only impact bundled installations */
-	std::string translation_enable_path ();
-	bool translations_are_enabled ();
-	bool set_translations_enabled (bool);
+	LIBARDOUR_API std::string translation_enable_path ();
+	LIBARDOUR_API bool translations_are_enabled ();
+	LIBARDOUR_API bool set_translations_enabled (bool);
 
-	static inline microseconds_t get_microseconds () {
-		return (microseconds_t) jack_get_time();
-	}
+	LIBARDOUR_API microseconds_t get_microseconds ();
 
-	void setup_fpu ();
-	std::vector<SyncSource> get_available_sync_options();
+	LIBARDOUR_API void setup_fpu ();
+	LIBARDOUR_API std::vector<SyncSource> get_available_sync_options();
+
+	/* the @param ui_handler will be called if there are old configuration
+	 * files to be copied. It should (probably) ask the user about the
+	 * action, and return true or false depending on whether or not the
+	 * copy should take place.
+	 */
+	LIBARDOUR_API void check_for_old_configuration_files ();
+	LIBARDOUR_API int handle_old_configuration_files (boost::function<bool (std::string const&, std::string const&, int)> ui_handler);
 }
 
 #endif /* __ardour_ardour_h__ */

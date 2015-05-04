@@ -20,6 +20,7 @@
 #ifndef EVORAL_PATCH_CHANGE_HPP
 #define EVORAL_PATCH_CHANGE_HPP
 
+#include "evoral/visibility.h"
 #include "evoral/Event.hpp"
 #include "evoral/MIDIEvent.hpp"
 
@@ -29,7 +30,7 @@ namespace Evoral {
  *  bank select and then a program change.
  */
 template<typename Time>
-class PatchChange
+class /*LIBEVORAL_API*/ PatchChange
 {
 public:
 	/** @param t Time.
@@ -119,11 +120,11 @@ public:
 	uint8_t channel () const { return _program_change.buffer()[0] & 0xf; }
 
 	inline bool operator< (const PatchChange<Time>& o) const {
-		if (!musical_time_equal (time(), o.time())) {
+		if (time() != o.time()) {
 			return time() < o.time();
 		}
 
-		if (bank != o.bank()) {
+		if (bank() != o.bank()) {
 			return bank() < o.bank();
 		}
 
@@ -131,7 +132,7 @@ public:
 	}
 
 	inline bool operator== (const PatchChange<Time>& o) const {
-		return (musical_time_equal (time(), o.time()) && program() == o.program() && bank() == o.bank());
+		return (time() == o.time() && program() == o.program() && bank() == o.bank());
 	}
 
 	/** The PatchChange is made up of messages() MIDI messages; this method returns them by index.
@@ -146,8 +147,7 @@ public:
 		case 2:
 			return _program_change;
 		default:
-			abort ();
-			/*NOTREACHED*/
+			abort(); /*NOTREACHED*/
 			return _program_change;
 		}
 	}
@@ -166,7 +166,7 @@ private:
 }
 
 template<typename Time>
-std::ostream& operator<< (std::ostream& o, const Evoral::PatchChange<Time>& p) {
+/*LIBEVORAL_API*/ std::ostream& operator<< (std::ostream& o, const Evoral::PatchChange<Time>& p) {
 	o << "Patch Change " << p.id() << " @ " << p.time() << " bank " << (int) p.bank() << " program " << (int) p.program();
 	return o;
 }

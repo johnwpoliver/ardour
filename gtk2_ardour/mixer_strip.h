@@ -47,6 +47,7 @@
 
 #include "pbd/fastlog.h"
 
+#include "ardour_knob.h"
 #include "route_ui.h"
 #include "gain_meter.h"
 #include "panner_ui.h"
@@ -69,7 +70,6 @@ namespace Gtk {
 }
 
 class Mixer_UI;
-class IOSelectorWindow;
 class MotionController;
 class RouteGroupMenu;
 class ArdourWindow;
@@ -126,16 +126,21 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 	void cut_processors ();
 	void paste_processors ();
 	void select_all_processors ();
-	void delete_processors ();
+	void deselect_all_processors ();
+	bool delete_processors ();  //note: returns false if nothing was deleted
 	void toggle_processors ();
 	void ab_plugins ();
+
+	void set_selected(bool yn);
+	bool is_selected() {return _selected;}
+
+	static MixerStrip* entered_mixer_strip() { return _entered_mixer_strip; }
 
   protected:
 	friend class Mixer_UI;
 	void set_packed (bool yn);
 	bool packed () { return _packed; }
 
-	void set_selected(bool yn);
 	void set_stuff_from_route ();
 
   private:
@@ -151,9 +156,8 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 
 	ArdourButton         hide_button;
 	ArdourButton         width_button;
+	ArdourButton         number_label;
 	Gtk::HBox           width_hide_box;
-	Gtk::VBox           whvbox;
-	Gtk::EventBox       top_event_box;
 	Gtk::EventBox*      spacer;
 
 	void hide_clicked();
@@ -168,10 +172,9 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 
 	Glib::RefPtr<Gtk::SizeGroup> button_size_group;
 
-	Gtk::Table button_table;
-	Gtk::Table rec_solo_table;
-	Gtk::Table top_button_table;
-	Gtk::Table middle_button_table;
+	Gtk::Table rec_mon_table;
+	Gtk::Table solo_iso_table;
+	Gtk::Table mute_solo_table;
 	Gtk::Table bottom_button_table;
 
 	ArdourButton                 meter_point_button;
@@ -180,6 +183,9 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 
 	ArdourButton input_button;
 	ArdourButton output_button;
+
+	void input_button_resized (Gtk::Allocation&);
+	void output_button_resized (Gtk::Allocation&);
 
 	ArdourButton* midi_input_enable_button;
 	Gtk::HBox   input_button_box;
@@ -195,21 +201,20 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 
 	ArdourButton   name_button;
 
-	ArdourWindow*  comment_window;
-	Gtk::TextView* comment_area;
 	ArdourButton   _comment_button;
 
-	void comment_editor_done_editing ();
-	void setup_comment_editor ();
-	void open_comment_editor ();
-	void toggle_comment_editor ();
+	ArdourKnob     trim_control;
+
 	void setup_comment_button ();
 
 	ArdourButton   group_button;
 	RouteGroupMenu *group_menu;
 
 	gint input_press (GdkEventButton *);
+	gint input_release (GdkEventButton *);
+
 	gint output_press (GdkEventButton *);
+	gint output_release (GdkEventButton *);
 
 	Gtk::Menu input_menu;
 	std::list<boost::shared_ptr<ARDOUR::Bundle> > input_menu_bundles;
@@ -222,10 +227,8 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 	void bundle_input_chosen (boost::shared_ptr<ARDOUR::Bundle>);
 	void bundle_output_chosen (boost::shared_ptr<ARDOUR::Bundle>);
 
-	void edit_input_configuration ();
-	void edit_output_configuration ();
-
 	void diskstream_changed ();
+	void io_changed_proxy ();
 
 	Gtk::Menu *send_action_menu;
 	Gtk::MenuItem* rename_menu_item;
@@ -237,6 +240,7 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 	PBD::ScopedConnection panstate_connection;
 	PBD::ScopedConnection panstyle_connection;
 	void connect_to_pan ();
+	void update_panner_choices ();
 
 	void update_diskstream_display ();
 	void update_input_display ();
@@ -247,18 +251,12 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 	Gtk::Menu* route_ops_menu;
 	void build_route_ops_menu ();
 	gboolean name_button_button_press (GdkEventButton*);
+	gboolean name_button_button_release (GdkEventButton*);
+	gboolean number_button_button_press (GdkEventButton*);
 	void list_route_operations ();
-
-	gint comment_key_release_handler (GdkEventKey*);
-	void comment_changed (void *src);
-	void comment_edited ();
-	bool ignore_comment_edit;
 
 	bool select_route_group (GdkEventButton *);
 	void route_group_changed ();
-
-	IOSelectorWindow *input_selector;
-	IOSelectorWindow *output_selector;
 
 	Gtk::Style *passthru_style;
 
@@ -275,43 +273,48 @@ class MixerStrip : public RouteUI, public Gtk::EventBox
 
 	bool ignore_speed_adjustment;
 
+	static MixerStrip* _entered_mixer_strip;
+
 	void engine_running();
 	void engine_stopped();
 
 	virtual void bus_send_display_changed (boost::shared_ptr<ARDOUR::Route>);
 
 	void set_current_delivery (boost::shared_ptr<ARDOUR::Delivery>);
-	boost::shared_ptr<ARDOUR::Delivery> _current_delivery;
 
 	void drop_send ();
 	PBD::ScopedConnection send_gone_connection;
 
 	void reset_strip_style ();
 
-	static int scrollbar_height;
-
 	void update_io_button (boost::shared_ptr<ARDOUR::Route> route, Width width, bool input_button);
 	void port_connected_or_disconnected (boost::weak_ptr<ARDOUR::Port>, boost::weak_ptr<ARDOUR::Port>);
+
+	bool mixer_strip_enter_event ( GdkEventCrossing * );
+	bool mixer_strip_leave_event ( GdkEventCrossing * );
 
 	/** A VisibilityGroup to manage the visibility of some of our controls.
 	 *  We fill it with the controls that are being managed, using the same names
 	 *  as those used with _mixer_strip_visibility in RCOptionEditor.  Then
 	 *  this VisibilityGroup is configured by changes to the RC variable
-	 *  mixer-strip-visibility, which happen when the user makes changes in
+	 *  mixer-element-visibility, which happen when the user makes changes in
 	 *  the RC option editor.
 	 */
 	VisibilityGroup _visibility;
 	boost::optional<bool> override_solo_visibility () const;
 
-	PBD::ScopedConnection _config_connection;
+	PBD::ScopedConnectionList _config_connection;
 
 	void add_input_port (ARDOUR::DataType);
 	void add_output_port (ARDOUR::DataType);
 
+	bool _suspend_menu_callbacks;
 	bool level_meter_button_press (GdkEventButton *);
 	void popup_level_meter_menu (GdkEventButton *);
-	void add_level_meter_item (Gtk::Menu_Helpers::MenuList &, Gtk::RadioMenuItem::Group &, std::string const &, ARDOUR::MeterPoint);
+	void add_level_meter_item_point (Gtk::Menu_Helpers::MenuList &, Gtk::RadioMenuItem::Group &, std::string const &, ARDOUR::MeterPoint);
+	void add_level_meter_item_type (Gtk::Menu_Helpers::MenuList &, Gtk::RadioMenuItem::Group &, std::string const &, ARDOUR::MeterType);
 	void set_meter_point (ARDOUR::MeterPoint);
+	void set_meter_type (ARDOUR::MeterType);
 	PBD::ScopedConnection _level_meter_connection;
 
 	std::string meter_point_string (ARDOUR::MeterPoint);

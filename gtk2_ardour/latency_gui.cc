@@ -103,9 +103,7 @@ LatencyGUI::LatencyGUI (Latent& l, framepos_t sr, framepos_t psz)
 	adjustment.signal_value_changed().connect (sigc::mem_fun (*this, &LatencyGUI::finish));
 
 	bc.set_size_request (-1, 25);
-	bc.set_style (BarController::LeftToRight);
-	bc.set_use_parent (true);
-	bc.set_name (X_("PluginSlider"));
+	bc.set_name (X_("ProcessorControlSlider"));
 
 	set_spacing (12);
 	pack_start (hbox1, true, true);
@@ -150,7 +148,7 @@ LatencyGUI::change_latency_from_button (int dir)
 	} else {
 		fatal << string_compose (_("programming error: %1 (%2)"), X_("illegal string in latency GUI units combo"), unitstr)
 		      << endmsg;
-		/*NOTREACHED*/
+		abort(); /*NOTREACHED*/
 	}
 
 	if (dir > 0) {

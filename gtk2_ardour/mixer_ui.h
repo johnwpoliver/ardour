@@ -66,7 +66,7 @@ class Mixer_UI : public Gtk::Window, public PBD::ScopedConnectionList, public AR
 
 	PluginSelector* plugin_selector();
 
-	void  set_strip_width (Width);
+	void  set_strip_width (Width, bool save = false);
 	Width get_strip_width () const { return _strip_width; }
 
 	void unselect_strip_in_display (MixerStrip*);
@@ -80,9 +80,17 @@ class Mixer_UI : public Gtk::Window, public PBD::ScopedConnectionList, public AR
 	void show_strip (MixerStrip *);
 	void hide_strip (MixerStrip *);
 
+	void maximise_mixer_space();
+	void restore_mixer_space();
+
 	void ensure_float (Gtk::Window&);
 
         MonitorSection* monitor_section() const { return _monitor_section; }
+
+	void deselect_all_strip_processors();
+	void delete_processors();
+
+	void select_none ();
 
   protected:
 	void set_route_targets_for_operation ();
@@ -250,9 +258,9 @@ class Mixer_UI : public Gtk::Window, public PBD::ScopedConnectionList, public AR
 	Width _strip_width;
 
         void sync_order_keys_from_treeview ();
-        void sync_treeview_from_order_keys (ARDOUR::RouteSortOrderKey);
+        void sync_treeview_from_order_keys ();
         void reset_remote_control_ids ();
-        void reset_order_keys (ARDOUR::RouteSortOrderKey);
+        void reset_order_keys ();
 
         bool ignore_reorder;
 
@@ -269,6 +277,7 @@ class Mixer_UI : public Gtk::Window, public PBD::ScopedConnectionList, public AR
 	    it during a session teardown.
 	*/
 	bool _in_group_rebuild_or_clear;
+        bool _route_deletion_in_progress;
 
 	void update_title ();
 	MixerStrip* strip_by_x (int x);
@@ -279,6 +288,9 @@ class Mixer_UI : public Gtk::Window, public PBD::ScopedConnectionList, public AR
 	bool _following_editor_selection;
 
 	void monitor_section_going_away ();
+
+	/// true if we are in fullscreen mode
+	bool _maximised;
 };
 
 #endif /* __ardour_mixer_ui_h__ */

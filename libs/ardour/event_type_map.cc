@@ -18,12 +18,16 @@
 
 */
 
+#include <ctype.h>
 #include <cstdio>
 #include "ardour/types.h"
 #include "ardour/event_type_map.h"
+#include "ardour/parameter_descriptor.h"
+#include "ardour/parameter_types.h"
+#include "ardour/uri_map.h"
 #include "evoral/Parameter.hpp"
+#include "evoral/ParameterDescriptor.hpp"
 #include "evoral/midi_events.h"
-#include "evoral/MIDIParameters.hpp"
 #include "pbd/error.h"
 #include "pbd/compose.h"
 
@@ -31,51 +35,37 @@ using namespace std;
 
 namespace ARDOUR {
 
-EventTypeMap EventTypeMap::event_type_map;
+EventTypeMap* EventTypeMap::event_type_map;
+
+EventTypeMap&
+EventTypeMap::instance()
+{
+	if (!EventTypeMap::event_type_map) {
+#ifdef LV2_SUPPORT
+		EventTypeMap::event_type_map = new EventTypeMap(&URIMap::instance());
+#else
+		EventTypeMap::event_type_map = new EventTypeMap(NULL);
+#endif
+	}
+	return *EventTypeMap::event_type_map;
+}
 
 bool
 EventTypeMap::type_is_midi(uint32_t type) const
 {
-	return (type >= MidiCCAutomation) && (type <= MidiChannelPressureAutomation);
-}
-
-bool
-EventTypeMap::is_midi_parameter(const Evoral::Parameter& param)
-{
-		return type_is_midi(param.type());
+	return ARDOUR::parameter_is_midi((AutomationType)type);
 }
 
 uint8_t
 EventTypeMap::parameter_midi_type(const Evoral::Parameter& param) const
 {
-	switch (param.type()) {
-	case MidiCCAutomation:              return MIDI_CMD_CONTROL; break;
-	case MidiPgmChangeAutomation:       return MIDI_CMD_PGM_CHANGE; break;
-	case MidiChannelPressureAutomation: return MIDI_CMD_CHANNEL_PRESSURE; break;
-	case MidiPitchBenderAutomation:     return MIDI_CMD_BENDER; break;
-	case MidiSystemExclusiveAutomation: return MIDI_CMD_COMMON_SYSEX; break;
-	default: return 0;
-	}
+	return ARDOUR::parameter_midi_type((AutomationType)param.type());
 }
 
 uint32_t
 EventTypeMap::midi_event_type(uint8_t status) const
 {
-	switch (status & 0xF0) {
-	case MIDI_CMD_CONTROL:          return MidiCCAutomation; break;
-	case MIDI_CMD_PGM_CHANGE:       return MidiPgmChangeAutomation; break;
-	case MIDI_CMD_CHANNEL_PRESSURE: return MidiChannelPressureAutomation; break;
-	case MIDI_CMD_BENDER:           return MidiPitchBenderAutomation; break;
-	case MIDI_CMD_COMMON_SYSEX:     return MidiSystemExclusiveAutomation; break;
-	default: return 0;
-	}
-}
-
-bool
-EventTypeMap::is_integer(const Evoral::Parameter& param) const
-{
-	return (   param.type() >= MidiCCAutomation
-			&& param.type() <= MidiChannelPressureAutomation);
+	return (uint32_t)ARDOUR::midi_parameter_type(status);
 }
 
 Evoral::ControlList::InterpolationStyle
@@ -131,62 +121,8 @@ EventTypeMap::interpolation_of(const Evoral::Parameter& param)
 	return Evoral::ControlList::Linear; // Not reached, suppress warnings
 }
 
-
 Evoral::Parameter
-EventTypeMap::new_parameter(uint32_t type, uint8_t channel, uint32_t id) const
-{
-	Evoral::Parameter p(type, channel, id);
-
-	double min    = 0.0f;
-	double max    = 1.0f;
-	double normal = 0.0f;
-
-	switch((AutomationType)type) {
-	case NullAutomation:
-	case GainAutomation:
-		max = 2.0f;
-		normal = 1.0f;
-		break;
-	case PanAzimuthAutomation:
-		normal = 0.5f; // there really is no normal but this works for stereo, sort of
-                break;
-	case PanWidthAutomation:
-                min = -1.0;
-                max = 1.0;
-		normal = 0.0f;
-                break;
-        case PanElevationAutomation:
-        case PanFrontBackAutomation:
-        case PanLFEAutomation:
-                break;
-	case RecEnableAutomation:
-		/* default 0.0 - 1.0 is fine */
-		break;
-	case PluginAutomation:
-	case SoloAutomation:
-	case MuteAutomation:
-	case FadeInAutomation:
-	case FadeOutAutomation:
-	case EnvelopeAutomation:
-		max = 2.0f;
-		normal = 1.0f;
-		break;
-	case MidiCCAutomation:
-	case MidiPgmChangeAutomation:
-	case MidiChannelPressureAutomation:
-		Evoral::MIDI::controller_range(min, max, normal); break;
-	case MidiPitchBenderAutomation:
-		Evoral::MIDI::bender_range(min, max, normal); break;
-	case MidiSystemExclusiveAutomation:
-		return p;
-	}
-
-	p.set_range(type, min, max, normal, false);
-	return p;
-}
-
-Evoral::Parameter
-EventTypeMap::new_parameter(const string& str) const
+EventTypeMap::from_symbol(const string& str) const
 {
 	AutomationType p_type    = NullAutomation;
 	uint8_t        p_channel = 0;
@@ -194,6 +130,8 @@ EventTypeMap::new_parameter(const string& str) const
 
 	if (str == "gain") {
 		p_type = GainAutomation;
+	} else if (str == "trim") {
+		p_type = TrimAutomation;
 	} else if (str == "solo") {
 		p_type = SoloAutomation;
 	} else if (str == "mute") {
@@ -217,6 +155,16 @@ EventTypeMap::new_parameter(const string& str) const
 	} else if (str.length() > 10 && str.substr(0, 10) == "parameter-") {
 		p_type = PluginAutomation;
 		p_id = atoi(str.c_str()+10);
+#ifdef LV2_SUPPORT
+	} else if (str.length() > 9 && str.substr(0, 9) == "property-") {
+		p_type = PluginPropertyAutomation;
+		const char* name = str.c_str() + 9;
+		if (isdigit(str.c_str()[0])) {
+			p_id = atoi(name);
+		} else {
+			p_id = _uri_map->uri_to_id(name);
+		}
+#endif
 	} else if (str.length() > 7 && str.substr(0, 7) == "midicc-") {
 		p_type = MidiCCAutomation;
 		uint32_t channel = 0;
@@ -248,7 +196,7 @@ EventTypeMap::new_parameter(const string& str) const
 		PBD::warning << "Unknown Parameter '" << str << "'" << endmsg;
 	}
 	
-	return new_parameter(p_type, p_channel, p_id);
+	return Evoral::Parameter(p_type, p_channel, p_id);
 }
 
 /** Unique string representation, suitable as an XML property value.
@@ -261,6 +209,8 @@ EventTypeMap::to_symbol(const Evoral::Parameter& param) const
 
 	if (t == GainAutomation) {
 		return "gain";
+	} else if (t == TrimAutomation) {
+                return "trim";
 	} else if (t == PanAzimuthAutomation) {
                 return "pan-azimuth";
 	} else if (t == PanElevationAutomation) {
@@ -283,6 +233,15 @@ EventTypeMap::to_symbol(const Evoral::Parameter& param) const
 		return "envelope";
 	} else if (t == PluginAutomation) {
 		return string_compose("parameter-%1", param.id());
+#ifdef LV2_SUPPORT
+	} else if (t == PluginPropertyAutomation) {
+		const char* uri = _uri_map->id_to_uri(param.id());
+		if (uri) {
+			return string_compose("property-%1", uri);
+		} else {
+			return string_compose("property-%1", param.id());
+		}
+#endif
 	} else if (t == MidiCCAutomation) {
 		return string_compose("midicc-%1-%2", int(param.channel()), param.id());
 	} else if (t == MidiPgmChangeAutomation) {
@@ -295,6 +254,26 @@ EventTypeMap::to_symbol(const Evoral::Parameter& param) const
 		PBD::warning << "Uninitialized Parameter symbol() called." << endmsg;
 		return "";
 	}
+}
+
+Evoral::ParameterDescriptor
+EventTypeMap::descriptor(const Evoral::Parameter& param) const
+{
+	// Found an existing (perhaps custom) descriptor
+	Descriptors::const_iterator d = _descriptors.find(param);
+	if (d != _descriptors.end()) {
+		return d->second;
+	}
+
+	// Add default descriptor and return that
+	return ARDOUR::ParameterDescriptor(param);
+}
+
+void
+EventTypeMap::set_descriptor(const Evoral::Parameter&           param,
+                             const Evoral::ParameterDescriptor& desc)
+{
+	_descriptors.insert(std::make_pair(param, desc));
 }
 
 } // namespace ARDOUR

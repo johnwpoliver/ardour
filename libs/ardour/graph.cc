@@ -19,10 +19,10 @@
 */
 #include <stdio.h>
 #include <cmath>
-#include <xmmintrin.h>
 
 #include "pbd/compose.h"
 #include "pbd/debug_rt_alloc.h"
+#include "pbd/pthread_utils.h"
 
 #include "ardour/debug.h"
 #include "ardour/graph.h"
@@ -31,8 +31,6 @@
 #include "ardour/route.h"
 #include "ardour/process_thread.h"
 #include "ardour/audioengine.h"
-
-#include <jack/thread.h>
 
 #include "i18n.h"
 
@@ -55,7 +53,7 @@ int alloc_allowed ()
 
 Graph::Graph (Session & session)
         : SessionHandleRef (session)
-        , _quit_threads (false)
+        , _threads_active (false)
 	, _execution_sem ("graph_execution", 0)
 	, _callback_start_sem ("graph_start", 0)
 	, _callback_done_sem ("graph_done", 0)
@@ -73,8 +71,12 @@ Graph::Graph (Session & session)
         _current_chain = 0;
         _pending_chain = 0;
         _setup_chain   = 1;
-        _quit_threads = false;
         _graph_empty = true;
+
+
+	ARDOUR::AudioEngine::instance()->Running.connect_same_thread (engine_connections, boost::bind (&Graph::reset_thread_list, this));
+	ARDOUR::AudioEngine::instance()->Stopped.connect_same_thread (engine_connections, boost::bind (&Graph::engine_stopped, this));
+	ARDOUR::AudioEngine::instance()->Halted.connect_same_thread (engine_connections, boost::bind (&Graph::engine_stopped, this));
 
         reset_thread_list ();
 
@@ -82,6 +84,14 @@ Graph::Graph (Session & session)
 	graph = this;
 	pbd_alloc_allowed = &::alloc_allowed;
 #endif
+}
+
+void
+Graph::engine_stopped ()
+{
+	if (AudioEngine::instance()->process_thread_count() != 0) {
+		drop_threads ();
+	}
 }
 
 /** Set up threads for running the graph */
@@ -97,30 +107,26 @@ Graph::reset_thread_list ()
            number of threads.
         */
 
-        if (_thread_list.size() == num_threads) {
+        if (AudioEngine::instance()->process_thread_count() == num_threads) {
                 return;
         }
 
         Glib::Threads::Mutex::Lock lm (_session.engine().process_lock());
-	pthread_t a_thread;
 
-        if (!_thread_list.empty()) {
+        if (AudioEngine::instance()->process_thread_count() != 0) {
                 drop_threads ();
         }
 
-	if (AudioEngine::instance()->create_process_thread (boost::bind (&Graph::main_thread, this), &a_thread, 100000) != 0) {
+	if (AudioEngine::instance()->create_process_thread (boost::bind (&Graph::main_thread, this)) != 0) {
 		throw failed_constructor ();
 	}
 
-	_thread_list.push_back (a_thread);
-
         for (uint32_t i = 1; i < num_threads; ++i) {
-		if (AudioEngine::instance()->create_process_thread (boost::bind (&Graph::helper_thread, this), &a_thread, 100000) != 0) {
+		if (AudioEngine::instance()->create_process_thread (boost::bind (&Graph::helper_thread, this))) {
 			throw failed_constructor ();
 		}
-		
-		_thread_list.push_back (a_thread);
         }
+        _threads_active = true;
 }
 
 void
@@ -139,24 +145,19 @@ Graph::session_going_away()
 void
 Graph::drop_threads ()
 {
-        _quit_threads = true;
+        _threads_active = false;
 
-        for (unsigned int i=0; i< _thread_list.size(); i++) {
+        uint32_t thread_count = AudioEngine::instance()->process_thread_count ();
+
+        for (unsigned int i=0; i < thread_count; i++) {
 		_execution_sem.signal ();
         }
 
         _callback_start_sem.signal ();
 
-        for (list<pthread_t>::iterator i = _thread_list.begin(); i != _thread_list.end(); ++i) {
-                void* status;
-                pthread_join (*i, &status);
-        }
-
-        _thread_list.clear ();
+	AudioEngine::instance()->join_process_threads ();
 
 	_execution_tokens = 0;
-
-        _quit_threads = false;
 }
 
 void
@@ -232,7 +233,7 @@ Graph::trigger (GraphNode* n)
 void
 Graph::dec_ref()
 {
-        if (g_atomic_int_dec_and_test (&_finished_refcount)) {
+        if (g_atomic_int_dec_and_test (const_cast<gint*> (&_finished_refcount))) {
 
 		/* We have run all the nodes that are at the `output' end of
 		   the graph, so there is nothing more to do this time around.
@@ -253,7 +254,7 @@ Graph::restart_cycle()
         /* Block until the a process callback triggers us */
         _callback_start_sem.wait();
 
-        if (_quit_threads) {
+        if (!_threads_active) {
                 return;
         }
 
@@ -367,7 +368,7 @@ Graph::run_one()
 	/* update the number of threads that will still be sleeping */
         _execution_tokens -= wakeup;
 
-        DEBUG_TRACE(DEBUG::ProcessThreads, string_compose ("%1 signals %2\n", pthread_self(), wakeup));
+        DEBUG_TRACE(DEBUG::ProcessThreads, string_compose ("%1 signals %2\n", pthread_name(), wakeup));
 
         for (int i = 0; i < wakeup; i++) {
                 _execution_sem.signal ();
@@ -376,12 +377,12 @@ Graph::run_one()
         while (to_run == 0) {
                 _execution_tokens += 1;
                 pthread_mutex_unlock (&_trigger_mutex);
-                DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 goes to sleep\n", pthread_self()));
+                DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 goes to sleep\n", pthread_name()));
                 _execution_sem.wait ();
-                if (_quit_threads) {
+                if (!_threads_active) {
                         return true;
                 }
-                DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 is awake\n", pthread_self()));
+                DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 is awake\n", pthread_name()));
                 pthread_mutex_lock (&_trigger_mutex);
                 if (_trigger_queue.size()) {
                         to_run = _trigger_queue.back();
@@ -393,7 +394,7 @@ Graph::run_one()
         to_run->process();
         to_run->finish (_current_chain);
 
-        DEBUG_TRACE(DEBUG::ProcessThreads, string_compose ("%1 has finished run_one()\n", pthread_self()));
+        DEBUG_TRACE(DEBUG::ProcessThreads, string_compose ("%1 has finished run_one()\n", pthread_name()));
 
         return false;
 }
@@ -431,13 +432,13 @@ Graph::main_thread()
 	
 	DEBUG_TRACE(DEBUG::ProcessThreads, "main thread is awake\n");
 
-        if (_quit_threads) {
+        if (!_threads_active) {
                 return;
         }
 
 	prep ();
 
-        if (_graph_empty && !_quit_threads) {
+        if (_graph_empty && _threads_active) {
                 _callback_done_sem.signal ();
                 DEBUG_TRACE(DEBUG::ProcessThreads, "main thread sees graph done, goes back to sleep\n");
                 goto again;
@@ -484,6 +485,8 @@ Graph::dump (int chain)
 int
 Graph::silent_process_routes (pframes_t nframes, framepos_t start_frame, framepos_t end_frame, bool& need_butler)
 {
+	if (!_threads_active) return 0;
+
         _process_nframes = nframes;
         _process_start_frame = start_frame;
         _process_end_frame = end_frame;
@@ -508,6 +511,8 @@ int
 Graph::process_routes (pframes_t nframes, framepos_t start_frame, framepos_t end_frame, int declick, bool& need_butler)
 {
 	DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("graph execution from %1 to %2 = %3\n", start_frame, end_frame, nframes));
+
+	if (!_threads_active) return 0;
 
         _process_nframes = nframes;
         _process_start_frame = start_frame;
@@ -536,6 +541,8 @@ Graph::routes_no_roll (pframes_t nframes, framepos_t start_frame, framepos_t end
 {
 	DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("no-roll graph execution from %1 to %2 = %3\n", start_frame, end_frame, nframes));
 
+	if (!_threads_active) return 0;
+
         _process_nframes = nframes;
         _process_start_frame = start_frame;
         _process_end_frame = end_frame;
@@ -561,7 +568,7 @@ Graph::process_one_route (Route* route)
 
         assert (route);
 
-        DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 runs route %2\n", pthread_self(), route->name()));
+        DEBUG_TRACE (DEBUG::ProcessThreads, string_compose ("%1 runs route %2\n", pthread_name(), route->name()));
 
         if (_process_silent) {
                 retval = route->silent_roll (_process_nframes, _process_start_frame, _process_end_frame, need_butler);
@@ -585,10 +592,5 @@ Graph::process_one_route (Route* route)
 bool
 Graph::in_process_thread () const
 {
-	for (list<pthread_t>::const_iterator i = _thread_list.begin (); i != _thread_list.end(); ++i) {
-		if (*i == pthread_self()) {
-			return true;
-		}
-	}
-	return false;
+	return AudioEngine::instance()->in_process_thread ();
 }

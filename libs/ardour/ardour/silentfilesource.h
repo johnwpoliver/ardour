@@ -25,13 +25,14 @@
 
 namespace ARDOUR {
 
-class SilentFileSource : public AudioFileSource {
+class LIBARDOUR_API SilentFileSource : public AudioFileSource {
 public:
 	int update_header (framepos_t /*when*/, struct tm&, time_t) { return 0; }
 	int flush_header () { return 0; }
 	float sample_rate () const { return _sample_rate; }
 
 	void set_length (framecnt_t len) { _length = len; }
+	void flush () {}
 
 	bool destructive() const { return false; }
 	bool can_be_analysed() const { return false; }
@@ -39,6 +40,7 @@ public:
 	bool clamped_at_unity() const { return false; }
 
 protected:
+	void close() {}
 	friend class SourceFactory;
 
 	SilentFileSource (Session& s, const XMLNode& x, framecnt_t len, float srate)
@@ -59,7 +61,7 @@ protected:
 	void set_header_timeline_position () {}
 
 	int read_peaks_with_fpp (PeakData *peaks, framecnt_t npeaks, framepos_t /*start*/, framecnt_t /*cnt*/,
-				 double /*samples_per_unit*/, framecnt_t /*fpp*/) const {
+				 double /*frames_per_pixel*/, framecnt_t /*fpp*/) const {
 		memset (peaks, 0, sizeof (PeakData) * npeaks);
 		return 0;
 	}

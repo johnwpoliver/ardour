@@ -24,9 +24,13 @@
 #include <boost/shared_ptr.hpp>
 #include <boost/enable_shared_from_this.hpp>
 
+#include "evoral/types.hpp"
 #include "pbd/controllable.h"
 #include "evoral/Control.hpp"
+
+#include "ardour/libardour_visibility.h"
 #include "ardour/automation_list.h"
+#include "ardour/parameter_descriptor.h"
 
 namespace ARDOUR {
 
@@ -36,15 +40,19 @@ class Automatable;
 
 /** A PBD::Controllable with associated automation data (AutomationList)
  */
-class AutomationControl : public PBD::Controllable, public Evoral::Control, public boost::enable_shared_from_this<AutomationControl>
+class LIBARDOUR_API AutomationControl
+	: public PBD::Controllable
+	, public Evoral::Control
+	, public boost::enable_shared_from_this<AutomationControl>
 {
 public:
 	AutomationControl(ARDOUR::Session&,
-			  const Evoral::Parameter& parameter,
-			  boost::shared_ptr<ARDOUR::AutomationList> l=boost::shared_ptr<ARDOUR::AutomationList>(),
-			  const std::string& name="");
+	                  const Evoral::Parameter&                  parameter,
+	                  const ParameterDescriptor&                desc,
+	                  boost::shared_ptr<ARDOUR::AutomationList> l=boost::shared_ptr<ARDOUR::AutomationList>(),
+	                  const std::string&                        name="");
 
-        ~AutomationControl ();
+	~AutomationControl ();
 
 	boost::shared_ptr<AutomationList> alist() const {
 		return boost::dynamic_pointer_cast<AutomationList>(_list);
@@ -53,51 +61,43 @@ public:
 	void set_list (boost::shared_ptr<Evoral::ControlList>);
 
 	inline bool automation_playback() const {
-		return alist()->automation_playback();
+		return alist() ? alist()->automation_playback() : false;
 	}
 
 	inline bool automation_write() const {
-		return alist()->automation_write();
+		return alist() ? alist()->automation_write() : false;
 	}
 
 	inline AutoState automation_state() const {
-		return alist()->automation_state();
+		return alist() ? alist()->automation_state() : Off;
 	}
 
 	inline AutoStyle automation_style() const {
-		return alist()->automation_style();
+		return alist() ? alist()->automation_style() : Absolute;
 	}
 
-        void set_automation_state(AutoState as);
-        void set_automation_style(AutoStyle as);
-        void start_touch (double when);
-        void stop_touch (bool mark, double when);
+	void set_automation_state(AutoState as);
+	void set_automation_style(AutoStyle as);
+	void start_touch(double when);
+	void stop_touch(bool mark, double when);
 
 	void set_value (double);
 	double get_value () const;
 
-	virtual double internal_to_interface (double v) const {
-		return v;
-	}
-	
-	virtual double interface_to_internal (double v) const {
-		return v;
-	}
+	double lower()   const { return _desc.lower; }
+	double upper()   const { return _desc.upper; }
+	double normal()  const { return _desc.normal; }
+	bool   toggled() const { return _desc.toggled; }
 
-	virtual double internal_to_user (double v) const {
-		return v;
-	}
-
-	double lower() const { return parameter().min(); }
-	double upper() const { return parameter().max(); }
-	double normal() const { return parameter().normal(); }
-	bool toggled() const { return parameter().toggled(); }
+	const ParameterDescriptor& desc() const { return _desc; }
 
 	const ARDOUR::Session& session() const { return _session; }
 
 protected:
 
 	ARDOUR::Session& _session;
+
+	const ParameterDescriptor _desc;
 };
 
 

@@ -43,7 +43,6 @@
 #include "route_ui.h"
 #include "enums.h"
 #include "time_axis_view.h"
-#include "canvas.h"
 #include "gain_meter.h"
 
 namespace ARDOUR {
@@ -54,6 +53,10 @@ namespace ARDOUR {
 	class Processor;
 	class Location;
 	class Playlist;
+}
+
+namespace ArdourCanvas {
+	class Rectangle;
 }
 
 class PublicEditor;
@@ -67,6 +70,7 @@ class AutomationLine;
 class ProcessorAutomationLine;
 class TimeSelection;
 class RouteGroupMenu;
+class ItemCounts;
 
 class RouteTimeAxisView : public RouteUI, public TimeAxisView
 {
@@ -79,14 +83,14 @@ public:
 	void show_selection (TimeSelection&);
 	void set_button_names ();
 
-	void set_samples_per_unit (double);
- 	void set_height (uint32_t h);
+	void set_samples_per_pixel (double);
+ 	void set_height (uint32_t h, TrackHeightMode m = OnlySelf);
 	void show_timestretch (framepos_t start, framepos_t end, int layers, int layer);
 	void hide_timestretch ();
 	void selection_click (GdkEventButton*);
 	void set_selected_points (PointSelection&);
 	void set_selected_regionviews (RegionSelection&);
-	void get_selectables (ARDOUR::framepos_t start, ARDOUR::framepos_t end, double top, double bot, std::list<Selectable *>&);
+	void get_selectables (ARDOUR::framepos_t start, ARDOUR::framepos_t end, double top, double bot, std::list<Selectable *>&, bool within = false);
 	void get_inverted_selectables (Selection&, std::list<Selectable*>&);
 	void set_layer_display (LayerDisplay d, bool apply_to_selection = false);
 	LayerDisplay layer_display () const;
@@ -96,11 +100,12 @@ public:
 
 	/* Editing operations */
 	void cut_copy_clear (Selection&, Editing::CutCopyOp);
-	bool paste (ARDOUR::framepos_t, float times, Selection&, size_t nth);
+	bool paste (ARDOUR::framepos_t, const Selection&, PasteContext& ctx);
 	RegionView* combine_regions ();
 	void uncombine_regions ();
 	void uncombine_region (RegionView*);
 	void toggle_automation_track (const Evoral::Parameter& param);
+	void fade_range (TimeSelection&);
 
 	/* The editor calls these when mapping an operation across multiple tracks */
 	void use_new_playlist (bool prompt, std::vector<boost::shared_ptr<ARDOUR::Playlist> > const &);
@@ -121,7 +126,7 @@ public:
 	virtual void create_automation_child (const Evoral::Parameter& param, bool show) = 0;
 
 	typedef std::map<Evoral::Parameter, boost::shared_ptr<AutomationTimeAxisView> > AutomationTracks;
-	AutomationTracks automation_tracks() { return _automation_tracks; }
+	const AutomationTracks& automation_tracks() const { return _automation_tracks; }
 
 	boost::shared_ptr<AutomationTimeAxisView> automation_child(Evoral::Parameter param);
 	virtual Gtk::CheckMenuItem* automation_child_menu_item (Evoral::Parameter);
@@ -204,12 +209,11 @@ protected:
 	void route_property_changed (const PBD::PropertyChange&);
 	void name_entry_changed ();
 
-	void update_rec_display ();
+	void blink_rec_display (bool onoff);
 
 	virtual void label_view ();
 
-	void reset_samples_per_unit ();
-	void horizontal_position_changed ();
+	void reset_samples_per_pixel ();
 
 	virtual void build_automation_action_menu (bool);
 	virtual void append_extra_display_menu_items () {}
@@ -235,11 +239,15 @@ protected:
 	void color_handler ();
 	void region_view_added (RegionView*);
 	void create_gain_automation_child (const Evoral::Parameter &, bool);
+	void create_trim_automation_child (const Evoral::Parameter &, bool);
+	void create_mute_automation_child (const Evoral::Parameter &, bool);
 	void setup_processor_menu_and_curves ();
 	void route_color_changed ();
         bool can_edit_name() const;
 
 	boost::shared_ptr<AutomationTimeAxisView> gain_track;
+	boost::shared_ptr<AutomationTimeAxisView> trim_track;
+	boost::shared_ptr<AutomationTimeAxisView> mute_track;
 
 	StreamView*           _view;
 	ArdourCanvas::Canvas& parent_canvas;
@@ -250,6 +258,7 @@ protected:
 	ArdourButton route_group_button;
 	ArdourButton playlist_button;
 	ArdourButton automation_button;
+	ArdourButton number_label;
 
 	Gtk::Menu           subplugin_menu;
 	Gtk::Menu*          automation_action_menu;
@@ -264,7 +273,7 @@ protected:
 
 	void use_playlist (Gtk::RadioMenuItem *item, boost::weak_ptr<ARDOUR::Playlist> wpl);
 
-	ArdourCanvas::SimpleRect* timestretch_rect;
+	ArdourCanvas::Rectangle* timestretch_rect;
 
 	void set_track_mode (ARDOUR::TrackMode, bool apply_to_selection = false);
 
@@ -297,10 +306,30 @@ protected:
 
 	bool _ignore_set_layer_display;
 
+protected:
+	void update_gain_track_visibility ();
+	void update_trim_track_visibility ();
+	void update_mute_track_visibility ();
+	void update_pan_track_visibility ();
+
+	/** Ensure that we have the appropriate automation lanes for panners.
+	 *
+	 *  @param show true to show any new views that we create, otherwise false.
+	 */
+	void ensure_pan_views (bool show = true);
+
+	Gtk::CheckMenuItem* gain_automation_item;
+	Gtk::CheckMenuItem* trim_automation_item;
+	Gtk::CheckMenuItem* mute_automation_item;
+	std::list<boost::shared_ptr<AutomationTimeAxisView> > pan_tracks;
+	Gtk::CheckMenuItem* pan_automation_item;
+
 private:
 
 	void remove_child (boost::shared_ptr<TimeAxisView>);
 	void update_playlist_tip ();
+	void parameter_changed (std::string const & p);
+	void update_track_number_visibility();
 };
 
 #endif /* __ardour_route_time_axis_h__ */

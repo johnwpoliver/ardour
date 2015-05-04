@@ -21,17 +21,9 @@
 #define __ardour_transcode_ffmpeg_h__
 
 #include <string>
+#include "ardour/system_exec.h"
 #include "ardour/types.h"
-#include "system_exec.h"
 
-/* TODO: use a namespace here ? */
-struct AudioStream {
-	std::string name;
-	std::string stream_id;
-	uint32_t channels;
-};
-typedef std::vector<AudioStream> AudioStreams;
-typedef std::map<std::string,std::string> FFSettings;
 
 /** @class TranscodeFfmpeg
  *  @brief wrapper around ffmpeg and ffprobe command-line utils
@@ -45,6 +37,15 @@ class TranscodeFfmpeg : public sigc::trackable
                       , public PBD::ScopedConnectionList
 {
 	public:
+
+	struct FFAudioStream {
+		std::string name;
+		std::string stream_id;
+		uint32_t channels;
+	};
+	typedef std::vector<FFAudioStream> FFAudioStreams;
+	typedef std::map<std::string,std::string> FFSettings;
+
 
 		/** instantiate a new transcoder. If a file-name is given, the file's
 		 * attributes (fps, duration, geometry etc) are read.
@@ -110,7 +111,7 @@ class TranscodeFfmpeg : public sigc::trackable
 		ARDOUR::framecnt_t get_duration() { return m_duration; }
 		std::string  get_codec() { return m_codec; }
 
-		AudioStreams get_audio() { return m_audio; }
+		FFAudioStreams get_audio() { return m_audio; }
 
 		/** override file duration used with the \ref Progress signal.
 		 * @param d duration in video-frames = length_in_seconds * get_fps()
@@ -121,18 +122,20 @@ class TranscodeFfmpeg : public sigc::trackable
 		void set_avoffset(double av_offset) { m_avoffset = av_offset; }
 		void set_leadinout(double lead_in, double lead_out) { m_lead_in = lead_in; m_lead_out = lead_out; }
 
+		void set_fps(double fps) { m_fps = fps; } // on export, used for rounding only.
 
 #if 1 /* tentative debug mode */
 		void   set_debug (bool onoff) { debug_enable = onoff; }
 #endif
 	protected:
 		std::string infile;
-		SystemExec  *ffcmd;
+		ARDOUR::SystemExec  *ffcmd;
 
 		bool probe ();
 
 		double m_fps;
 		double m_aspect;
+		std::string m_sar;
 		ARDOUR::framecnt_t m_duration;
 		int m_width;
 		int m_height;
@@ -145,7 +148,7 @@ class TranscodeFfmpeg : public sigc::trackable
 		bool ffexecok;
 		bool probeok;
 
-		AudioStreams m_audio;
+		FFAudioStreams m_audio;
 
 		char *format_metadata (std::string, std::string);
 		void ffmpegparse_v (std::string d, size_t s);

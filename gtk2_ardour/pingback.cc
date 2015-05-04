@@ -23,7 +23,10 @@
 #include <fstream>
 #include <cstring>
 
+#ifndef PLATFORM_WINDOWS
 #include <sys/utsname.h>
+#endif
+
 #include <curl/curl.h>
 
 #include <glibmm/miscutils.h>
@@ -39,6 +42,7 @@
 using std::string;
 using namespace ARDOUR;
 
+#ifndef PLATFORM_WINDOWS // no pingback for windows, so far
 static size_t
 curl_write_data (char *bufptr, size_t size, size_t nitems, void *ptr)
 {
@@ -58,6 +62,7 @@ curl_write_data (char *bufptr, size_t size, size_t nitems, void *ptr)
 
         return size * nitems;
 }
+#endif
 
 struct ping_call {
     std::string version;
@@ -70,6 +75,7 @@ struct ping_call {
 static void*
 _pingback (void *arg)
 {
+#ifndef PLATFORM_WINDOWS
 	ping_call* cm = static_cast<ping_call*> (arg);
 	CURL* c;
 	struct utsname utb;
@@ -157,6 +163,8 @@ _pingback (void *arg)
 
 	curl_easy_cleanup (c);
 	delete cm;
+
+#endif /* PLATFORM_WINDOWS */
 
 	return 0;
 }

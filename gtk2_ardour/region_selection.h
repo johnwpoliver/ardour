@@ -61,7 +61,10 @@ class RegionSelection : public std::list<RegionView*>
 	void  by_position (std::list<RegionView*>&) const;
 	void  by_track (std::list<RegionView*>&) const;
 
+	size_t n_midi_regions() const;
+
 	std::set<boost::shared_ptr<ARDOUR::Playlist> > playlists () const;
+	std::list<PBD::ID> pending;
 
   private:
 	void remove_it (RegionView*);
